@@ -1,0 +1,174 @@
+# docker-compose.test.yml
+#
+# Full self-contained test stack. Extends the production stack with:
+#   - vault-setup: one-shot account creation (no manual web UI steps)
+#   - vault-seeder: seeds test credentials (runs after vault-setup)
+#   - mock-api: captures forwarded requests so tests can inspect them
+#
+# Usage:
+#   # First run (fresh environment):
+#   scripts/dev-setup.sh
+#
+#   # Subsequent runs (data already exists):
+#   docker compose -f docker-compose.test.yml up -d
+#
+#   # Run integration tests:
+#   cargo test --test integration
+#
+# All test credentials and passwords are intentionally weak/fake.
+# This compose file must NEVER be used in production.
+
+services:
+
+  # ── Vaultwarden (test override) ──────────────────────────────────────────────
+  # Allow signups during the initial setup run. The dev-setup script disables
+  # this after account creation.
+  vaultwarden:
+    image: vaultwarden/server:latest
+    restart: unless-stopped
+    volumes:
+      - vaultwarden-test-data:/data
+    environment:
+      DOMAIN: "http://vaultwarden:80"
+      SIGNUPS_ALLOWED: "${VAULTWARDEN_SIGNUPS_ALLOWED:-false}"
+    networks:
+      - vault-internal
+
+  # ── bw serve ────────────────────────────────────────────────────────────────
+  bw-serve:
+    image: bitwarden/cli:latest
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    volumes:
+      - ./docker/bw-entrypoint.sh:/entrypoint.sh:ro
+      - bw-test-data:/home/user/.config/Bitwarden CLI
+    secrets:
+      - bw_client_id
+      - bw_client_secret
+    environment:
+      BW_SERVER_URL: "http://vaultwarden:80"
+      BW_SERVE_HOSTNAME: "0.0.0.0"
+      BW_SERVE_PORT: "8087"
+    networks:
+      - vault-internal
+    depends_on:
+      - vaultwarden
+
+  # ── Ferrowarden ─────────────────────────────────────────────────────────────
+  ferrowarden:
+    build: .
+    restart: unless-stopped
+    secrets:
+      - ferrowarden_admin_key
+      - bw_master_password
+    environment:
+      FERROWARDEN_UNLOCK_MODE: "file"
+      FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
+      FERROWARDEN_BW_SERVE_URL: "http://bw-serve:8087"
+      FERROWARDEN_BIND_ADDR: "0.0.0.0:3000"
+      FERROWARDEN_ADMIN_KEY_FILE: "/run/secrets/ferrowarden_admin_key"
+    networks:
+      - vault-internal
+      - test-net
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - bw-serve
+
+  # ── Mock API ─────────────────────────────────────────────────────────────────
+  # Accepts any HTTP request, logs the full details (method, path, headers,
+  # body), and exposes a query endpoint so integration tests can verify exactly
+  # what Ferrowarden forwarded.
+  #
+  # Why this matters:
+  #   The core security claim of Ferrowarden is that credential values are
+  #   substituted before the outbound request and never reach the agent. This
+  #   server is the observer that proves or disproves that claim in tests.
+  #
+  # Endpoints:
+  #   GET  /__requests__       — all captured requests
+  #   GET  /__requests__/last  — most recent request
+  #   POST /__reset__          — clear the log (call between tests)
+  #   GET  /__health__         — liveness check
+  mock-api:
+    build:
+      context: ./tests/mock-api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      MOCK_API_PORT: "7777"
+    networks:
+      - vault-internal  # Ferrowarden forwards to it on the internal network
+      - test-net        # Tests query its log from the host
+    ports:
+      - "127.0.0.1:7777:7777"
+
+  # ── Vault Setup (one-shot) ───────────────────────────────────────────────────
+  # Registers the Vaultwarden account and creates an API key. Only needed on
+  # the very first run (or after wiping test data). Idempotent: if the account
+  # already exists, it re-derives the API key from the existing account.
+  #
+  # Run manually: docker compose -f docker-compose.test.yml run --rm vault-setup
+  vault-setup:
+    profiles: ["setup"]
+    image: bitwarden/cli:latest
+    entrypoint: ["/bin/sh", "/setup-entrypoint.sh"]
+    volumes:
+      - ./docker/setup-entrypoint.sh:/setup-entrypoint.sh:ro
+      - ./secrets:/secrets
+    environment:
+      BW_SERVER_URL: "http://vaultwarden:80"
+      SETUP_EMAIL: "${SETUP_EMAIL:-admin@ferrowarden.test}"
+      SETUP_MASTER_PASSWORD: "${SETUP_MASTER_PASSWORD:-ferrowarden-test-master-pw}"
+      SECRETS_DIR: "/secrets"
+    networks:
+      - vault-internal
+    depends_on:
+      - vaultwarden
+    restart: "no"
+
+  # ── Vault Seeder (one-shot) ──────────────────────────────────────────────────
+  # Seeds test credentials into Vaultwarden. Idempotent — skips existing names.
+  # Run after vault-setup on first run, or whenever credentials.json changes.
+  #
+  # Run manually: docker compose -f docker-compose.test.yml run --rm vault-seeder
+  vault-seeder:
+    profiles: ["setup"]
+    image: bitwarden/cli:latest
+    entrypoint: ["/bin/sh", "/seed-entrypoint.sh"]
+    volumes:
+      - ./docker/seed-entrypoint.sh:/seed-entrypoint.sh:ro
+      - ./tests/seed/credentials.json:/seed/credentials.json:ro
+    secrets:
+      - bw_client_id
+      - bw_client_secret
+      - bw_master_password
+    environment:
+      BW_SERVER_URL: "http://vaultwarden:80"
+    networks:
+      - vault-internal
+    depends_on:
+      - vaultwarden
+    restart: "no"
+
+
+networks:
+  vault-internal:
+    driver: bridge
+    internal: true
+  test-net:
+    driver: bridge
+
+volumes:
+  vaultwarden-test-data:
+  bw-test-data:
+
+secrets:
+  bw_client_id:
+    file: ./secrets/bw_client_id
+  bw_client_secret:
+    file: ./secrets/bw_client_secret
+  bw_master_password:
+    file: ./secrets/bw_master_password
+  ferrowarden_admin_key:
+    file: ./secrets/ferrowarden_admin_key

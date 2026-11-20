@@ -14,6 +14,9 @@ unlock.key
 secrets/*
 !secrets/README.md
 
+# Generated test config (contains keys for the test environment)
+.env.test
+
 # OS
 .DS_Store
 Thumbs.db
