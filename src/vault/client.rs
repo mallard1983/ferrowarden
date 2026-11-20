@@ -52,11 +52,7 @@ impl VaultClient {
     pub async fn list_item_names(&self) -> FerroResult<Vec<String>> {
         let url = format!("{}/list/object/items", self.base_url);
 
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await?;
+        let resp = self.client.get(&url).send().await?;
 
         if resp.status() == reqwest::StatusCode::BAD_REQUEST {
             return Err(FerroError::VaultLocked);
@@ -68,7 +64,9 @@ impl VaultClient {
             .map_err(|e| FerroError::Internal(e.to_string()))?;
 
         if !body.success {
-            let msg = body.message.unwrap_or_else(|| "unknown vault error".to_string());
+            let msg = body
+                .message
+                .unwrap_or_else(|| "unknown vault error".to_string());
             // A "vault is locked" message from bw serve maps to VaultLocked
             if msg.to_lowercase().contains("locked") {
                 return Err(FerroError::VaultLocked);
@@ -88,13 +86,13 @@ impl VaultClient {
     /// Returns a Zeroizing<String> so the caller's binding wipes the value
     /// from memory when it goes out of scope.
     pub async fn get_password(&self, name: &str) -> FerroResult<Zeroizing<String>> {
-        let url = format!("{}/object/password/{}", self.base_url, urlencoding::encode(name));
+        let url = format!(
+            "{}/object/password/{}",
+            self.base_url,
+            urlencoding::encode(name)
+        );
 
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await?;
+        let resp = self.client.get(&url).send().await?;
 
         if resp.status() == reqwest::StatusCode::BAD_REQUEST {
             return Err(FerroError::VaultLocked);
@@ -110,7 +108,9 @@ impl VaultClient {
             .map_err(|e| FerroError::Internal(e.to_string()))?;
 
         if !body.success {
-            let msg = body.message.unwrap_or_else(|| "unknown vault error".to_string());
+            let msg = body
+                .message
+                .unwrap_or_else(|| "unknown vault error".to_string());
             if msg.to_lowercase().contains("locked") {
                 return Err(FerroError::VaultLocked);
             }

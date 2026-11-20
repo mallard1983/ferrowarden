@@ -51,9 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
         tracing::info!("Vault unlocked via file mode");
     } else {
-        tracing::info!(
-            "Manual unlock mode: POST /v1/unlock with admin key to unlock the vault"
-        );
+        tracing::info!("Manual unlock mode: POST /v1/unlock with admin key to unlock the vault");
     }
 
     let router = api::router(state);

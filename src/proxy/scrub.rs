@@ -6,7 +6,10 @@ use regex::Regex;
 /// preferable to false negatives (leaking real credentials).
 static SCRUB_PATTERNS: &[(&str, &str)] = &[
     // Generic Bearer tokens in JSON values or headers
-    (r#"(?i)(bearer\s+)[A-Za-z0-9\-_\.~\+/]+=*"#, "${1}[REDACTED]"),
+    (
+        r#"(?i)(bearer\s+)[A-Za-z0-9\-_\.~\+/]+=*"#,
+        "${1}[REDACTED]",
+    ),
     // Generic API key patterns in JSON (key/token/secret/password fields)
     (
         r#"(?i)("(?:api_?key|api_?token|secret|password|passwd|access_token|auth_token|private_key)"\s*:\s*")[^"]{8,}""#,

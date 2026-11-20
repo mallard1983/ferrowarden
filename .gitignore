@@ -1,1 +1,14 @@
 /target
+
+# Config files with secrets — never commit these
+ferrowarden.toml
+.env
+*.env
+
+# Master password file
+unlock_password
+unlock.key
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,50 @@
+# ferrowarden.toml.example
+#
+# Copy this file to ferrowarden.toml and edit for your deployment.
+# DO NOT check a filled-in ferrowarden.toml into version control —
+# the .gitignore already excludes it.
+#
+# NEVER set admin_key here. It must come from the environment variable
+# FERROWARDEN_ADMIN_KEY. This is enforced at startup; ferrowarden will
+# refuse to start if the key is absent or fewer than 32 characters.
+#
+# All settings can also be set via environment variable using the
+# FERROWARDEN_ prefix. Environment variables override file values.
+# Example: FERROWARDEN_BIND_ADDR=0.0.0.0:3000
+
+
+# ── Server ──────────────────────────────────────────────────────────────────
+
+# Address and port the ferrowarden HTTP server listens on.
+# When running in Docker with the agent on the same host: 0.0.0.0:3000
+# When running directly on a host (not Docker): 127.0.0.1:3000
+# Never expose this port to the public internet.
+bind_addr = "0.0.0.0:3000"
+
+
+# ── Vault ────────────────────────────────────────────────────────────────────
+
+# URL of the bw serve process.
+# bw serve must only be reachable from ferrowarden — never expose its port
+# externally. In Docker Compose this is the service name. On a bare host
+# it must be 127.0.0.1 (localhost).
+bw_serve_url = "http://127.0.0.1:8087"
+
+# How the vault master password is supplied at startup.
+# "file"   — ferrowarden reads the password from unlock_file once at boot,
+#            calls bw serve's POST /unlock, then zeros the value from memory.
+#            Use this in Docker with a Docker secret or a chmod 400 bind mount.
+# "manual" — ferrowarden starts locked. The operator POSTs the master password
+#            to POST /v1/unlock (admin auth required) after each restart.
+#            Appropriate when you want explicit human confirmation per boot.
+unlock_mode = "file"
+
+# Path to the master password file. Required when unlock_mode = "file".
+# Ignored when unlock_mode = "manual".
+#
+# Docker secret:   /run/secrets/bw_master_password
+# Bind mount:      /etc/ferrowarden/unlock.key  (chmod 400, owned by the process user)
+#
+# The file must contain only the master password. A single trailing newline
+# is tolerated and stripped; all other content is treated as part of the password.
+unlock_file = "/run/secrets/bw_master_password"

@@ -1,0 +1,143 @@
+# docker-compose.yml
+#
+# Ferrowarden stack: Vaultwarden (storage) + bw serve (vault API) + Ferrowarden (proxy)
+#
+# BEFORE FIRST RUN:
+#   1. Create the secrets files listed in the secrets section below.
+#   2. Start Vaultwarden alone and register your account via its web UI.
+#   3. Create an API key in Vaultwarden (Account Settings → API Key).
+#      Write the client_id and client_secret to the secret files.
+#   4. Run bw-serve once interactively to log in and verify connectivity.
+#   5. Bring up the full stack: docker compose up -d
+#
+# See docs/setup.md for the complete step-by-step guide.
+
+services:
+
+  # ── Vaultwarden ─────────────────────────────────────────────────────────────
+  # Self-hosted Bitwarden-compatible server. Handles encrypted credential
+  # storage and the human-facing web vault UI for managing credentials.
+  # Ferrowarden itself never talks directly to Vaultwarden — only bw serve does.
+  vaultwarden:
+    image: vaultwarden/server:latest
+    restart: unless-stopped
+    volumes:
+      - vaultwarden-data:/data
+    environment:
+      # Set this to the URL you use to reach Vaultwarden in a browser.
+      # Required for email verification links to work.
+      DOMAIN: "http://vaultwarden:80"
+      # Disable signups once your account is created. Anyone with network
+      # access to the Vaultwarden port could otherwise register an account.
+      SIGNUPS_ALLOWED: "false"
+      # Keep Vaultwarden on the internal network only. The web UI is for
+      # the operator, not for end users or agents.
+    networks:
+      - vault-internal
+    # Do NOT expose Vaultwarden's port to the host unless you need the web UI
+    # from outside Docker. Use `docker compose exec` or a local reverse proxy.
+    # ports:
+    #   - "127.0.0.1:8080:80"
+
+  # ── bw serve ────────────────────────────────────────────────────────────────
+  # The Bitwarden CLI running in server mode. Provides a local REST API that
+  # ferrowarden uses to list credentials and retrieve values.
+  #
+  # Why bw serve instead of direct Vaultwarden API calls?
+  # Vaultwarden's vault items are end-to-end encrypted with the master password.
+  # bw serve handles the decryption locally — no raw credential values ever
+  # leave the host in encrypted or unencrypted form over the network.
+  bw-serve:
+    image: bitwarden/cli:latest
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    volumes:
+      - ./docker/bw-entrypoint.sh:/entrypoint.sh:ro
+      - bw-data:/home/user/.config/Bitwarden CLI
+    secrets:
+      - bw_client_id
+      - bw_client_secret
+    environment:
+      # URL of the Vaultwarden instance on the internal network
+      BW_SERVER_URL: "http://vaultwarden:80"
+      # bw serve listens on all interfaces inside the container.
+      # The vault-internal network isolates it from external access.
+      BW_SERVE_HOSTNAME: "0.0.0.0"
+      BW_SERVE_PORT: "8087"
+    networks:
+      - vault-internal
+    depends_on:
+      - vaultwarden
+    # bw serve port is intentionally NOT exposed to the host.
+    # Only ferrowarden (on vault-internal) can reach it.
+
+  # ── Ferrowarden ─────────────────────────────────────────────────────────────
+  # The credential proxy. Agents send API calls here with {{vault:name}}
+  # placeholders; ferrowarden substitutes real values, forwards the call,
+  # and returns the scrubbed response. Credential values never reach the agent.
+  ferrowarden:
+    build: .
+    restart: unless-stopped
+    secrets:
+      - ferrowarden_admin_key
+      - bw_master_password
+    environment:
+      FERROWARDEN_UNLOCK_MODE: "file"
+      FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
+      FERROWARDEN_BW_SERVE_URL: "http://bw-serve:8087"
+      FERROWARDEN_BIND_ADDR: "0.0.0.0:3000"
+      # Admin key from Docker secret — read by the entrypoint or directly
+      # by the FERROWARDEN_ADMIN_KEY env var. See Dockerfile for how to
+      # read Docker secrets into env vars at startup.
+      FERROWARDEN_ADMIN_KEY_FILE: "/run/secrets/ferrowarden_admin_key"
+    networks:
+      - vault-internal
+      - agent-facing
+    ports:
+      # Expose only to localhost. The agent connects here.
+      # Change to 0.0.0.0:3000 only if the agent runs on a different host,
+      # and place a TLS-terminating reverse proxy in front.
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - bw-serve
+
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  # Internal network for vault communication. Vaultwarden, bw-serve, and
+  # ferrowarden can reach each other here. Nothing external can.
+  vault-internal:
+    driver: bridge
+    internal: true
+
+  # Network ferrowarden uses to accept agent connections.
+  # Not internal — ferrowarden needs to forward outbound API calls.
+  agent-facing:
+    driver: bridge
+
+
+# ── Volumes ──────────────────────────────────────────────────────────────────
+volumes:
+  vaultwarden-data:
+  bw-data:
+
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# Create these files before running docker compose up.
+# Each file contains only the secret value (one line, no trailing newline needed).
+# chmod 600 on each file; they should not be world-readable.
+#
+#   echo -n "your-vaultwarden-client-id"       > secrets/bw_client_id
+#   echo -n "your-vaultwarden-client-secret"   > secrets/bw_client_secret
+#   echo -n "your-vault-master-password"       > secrets/bw_master_password
+#   openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48 > secrets/ferrowarden_admin_key
+#   chmod 600 secrets/*
+secrets:
+  bw_client_id:
+    file: ./secrets/bw_client_id
+  bw_client_secret:
+    file: ./secrets/bw_client_secret
+  bw_master_password:
+    file: ./secrets/bw_master_password
+  ferrowarden_admin_key:
+    file: ./secrets/ferrowarden_admin_key

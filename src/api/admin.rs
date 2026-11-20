@@ -1,4 +1,8 @@
-use axum::{extract::{Path, State}, http::HeaderMap, Json};
+use axum::{
+    extract::{Path, State},
+    http::HeaderMap,
+    Json,
+};
 use chrono::Utc;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
