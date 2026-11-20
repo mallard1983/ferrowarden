@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use regex::Regex;
+use std::collections::HashSet;
 use zeroize::Zeroizing;
 
 use crate::error::{FerroError, FerroResult};
@@ -11,8 +11,7 @@ const PLACEHOLDER_PATTERN: &str = r"\{\{vault:([a-zA-Z0-9_\-\.]+)\}\}";
 
 /// Extract all unique credential names referenced by placeholders in a string.
 pub fn extract_placeholder_names(input: &str) -> FerroResult<HashSet<String>> {
-    let re = Regex::new(PLACEHOLDER_PATTERN)
-        .map_err(|e| FerroError::Internal(e.to_string()))?;
+    let re = Regex::new(PLACEHOLDER_PATTERN).map_err(|e| FerroError::Internal(e.to_string()))?;
 
     let names = re
         .captures_iter(input)
@@ -35,8 +34,7 @@ pub async fn substitute(
     vault: &VaultClient,
     known_names: &[String],
 ) -> FerroResult<Zeroizing<String>> {
-    let re = Regex::new(PLACEHOLDER_PATTERN)
-        .map_err(|e| FerroError::Internal(e.to_string()))?;
+    let re = Regex::new(PLACEHOLDER_PATTERN).map_err(|e| FerroError::Internal(e.to_string()))?;
 
     // Collect unique names first to avoid fetching the same credential twice
     let names = extract_placeholder_names(input)?;
@@ -93,7 +91,8 @@ mod tests {
 
     #[test]
     fn test_extract_names() {
-        let input = r#"{"Authorization": "Bearer {{vault:proxmox_token}}", "X-Key": "{{vault:nas_key}}"}"#;
+        let input =
+            r#"{"Authorization": "Bearer {{vault:proxmox_token}}", "X-Key": "{{vault:nas_key}}"}"#;
         let names = extract_placeholder_names(input).unwrap();
         assert!(names.contains("proxmox_token"));
         assert!(names.contains("nas_key"));
@@ -114,5 +113,26 @@ mod tests {
         // HashSet deduplicates
         assert_eq!(names.len(), 1);
         assert!(names.contains("token"));
+    }
+
+    #[tokio::test]
+    async fn test_substitute_unknown_placeholder_fails_fast() {
+        // substitute must reject unknown names before making any vault calls
+        let vault = VaultClient::new("http://127.0.0.1:1".to_string()); // unreachable
+        let known: Vec<String> = vec!["known_cred".to_string()];
+        let input = "Bearer {{vault:unknown_cred}}";
+
+        let err = substitute(input, &vault, &known).await.unwrap_err();
+        assert!(matches!(err, crate::error::FerroError::UnknownPlaceholder(_)));
+    }
+
+    #[tokio::test]
+    async fn test_substitute_no_placeholders_returns_input() {
+        let vault = VaultClient::new("http://127.0.0.1:1".to_string());
+        let known: Vec<String> = vec![];
+        let input = "no placeholders here";
+
+        let result = substitute(input, &vault, &known).await.unwrap();
+        assert_eq!(result.as_str(), input);
     }
 }

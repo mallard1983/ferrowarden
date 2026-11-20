@@ -92,12 +92,21 @@ pub async fn forward_request(
             let n = name.as_str().to_lowercase();
             !matches!(
                 n.as_str(),
-                "transfer-encoding" | "connection" | "keep-alive" | "proxy-authenticate"
-                    | "proxy-authorization" | "te" | "trailer" | "upgrade"
+                "transfer-encoding"
+                    | "connection"
+                    | "keep-alive"
+                    | "proxy-authenticate"
+                    | "proxy-authorization"
+                    | "te"
+                    | "trailer"
+                    | "upgrade"
             )
         })
         .filter_map(|(name, value)| {
-            value.to_str().ok().map(|v| (name.to_string(), v.to_string()))
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.to_string(), v.to_string()))
         })
         .collect();
 
@@ -114,4 +123,50 @@ pub async fn forward_request(
         headers: resp_headers,
         body: scrubbed_body,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_file_scheme() {
+        let err = forward_request("GET", "file:///etc/passwd", HashMap::new(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FerroError::InvalidTargetUrl(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_data_scheme() {
+        let err = forward_request("GET", "data:text/plain,hello", HashMap::new(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FerroError::InvalidTargetUrl(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_method() {
+        let err = forward_request("BAD METHOD", "http://localhost/", HashMap::new(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FerroError::InvalidTargetUrl(_)));
+    }
+
+    #[tokio::test]
+    async fn accepts_http_scheme() {
+        // Will fail at the network level (connection refused) — not an InvalidTargetUrl
+        let err = forward_request("GET", "http://127.0.0.1:1/", HashMap::new(), None)
+            .await
+            .unwrap_err();
+        assert!(!matches!(err, FerroError::InvalidTargetUrl(_)));
+    }
+
+    #[tokio::test]
+    async fn accepts_https_scheme() {
+        let err = forward_request("GET", "https://127.0.0.1:1/", HashMap::new(), None)
+            .await
+            .unwrap_err();
+        assert!(!matches!(err, FerroError::InvalidTargetUrl(_)));
+    }
 }

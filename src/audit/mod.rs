@@ -82,12 +82,77 @@ impl AuditLog {
     /// Return up to `limit` most recent entries, newest first.
     pub async fn recent(&self, limit: usize) -> Vec<AuditEntry> {
         let entries = self.entries.read().await;
-        entries
-            .iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect()
+        entries.iter().rev().take(limit).cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(method: &str) -> AuditEntry {
+        build_entry("agent-1", "test", method, "http://target/api", vec![], Outcome::Success, Some(200))
+    }
+
+    #[tokio::test]
+    async fn record_and_recent_roundtrip() {
+        let log = AuditLog::new(10);
+        log.record(entry("GET")).await;
+        let recent = log.recent(10).await;
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].method, "GET");
+    }
+
+    #[tokio::test]
+    async fn recent_returns_newest_first() {
+        let log = AuditLog::new(10);
+        log.record(entry("GET")).await;
+        log.record(entry("POST")).await;
+        log.record(entry("DELETE")).await;
+
+        let recent = log.recent(10).await;
+        assert_eq!(recent[0].method, "DELETE");
+        assert_eq!(recent[1].method, "POST");
+        assert_eq!(recent[2].method, "GET");
+    }
+
+    #[tokio::test]
+    async fn recent_respects_limit() {
+        let log = AuditLog::new(10);
+        for _ in 0..5 {
+            log.record(entry("GET")).await;
+        }
+        assert_eq!(log.recent(3).await.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn capacity_drops_oldest_entry() {
+        let log = AuditLog::new(3);
+        log.record(entry("FIRST")).await;
+        log.record(entry("SECOND")).await;
+        log.record(entry("THIRD")).await;
+        log.record(entry("FOURTH")).await; // should evict FIRST
+
+        let recent = log.recent(10).await;
+        assert_eq!(recent.len(), 3);
+        // Newest first: FOURTH, THIRD, SECOND
+        assert_eq!(recent[0].method, "FOURTH");
+        assert_eq!(recent[2].method, "SECOND");
+        // FIRST was evicted
+        assert!(!recent.iter().any(|e| e.method == "FIRST"));
+    }
+
+    #[test]
+    fn build_entry_populates_fields() {
+        let e = build_entry(
+            "id-1", "agent", "PUT", "http://host/path",
+            vec!["cred_a".to_string()], Outcome::ForwardFailed, None,
+        );
+        assert_eq!(e.agent_id, "id-1");
+        assert_eq!(e.method, "PUT");
+        assert_eq!(e.credential_names, vec!["cred_a"]);
+        assert!(matches!(e.outcome, Outcome::ForwardFailed));
+        assert!(e.response_status.is_none());
     }
 }
 

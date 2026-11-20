@@ -75,12 +75,111 @@ impl AppState {
     /// Uses a constant-time comparison to prevent timing attacks.
     pub async fn authenticate(&self, token: &str) -> Option<AgentKey> {
         let keys = self.agent_keys.read().await;
-        keys.values().find(|k| constant_time_eq(k.token.as_str(), token)).cloned()
+        keys.values()
+            .find(|k| constant_time_eq(k.token.as_str(), token))
+            .cloned()
     }
 
     /// Validate the admin key. Uses constant-time comparison.
     pub fn authenticate_admin(&self, token: &str) -> bool {
         constant_time_eq(self.config.admin_key.as_str(), token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::AuditLog;
+    use crate::config::{Config, UnlockMode};
+
+    fn test_config() -> Config {
+        Config {
+            bind_addr: "127.0.0.1:3000".to_string(),
+            bw_serve_url: "http://127.0.0.1:8087".to_string(),
+            unlock_mode: UnlockMode::Manual,
+            unlock_file: None,
+            admin_key: "a".repeat(32),
+        }
+    }
+
+    fn test_state() -> AppState {
+        AppState::new_with_audit(test_config(), Arc::new(AuditLog::new(10)))
+    }
+
+    #[tokio::test]
+    async fn lock_state_starts_locked() {
+        let state = test_state();
+        assert!(state.is_locked().await);
+    }
+
+    #[tokio::test]
+    async fn set_unlocked_clears_lock() {
+        let state = test_state();
+        state.set_unlocked().await;
+        assert!(!state.is_locked().await);
+    }
+
+    #[tokio::test]
+    async fn set_locked_restores_lock() {
+        let state = test_state();
+        state.set_unlocked().await;
+        state.set_locked().await;
+        assert!(state.is_locked().await);
+    }
+
+    #[tokio::test]
+    async fn authenticate_admin_accepts_correct_key() {
+        let state = test_state();
+        assert!(state.authenticate_admin(&"a".repeat(32)));
+    }
+
+    #[tokio::test]
+    async fn authenticate_admin_rejects_wrong_key() {
+        let state = test_state();
+        assert!(!state.authenticate_admin("wrong_key"));
+    }
+
+    #[tokio::test]
+    async fn authenticate_admin_rejects_prefix_match() {
+        // Constant-time comparison must not accept a prefix of the real key
+        let state = test_state();
+        assert!(!state.authenticate_admin(&"a".repeat(16)));
+    }
+
+    #[tokio::test]
+    async fn authenticate_returns_none_on_empty_keyring() {
+        let state = test_state();
+        assert!(state.authenticate("any_token").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn authenticate_finds_inserted_key() {
+        let state = test_state();
+        let key = AgentKey {
+            id: "test-id".to_string(),
+            name: "test-agent".to_string(),
+            token: Zeroizing::new("secret_token_value_xyz".to_string()),
+            created_at: chrono::Utc::now(),
+        };
+        state.agent_keys.write().await.insert(key.token.clone().to_string(), key);
+
+        let found = state.authenticate("secret_token_value_xyz").await;
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "test-agent");
+    }
+
+    #[tokio::test]
+    async fn authenticate_rejects_wrong_token() {
+        let state = test_state();
+        let key = AgentKey {
+            id: "test-id".to_string(),
+            name: "test-agent".to_string(),
+            token: Zeroizing::new("correct_token".to_string()),
+            created_at: chrono::Utc::now(),
+        };
+        state.agent_keys.write().await.insert(key.token.clone().to_string(), key);
+
+        assert!(state.authenticate("wrong_token").await.is_none());
     }
 }
 
@@ -96,6 +195,9 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 
     // XOR each byte pair and OR the results — any mismatch sets a bit.
     // This runs in constant time for equal-length inputs.
-    let result = a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    let result = a
+        .iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y));
     result == 0
 }

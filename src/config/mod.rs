@@ -98,3 +98,52 @@ impl Config {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_config(mode: UnlockMode) -> Config {
+        Config {
+            bind_addr: "127.0.0.1:3000".to_string(),
+            bw_serve_url: "http://127.0.0.1:8087".to_string(),
+            unlock_mode: mode,
+            unlock_file: None,
+            admin_key: "a".repeat(32),
+        }
+    }
+
+    #[test]
+    fn valid_manual_mode_passes() {
+        assert!(base_config(UnlockMode::Manual).validate().is_ok());
+    }
+
+    #[test]
+    fn valid_file_mode_passes() {
+        let mut cfg = base_config(UnlockMode::File);
+        cfg.unlock_file = Some(PathBuf::from("/run/secrets/bw_password"));
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn file_mode_without_unlock_file_fails() {
+        let cfg = base_config(UnlockMode::File);
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("unlock_file"));
+    }
+
+    #[test]
+    fn short_admin_key_fails() {
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.admin_key = "short".to_string();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("32 characters"));
+    }
+
+    #[test]
+    fn exactly_32_char_admin_key_passes() {
+        let cfg = base_config(UnlockMode::Manual);
+        assert_eq!(cfg.admin_key.len(), 32);
+        assert!(cfg.validate().is_ok());
+    }
+}
