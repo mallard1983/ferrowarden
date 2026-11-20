@@ -4,11 +4,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
-use crate::audit::{build_entry, Outcome};
 use crate::api::credentials::authenticate_agent;
+use crate::audit::{build_entry, Outcome};
 use crate::error::{FerroError, FerroResult};
-use crate::proxy::{extract_placeholder_names, forward_request, substitute};
 use crate::proxy::forward::{ProxyRequest, ZeroizingHeaders};
+use crate::proxy::{extract_placeholder_names, forward_request, substitute};
 use crate::state::AppState;
 use crate::vault::VaultClient;
 
@@ -32,15 +32,18 @@ pub async fn forward(
     let agent = authenticate_agent(&state, &headers).await?;
 
     if state.is_locked().await {
-        state.audit.record(build_entry(
-            &agent.id,
-            &agent.name,
-            &payload.request.method,
-            &payload.request.url,
-            vec![],
-            Outcome::VaultLocked,
-            None,
-        )).await;
+        state
+            .audit
+            .record(build_entry(
+                &agent.id,
+                &agent.name,
+                &payload.request.method,
+                &payload.request.url,
+                vec![],
+                Outcome::VaultLocked,
+                None,
+            ))
+            .await;
         return Err(FerroError::VaultLocked);
     }
 
@@ -49,10 +52,7 @@ pub async fn forward(
     // Build a single string containing all substitutable content so we can
     // extract placeholder names in one pass: URL + header values + body
     let header_values: String = req.headers.values().cloned().collect::<Vec<_>>().join("\n");
-    let body_str = req.body
-        .as_ref()
-        .map(|b| b.to_string())
-        .unwrap_or_default();
+    let body_str = req.body.as_ref().map(|b| b.to_string()).unwrap_or_default();
     let combined = format!("{}\n{}\n{}", req.url, header_values, body_str);
 
     let known_names = state.credential_names.read().await.clone();
@@ -67,28 +67,26 @@ pub async fn forward(
 
     // Substitute placeholders in URL, headers, and body independently.
     // Each substituted value is Zeroizing and wiped when the binding is dropped.
-    let subst_url = substitute(&req.url, &vault, &known_names).await
-        .map_err(|e| {
-            let _ = record_failed(&state, &agent, &req.method, &req.url, &placeholder_names, &e);
-            e
+    let subst_url = substitute(&req.url, &vault, &known_names)
+        .await
+        .inspect_err(|e| {
+            record_failed(&state, &agent, &req.method, &req.url, &placeholder_names, e);
         })?;
 
     let mut subst_headers: ZeroizingHeaders = HashMap::new();
     for (k, v) in &req.headers {
-        let subst_val = substitute(v, &vault, &known_names).await
-            .map_err(|e| {
-                let _ = record_failed(&state, &agent, &req.method, &req.url, &placeholder_names, &e);
-                e
-            })?;
+        let subst_val = substitute(v, &vault, &known_names).await.inspect_err(|e| {
+            record_failed(&state, &agent, &req.method, &req.url, &placeholder_names, e);
+        })?;
         subst_headers.insert(k.clone(), subst_val);
     }
 
     let subst_body: Option<Zeroizing<String>> = match &req.body {
         Some(b) => {
-            let s = substitute(&b.to_string(), &vault, &known_names).await
-                .map_err(|e| {
-                    let _ = record_failed(&state, &agent, &req.method, &req.url, &placeholder_names, &e);
-                    e
+            let s = substitute(&b.to_string(), &vault, &known_names)
+                .await
+                .inspect_err(|e| {
+                    record_failed(&state, &agent, &req.method, &req.url, &placeholder_names, e);
                 })?;
             Some(s)
         }
@@ -97,27 +95,25 @@ pub async fn forward(
 
     // Forward the substituted request — all Zeroizing values are dropped
     // inside forward_request after the outbound call completes
-    let response = forward_request(
-        &req.method,
-        subst_url.as_str(),
-        subst_headers,
-        subst_body,
-    ).await
-    .map_err(|e| {
-        let _ = record_failed(&state, &agent, &req.method, &req.url, &placeholder_names, &e);
-        e
-    })?;
+    let response = forward_request(&req.method, subst_url.as_str(), subst_headers, subst_body)
+        .await
+        .inspect_err(|e| {
+            record_failed(&state, &agent, &req.method, &req.url, &placeholder_names, e);
+        })?;
 
     // Record successful audit entry
-    state.audit.record(build_entry(
-        &agent.id,
-        &agent.name,
-        &req.method,
-        &req.url,
-        placeholder_names,
-        Outcome::Success,
-        Some(response.status),
-    )).await;
+    state
+        .audit
+        .record(build_entry(
+            &agent.id,
+            &agent.name,
+            &req.method,
+            &req.url,
+            placeholder_names,
+            Outcome::Success,
+            Some(response.status),
+        ))
+        .await;
 
     Ok(Json(response))
 }
@@ -131,10 +127,12 @@ fn record_failed(
     url: &str,
     credential_names: &[String],
     error: &FerroError,
-) -> () {
+) {
     let outcome = match error {
         FerroError::VaultLocked => Outcome::VaultLocked,
-        FerroError::UnknownPlaceholder(_) | FerroError::CredentialNotFound(_) => Outcome::UnknownCredential,
+        FerroError::UnknownPlaceholder(_) | FerroError::CredentialNotFound(_) => {
+            Outcome::UnknownCredential
+        }
         FerroError::ForwardFailed(_) | FerroError::InvalidTargetUrl(_) => Outcome::ForwardFailed,
         _ => Outcome::InternalError,
     };
