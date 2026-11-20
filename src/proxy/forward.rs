@@ -7,6 +7,11 @@ use zeroize::Zeroizing;
 use crate::error::{FerroError, FerroResult};
 use crate::proxy::scrub::scrub_response;
 
+/// A header map whose values are zeroed on drop.
+/// Zeroizing<HashMap<_,_>> is not possible because HashMap doesn't implement
+/// Zeroize — instead we hold values as individual Zeroizing<String> entries.
+pub type ZeroizingHeaders = HashMap<String, Zeroizing<String>>;
+
 /// The inner request the agent wants forwarded, with placeholders in place of
 /// real credential values. Ferrowarden substitutes credentials before sending.
 #[derive(Debug, Deserialize)]
@@ -29,11 +34,12 @@ pub struct ProxyResponse {
 /// Forward a fully-substituted request to its target and return a scrubbed response.
 ///
 /// substituted_headers and substituted_body contain real credential values —
-/// they are Zeroizing so they wipe from memory when this function returns.
+/// header values are individually Zeroizing so they wipe from memory when
+/// this function returns.
 pub async fn forward_request(
     method: &str,
     url: &str,
-    substituted_headers: Zeroizing<HashMap<String, String>>,
+    substituted_headers: ZeroizingHeaders,
     substituted_body: Option<Zeroizing<String>>,
 ) -> FerroResult<ProxyResponse> {
     // Reject non-http(s) schemes — no file://, data://, etc.
@@ -57,15 +63,11 @@ pub async fn forward_request(
 
     // Apply substituted headers. The Ferrowarden agent key header is never
     // forwarded — it only exists on the outer ferrowarden request.
-    for (key, value) in substituted_headers.iter() {
+    for (key, value) in &substituted_headers {
         let lower = key.to_lowercase();
-        if lower == "authorization" || lower.starts_with("x-fw-") {
-            // Forward Authorization (now containing the real credential) but
-            // drop any ferrowarden-internal headers (x-fw-*)
-            if lower == "authorization" {
-                req = req.header(key.as_str(), value.as_str());
-            }
-        } else {
+        // Drop ferrowarden-internal headers (x-fw-*) — forward everything else
+        // including Authorization which now contains the real credential value
+        if !lower.starts_with("x-fw-") {
             req = req.header(key.as_str(), value.as_str());
         }
     }

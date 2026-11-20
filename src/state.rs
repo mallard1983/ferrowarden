@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use zeroize::Zeroizing;
 
+use crate::audit::AuditLog;
 use crate::config::Config;
 
 /// A single agent API key entry.
@@ -40,10 +41,13 @@ pub struct AppState {
     /// Credential name cache — item names from bw serve GET /list/object/items.
     /// Refreshed on unlock and periodically. Names only, never values.
     pub credential_names: Arc<RwLock<Vec<String>>>,
+
+    /// Audit log — shared with the admin API handler.
+    pub audit: Arc<AuditLog>,
 }
 
 impl AppState {
-    pub fn new(config: Config) -> Self {
+    pub fn new_with_audit(config: Config, audit: Arc<AuditLog>) -> Self {
         // Start locked regardless of unlock mode — unlock happens during
         // startup (file mode) or on first POST /v1/unlock (manual mode).
         Self {
@@ -51,6 +55,7 @@ impl AppState {
             lock_state: Arc::new(RwLock::new(LockState::Locked)),
             agent_keys: Arc::new(RwLock::new(HashMap::new())),
             credential_names: Arc::new(RwLock::new(Vec::new())),
+            audit,
         }
     }
 
