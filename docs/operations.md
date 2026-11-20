@@ -35,6 +35,70 @@ curl -X POST http://localhost:3000/v1/unlock \
 
 ---
 
+## Seeding Test Credentials
+
+For development and testing, a standard set of credentials can be seeded into Vaultwarden automatically. The seeder is idempotent — it checks for existing credentials by name before creating them, so it is safe to run on every spin-up without creating duplicates.
+
+### Credential Definitions
+
+Test credentials are defined in [`tests/seed/credentials.json`](../tests/seed/credentials.json). Each entry has a `name` (the placeholder name used in `{{vault:name}}`), a `value` (an obviously fake test value), and an optional `note`.
+
+Edit this file to add, rename, or remove credentials for your test environment.
+
+### Running the Seeder
+
+The seeder is a Docker Compose service under the `seed` profile. It runs once and exits.
+
+```sh
+# Seed credentials into a running Vaultwarden instance
+docker compose --profile seed up vault-seeder
+
+# Full dev spin-up: seed first, then bring up the stack
+docker compose --profile seed up --wait vault-seeder && docker compose up -d
+```
+
+The seeder will:
+1. Wait for Vaultwarden to become ready (up to 60 seconds)
+2. Log in using the same API key as `bw-serve`
+3. Unlock the vault with the master password
+4. For each credential in `credentials.json`: skip if name already exists, create if not
+5. Lock the vault and exit
+
+### Adding New Test Credentials
+
+Add entries to `tests/seed/credentials.json`:
+
+```json
+{
+  "name": "my_new_service_token",
+  "value": "test-my-service-00000000",
+  "note": "Token for my-new-service integration tests"
+}
+```
+
+Re-run the seeder. Existing credentials are unchanged; only the new entry is created.
+
+### Resetting to a Clean State
+
+To wipe all credentials and re-seed from scratch:
+
+```sh
+# Stop the stack and delete vault data
+docker compose down
+docker volume rm ferrowarden_vaultwarden-data
+
+# Bring up Vaultwarden, re-register your account (see docs/setup.md Step 2)
+docker compose up -d vaultwarden
+
+# Re-seed
+docker compose --profile seed up vault-seeder
+
+# Start the full stack
+docker compose up -d
+```
+
+---
+
 ## Managing Agent Keys
 
 ### Creating Keys

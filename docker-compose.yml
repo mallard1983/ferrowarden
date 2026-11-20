@@ -102,6 +102,37 @@ services:
       - bw-serve
 
 
+  # ── Vault Seeder ────────────────────────────────────────────────────────────
+  # One-shot service that populates Vaultwarden with a standard set of test
+  # credentials. Idempotent — safe to run on every dev spin-up. Skips any
+  # credential that already exists by name.
+  #
+  # Only active under the "seed" profile. Run with:
+  #   docker compose --profile seed up vault-seeder
+  #
+  # Or to seed and then bring up the full stack:
+  #   docker compose --profile seed up --wait vault-seeder && docker compose up -d
+  vault-seeder:
+    profiles: ["seed"]
+    image: bitwarden/cli:latest
+    entrypoint: ["/bin/sh", "/seed-entrypoint.sh"]
+    volumes:
+      - ./docker/seed-entrypoint.sh:/seed-entrypoint.sh:ro
+      - ./tests/seed/credentials.json:/seed/credentials.json:ro
+    secrets:
+      - bw_client_id
+      - bw_client_secret
+      - bw_master_password
+    environment:
+      BW_SERVER_URL: "http://vaultwarden:80"
+      VAULTWARDEN_WAIT_SECONDS: "60"
+    networks:
+      - vault-internal
+    depends_on:
+      - vaultwarden
+    restart: "no"
+
+
 # ── Networks ──────────────────────────────────────────────────────────────────
 networks:
   # Internal network for vault communication. Vaultwarden, bw-serve, and

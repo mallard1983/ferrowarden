@@ -9,6 +9,11 @@ ferrowarden.toml
 unlock_password
 unlock.key
 
+# Docker secrets directory — contains real credential values
+# The README.md inside is tracked; everything else is excluded.
+secrets/*
+!secrets/README.md
+
 # OS
 .DS_Store
 Thumbs.db
