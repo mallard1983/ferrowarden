@@ -46,5 +46,8 @@ chrono = { version = "0.4", features = ["serde"] }
 # Secure random number generation (for key generation)
 rand = "0.9"
 
+# URL encoding for vault item name lookups
+urlencoding = "2"
+
 [dev-dependencies]
 tokio-test = "0.4"
