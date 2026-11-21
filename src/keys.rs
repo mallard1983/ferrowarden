@@ -184,6 +184,9 @@ mod tests {
 
         save(&path, &[]).unwrap();
         let loaded = load(&path).unwrap();
-        assert!(loaded.is_empty(), "overwrite should replace previous contents");
+        assert!(
+            loaded.is_empty(),
+            "overwrite should replace previous contents"
+        );
     }
 }

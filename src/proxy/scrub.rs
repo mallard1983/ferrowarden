@@ -56,7 +56,10 @@ fn variants(secret: &str) -> Vec<Zeroizing<String>> {
         return Vec::new();
     }
     let json = serde_json::to_string(secret).unwrap_or_default();
-    let json_inner = json.get(1..json.len().saturating_sub(1)).unwrap_or_default().to_string();
+    let json_inner = json
+        .get(1..json.len().saturating_sub(1))
+        .unwrap_or_default()
+        .to_string();
     let mut out: Vec<Zeroizing<String>> = vec![
         Zeroizing::new(secret.to_string()),
         Zeroizing::new(json_inner),
@@ -162,7 +165,8 @@ mod tests {
     #[test]
     fn exact_value_echo_is_scrubbed_in_any_field() {
         let secret = "zq-9f8e7d6c5b4a";
-        let body = format!(r#"{{"headers": {{"X-Whatever": "{secret}"}}, "args": {{"q": "{secret}"}}}}"#);
+        let body =
+            format!(r#"{{"headers": {{"X-Whatever": "{secret}"}}, "args": {{"q": "{secret}"}}}}"#);
         let scrubbed = scrub_response(&body, &[secret]);
         assert!(!scrubbed.contains(secret));
         assert_eq!(scrubbed.matches(REDACTED).count(), 2);
@@ -197,6 +201,8 @@ mod tests {
         body.push(0x00);
         let out = scrub_bytes(&body, &["SECRETVALUE"]);
         assert!(!out.windows(11).any(|w| w == b"SECRETVALUE"));
-        assert!(out.windows(REDACTED.len()).any(|w| w == REDACTED.as_bytes()));
+        assert!(out
+            .windows(REDACTED.len())
+            .any(|w| w == REDACTED.as_bytes()));
     }
 }

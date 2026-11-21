@@ -28,13 +28,14 @@ async fn main() -> anyhow::Result<()> {
     // Requires a container restart to change — this is intentional. A log level
     // change produces a container restart event in Docker logs, creating an audit
     // trail. An attacker who gains access cannot silently suppress logging.
-    let log_filter = std::env::var("FERROWARDEN_LOG_LEVEL")
-        .unwrap_or_else(|_| "info".to_string());
-    let filter = EnvFilter::try_new(&log_filter)
-        .unwrap_or_else(|_| {
-            eprintln!("Invalid FERROWARDEN_LOG_LEVEL {:?}, falling back to info", log_filter);
-            EnvFilter::new("info")
-        });
+    let log_filter = std::env::var("FERROWARDEN_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
+    let filter = EnvFilter::try_new(&log_filter).unwrap_or_else(|_| {
+        eprintln!(
+            "Invalid FERROWARDEN_LOG_LEVEL {:?}, falling back to info",
+            log_filter
+        );
+        EnvFilter::new("info")
+    });
 
     tracing_subscriber::registry()
         .with(filter)
@@ -55,11 +56,14 @@ async fn main() -> anyhow::Result<()> {
         if !stored.is_empty() {
             let mut map = state.agent_keys.write().await;
             for k in stored {
-                map.insert(k.token_hash, crate::state::AgentKey {
-                    id: k.id,
-                    name: k.name,
-                    created_at: k.created_at,
-                });
+                map.insert(
+                    k.token_hash,
+                    crate::state::AgentKey {
+                        id: k.id,
+                        name: k.name,
+                        created_at: k.created_at,
+                    },
+                );
             }
             tracing::info!("Loaded {} agent key(s) from {:?}", map.len(), path);
         }
@@ -68,7 +72,10 @@ async fn main() -> anyhow::Result<()> {
     // File mode: read and use the password before accepting any requests.
     // unlock_from_file also syncs bw serve and loads the credential cache.
     if config.unlock_mode == UnlockMode::File {
-        tracing::info!("File unlock mode: reading password from {:?}", config.unlock_file);
+        tracing::info!(
+            "File unlock mode: reading password from {:?}",
+            config.unlock_file
+        );
         unlock_from_file(&state).await?;
         tracing::info!("Vault unlocked via file mode");
     } else {
@@ -127,7 +134,11 @@ async fn main() -> anyhow::Result<()> {
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("Listening on http://{} (plaintext)", addr);
-        axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await?;
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
     }
 
     Ok(())

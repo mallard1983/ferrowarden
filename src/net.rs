@@ -45,7 +45,11 @@ impl Cidr {
             Some((a, p)) => (a, Some(p.parse::<u8>().ok()?)),
             None => (s, None),
         };
-        let net: IpAddr = addr.trim_start_matches('[').trim_end_matches(']').parse().ok()?;
+        let net: IpAddr = addr
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse()
+            .ok()?;
         let net = net.to_canonical();
         let max = if net.is_ipv4() { 32 } else { 128 };
         let prefix = prefix.unwrap_or(max);
@@ -58,11 +62,19 @@ impl Cidr {
     pub fn contains(&self, ip: &IpAddr) -> bool {
         match (self.net, ip.to_canonical()) {
             (IpAddr::V4(net), IpAddr::V4(ip)) => {
-                let mask = if self.prefix == 0 { 0 } else { u32::MAX << (32 - self.prefix) };
+                let mask = if self.prefix == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - self.prefix)
+                };
                 (u32::from(net) & mask) == (u32::from(ip) & mask)
             }
             (IpAddr::V6(net), IpAddr::V6(ip)) => {
-                let mask = if self.prefix == 0 { 0 } else { u128::MAX << (128 - self.prefix) };
+                let mask = if self.prefix == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - self.prefix)
+                };
                 (u128::from(net) & mask) == (u128::from(ip) & mask)
             }
             _ => false,
@@ -167,10 +179,11 @@ impl TargetPolicy {
             allow_private: cfg.allow_private_targets,
             allowed_cidrs,
             allowed_hosts,
-            vault_host: vault
-                .as_ref()
-                .and_then(|u| u.host_str())
-                .map(|h| h.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase()),
+            vault_host: vault.as_ref().and_then(|u| u.host_str()).map(|h| {
+                h.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_ascii_lowercase()
+            }),
             vault_port: vault.as_ref().and_then(|u| u.port_or_known_default()),
         }
     }
@@ -186,12 +199,21 @@ impl TargetPolicy {
         };
         match tokio::net::lookup_host((host.as_str(), port)).await {
             Ok(addrs) => addrs.map(|a| a.ip().to_canonical()).collect(),
-            Err(_) => host.parse::<IpAddr>().map(|ip| vec![ip.to_canonical()]).unwrap_or_default(),
+            Err(_) => host
+                .parse::<IpAddr>()
+                .map(|ip| vec![ip.to_canonical()])
+                .unwrap_or_default(),
         }
     }
 
     /// Decide whether `ip:port`, reached via host name `host`, is allowed.
-    fn check_ip(&self, host: &str, ip: IpAddr, port: u16, vault_addrs: &[IpAddr]) -> Result<(), String> {
+    fn check_ip(
+        &self,
+        host: &str,
+        ip: IpAddr,
+        port: u16,
+        vault_addrs: &[IpAddr],
+    ) -> Result<(), String> {
         let ip = ip.to_canonical();
         if Some(port) == self.vault_port && vault_addrs.contains(&ip) {
             return Err("Target is the vault backend, which agents may not call".to_string());
@@ -253,7 +275,10 @@ impl TargetPolicy {
 
     /// A reqwest DNS resolver enforcing this policy for one request.
     pub fn resolver(self: &Arc<Self>, port: u16) -> Arc<PolicyResolver> {
-        Arc::new(PolicyResolver { policy: self.clone(), port })
+        Arc::new(PolicyResolver {
+            policy: self.clone(),
+            port,
+        })
     }
 }
 
@@ -284,7 +309,8 @@ impl Resolve for PolicyResolver {
                 }
             }
             if allowed.is_empty() {
-                let reason = last_reason.unwrap_or_else(|| "Target host did not resolve".to_string());
+                let reason =
+                    last_reason.unwrap_or_else(|| "Target host did not resolve".to_string());
                 return Err(Box::new(BlockedTarget(reason)) as Box<dyn StdError + Send + Sync>);
             }
             Ok(Box::new(allowed.into_iter()) as Addrs)
@@ -302,7 +328,9 @@ pub fn client_ip(peer: IpAddr, forwarded_for: Option<&str>, trusted: &[Cidr]) ->
     if !trusted.iter().any(|c| c.contains(&peer)) {
         return peer;
     }
-    let Some(xff) = forwarded_for else { return peer };
+    let Some(xff) = forwarded_for else {
+        return peer;
+    };
     let mut candidate = peer;
     for part in xff.rsplit(',') {
         match part.trim().parse::<IpAddr>() {
@@ -370,7 +398,17 @@ mod tests {
 
     #[test]
     fn classification() {
-        for s in ["127.0.0.1", "10.1.2.3", "172.20.0.2", "192.168.0.1", "169.254.169.254", "100.64.0.1", "::1", "fd00::1", "fe80::1"] {
+        for s in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.20.0.2",
+            "192.168.0.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+        ] {
             assert_eq!(classify(s.parse().unwrap()), AddrClass::Internal, "{s}");
         }
         for s in ["0.0.0.0", "255.255.255.255", "224.0.0.1", "::"] {
@@ -385,7 +423,10 @@ mod tests {
     async fn blocks_vault_backend_even_when_private_allowed() {
         let p = TargetPolicy::from_config(&cfg("127.0.0.0/8", true));
         let url = Url::parse("http://127.0.0.1:8087/object/password/x").unwrap();
-        assert!(matches!(p.check_url(&url).await, Err(FerroError::TargetBlocked(_))));
+        assert!(matches!(
+            p.check_url(&url).await,
+            Err(FerroError::TargetBlocked(_))
+        ));
         // Same IP, different port is a different service and is allowed here.
         let other = Url::parse("http://127.0.0.1:9000/").unwrap();
         assert!(p.check_url(&other).await.is_ok());
@@ -397,16 +438,25 @@ mod tests {
         c.bw_serve_url = "http://bw-serve:8087".to_string();
         let p = TargetPolicy::from_config(&c);
         let url = Url::parse("http://BW-SERVE:8087/object/password/x").unwrap();
-        assert!(matches!(p.check_url(&url).await, Err(FerroError::TargetBlocked(_))));
+        assert!(matches!(
+            p.check_url(&url).await,
+            Err(FerroError::TargetBlocked(_))
+        ));
     }
 
     #[tokio::test]
     async fn private_ip_blocked_by_default_and_allowed_by_cidr() {
         let p = TargetPolicy::from_config(&cfg("", false));
         let url = Url::parse("http://192.168.1.10/api").unwrap();
-        assert!(matches!(p.check_url(&url).await, Err(FerroError::TargetBlocked(_))));
+        assert!(matches!(
+            p.check_url(&url).await,
+            Err(FerroError::TargetBlocked(_))
+        ));
         let meta = Url::parse("http://169.254.169.254/latest/meta-data").unwrap();
-        assert!(matches!(p.check_url(&meta).await, Err(FerroError::TargetBlocked(_))));
+        assert!(matches!(
+            p.check_url(&meta).await,
+            Err(FerroError::TargetBlocked(_))
+        ));
 
         let p = TargetPolicy::from_config(&cfg("192.168.1.0/24", false));
         assert!(p.check_url(&url).await.is_ok());
@@ -416,7 +466,10 @@ mod tests {
     async fn rejects_non_http_scheme() {
         let p = TargetPolicy::from_config(&cfg("", false));
         let url = Url::parse("file:///etc/passwd").unwrap();
-        assert!(matches!(p.check_url(&url).await, Err(FerroError::InvalidTargetUrl(_))));
+        assert!(matches!(
+            p.check_url(&url).await,
+            Err(FerroError::InvalidTargetUrl(_))
+        ));
     }
 
     #[tokio::test]

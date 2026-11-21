@@ -106,7 +106,10 @@ mod tests {
             agent_rate_limit_per_minute: 120,
             agent_rate_limit_burst: 20,
         };
-        router(Arc::new(AppState::new_with_audit(cfg, Arc::new(AuditLog::new(10)))))
+        router(Arc::new(AppState::new_with_audit(
+            cfg,
+            Arc::new(AuditLog::new(10)),
+        )))
     }
 
     async fn status(app: Router, path: &str) -> StatusCode {
@@ -120,15 +123,30 @@ mod tests {
     async fn default_routes_have_no_prefix() {
         assert_eq!(status(app(""), "/health").await, StatusCode::OK);
         // Reaches the handler: rejected for the missing agent key, not 404.
-        assert_eq!(status(app(""), "/v1/credentials").await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status(app(""), "/v1/credentials").await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]
     async fn prefix_moves_api_but_not_health() {
-        assert_eq!(status(app("/k7f3q9"), "/k7f3q9/v1/credentials").await, StatusCode::UNAUTHORIZED);
-        assert_eq!(status(app("/k7f3q9"), "/k7f3q9/v1/admin/status").await, StatusCode::UNAUTHORIZED);
-        assert_eq!(status(app("/k7f3q9"), "/v1/credentials").await, StatusCode::NOT_FOUND);
+        assert_eq!(
+            status(app("/k7f3q9"), "/k7f3q9/v1/credentials").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(app("/k7f3q9"), "/k7f3q9/v1/admin/status").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(app("/k7f3q9"), "/v1/credentials").await,
+            StatusCode::NOT_FOUND
+        );
         assert_eq!(status(app("/k7f3q9"), "/health").await, StatusCode::OK);
-        assert_eq!(status(app("/k7f3q9"), "/k7f3q9/health").await, StatusCode::NOT_FOUND);
+        assert_eq!(
+            status(app("/k7f3q9"), "/k7f3q9/health").await,
+            StatusCode::NOT_FOUND
+        );
     }
 }

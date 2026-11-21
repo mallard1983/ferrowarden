@@ -65,30 +65,40 @@ pub async fn create_key(
     // Persist first. If the write fails, the key is never activated, so the
     // caller is not left with an error response for a token that still works.
     if let Some(ref path) = state.config.keys_file {
-        let mut stored = load(path).map_err(|e| {
-            FerroError::Internal(format!("Failed to read key file: {e}"))
-        })?;
-        stored.push(StoredKey { id: id.clone(), name: name.clone(), token_hash: token_hash.clone(), created_at: now });
-        save(path, &stored).map_err(|e| {
-            FerroError::Internal(format!("Failed to write key file: {e}"))
-        })?;
+        let mut stored = load(path)
+            .map_err(|e| FerroError::Internal(format!("Failed to read key file: {e}")))?;
+        stored.push(StoredKey {
+            id: id.clone(),
+            name: name.clone(),
+            token_hash: token_hash.clone(),
+            created_at: now,
+        });
+        save(path, &stored)
+            .map_err(|e| FerroError::Internal(format!("Failed to write key file: {e}")))?;
     }
 
     // Insert into in-memory map keyed by hash — plaintext never stored
     state.agent_keys.write().await.insert(
         token_hash,
-        AgentKey { id: id.clone(), name: name.clone(), created_at: now },
+        AgentKey {
+            id: id.clone(),
+            name: name.clone(),
+            created_at: now,
+        },
     );
 
     tracing::info!(agent_id = %id, agent_name = %name, "Agent key created");
 
-    Ok((StatusCode::CREATED, Json(CreateKeyResponse {
-        id,
-        name,
-        // Return the raw token once — the caller must store it
-        token,
-        created_at: now,
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateKeyResponse {
+            id,
+            name,
+            // Return the raw token once — the caller must store it
+            token,
+            created_at: now,
+        }),
+    ))
 }
 
 /// GET /v1/admin/keys
@@ -134,13 +144,11 @@ pub async fn revoke_key(
     // Rewrite the key file without the revoked entry first, so a failed write
     // is reported before the in-memory state diverges from disk.
     if let Some(ref path) = state.config.keys_file {
-        let stored = load(path).map_err(|e| {
-            FerroError::Internal(format!("Failed to read key file: {e}"))
-        })?;
+        let stored = load(path)
+            .map_err(|e| FerroError::Internal(format!("Failed to read key file: {e}")))?;
         let remaining: Vec<_> = stored.into_iter().filter(|k| k.id != id).collect();
-        save(path, &remaining).map_err(|e| {
-            FerroError::Internal(format!("Failed to write key file: {e}"))
-        })?;
+        save(path, &remaining)
+            .map_err(|e| FerroError::Internal(format!("Failed to write key file: {e}")))?;
     }
 
     // Revoke in memory — takes effect for the very next request.

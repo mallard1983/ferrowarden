@@ -223,6 +223,16 @@ mod tests {
         let body: BwResponse<BwListData> = serde_json::from_str(raw).unwrap();
         let items = body.data.unwrap().data;
         assert_eq!(items.len(), 3);
-        assert_eq!(items[0].login.as_ref().unwrap().uris.as_ref().unwrap().len(), 2);
+        assert_eq!(
+            items[0]
+                .login
+                .as_ref()
+                .unwrap()
+                .uris
+                .as_ref()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }

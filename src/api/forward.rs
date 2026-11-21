@@ -110,8 +110,9 @@ async fn run_forward(
 
     // URL: substitute, then require the scheme/host/port to be unchanged.
     let subst_url = substitute_str(&req.url, &values);
-    let subst_target = Url::parse(subst_url.as_str())
-        .map_err(|_| FerroError::InvalidTargetUrl("URL is invalid after credential substitution".to_string()))?;
+    let subst_target = Url::parse(subst_url.as_str()).map_err(|_| {
+        FerroError::InvalidTargetUrl("URL is invalid after credential substitution".to_string())
+    })?;
     if subst_target.scheme() != target.scheme()
         || subst_target.host_str() != target.host_str()
         || subst_target.port_or_known_default() != target.port_or_known_default()
@@ -138,7 +139,10 @@ async fn run_forward(
                 serde_json::to_string(&v).map_err(|e| FerroError::Internal(e.to_string()))?,
             );
             zeroize_json(&mut v);
-            if !subst_headers.keys().any(|k| k.eq_ignore_ascii_case("content-type")) {
+            if !subst_headers
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("content-type"))
+            {
                 subst_headers.insert(
                     "Content-Type".to_string(),
                     Zeroizing::new("application/json".to_string()),

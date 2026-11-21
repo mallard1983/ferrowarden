@@ -181,7 +181,9 @@ pub fn normalize_api_prefix(raw: &str) -> FerroResult<String> {
         }
     }
     if trimmed == "health" {
-        return Err(FerroError::Config("api_prefix may not be \"/health\"".to_string()));
+        return Err(FerroError::Config(
+            "api_prefix may not be \"/health\"".to_string(),
+        ));
     }
     Ok(format!("/{trimmed}"))
 }
@@ -207,8 +209,8 @@ impl Config {
             // FERROWARDEN_BIND_ADDR, FERROWARDEN_UNLOCK_MODE, etc.
             .add_source(
                 config::Environment::with_prefix("FERROWARDEN")
-                    .prefix_separator("_")  // single _ between prefix and key (FERROWARDEN_FIELD)
-                    .separator("__")        // double __ for nested keys (FERROWARDEN_SECTION__KEY)
+                    .prefix_separator("_") // single _ between prefix and key (FERROWARDEN_FIELD)
+                    .separator("__") // double __ for nested keys (FERROWARDEN_SECTION__KEY)
                     .ignore_empty(true),
             )
             .build()
@@ -250,7 +252,8 @@ impl Config {
 
         if self.agent_rate_limit_per_minute == 0 || self.agent_rate_limit_burst == 0 {
             return Err(FerroError::Config(
-                "agent_rate_limit_per_minute and agent_rate_limit_burst must be greater than 0".to_string(),
+                "agent_rate_limit_per_minute and agent_rate_limit_burst must be greater than 0"
+                    .to_string(),
             ));
         }
 
@@ -317,7 +320,11 @@ mod tests {
     fn zero_rate_limit_fails() {
         let mut cfg = base_config(UnlockMode::Manual);
         cfg.agent_rate_limit_burst = 0;
-        assert!(cfg.validate().unwrap_err().to_string().contains("rate_limit"));
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("rate_limit"));
     }
 
     #[test]
@@ -341,7 +348,10 @@ mod tests {
 
     #[test]
     fn split_list_trims_and_drops_empty() {
-        assert_eq!(split_list(" a, ,b ,"), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            split_list(" a, ,b ,"),
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 
     #[test]

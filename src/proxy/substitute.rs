@@ -34,7 +34,9 @@ pub fn extract_placeholder_names(input: &str) -> HashSet<String> {
 pub fn extract_json_placeholder_names(value: &Value, out: &mut HashSet<String>) {
     match value {
         Value::String(s) => out.extend(extract_placeholder_names(s)),
-        Value::Array(items) => items.iter().for_each(|v| extract_json_placeholder_names(v, out)),
+        Value::Array(items) => items
+            .iter()
+            .for_each(|v| extract_json_placeholder_names(v, out)),
         Value::Object(map) => {
             for (k, v) in map {
                 out.extend(extract_placeholder_names(k));
@@ -52,7 +54,9 @@ pub fn extract_json_placeholder_names(value: &Value, out: &mut HashSet<String>) 
 /// without a scheme (e.g. `api.example.com`) match either http or https.
 pub fn credential_allows(uris: &[String], target: &Url) -> Result<(), String> {
     if uris.is_empty() {
-        return Err("the vault item has no URIs; add the target's URL to the item to allow it".to_string());
+        return Err(
+            "the vault item has no URIs; add the target's URL to the item to allow it".to_string(),
+        );
     }
     let target_host = normalize_host(target.host_str().unwrap_or_default());
     let target_port = target.port_or_known_default();
@@ -163,10 +167,17 @@ pub fn substitute_str(input: &str, values: &ResolvedValues) -> Zeroizing<String>
 pub fn substitute_json(value: &Value, values: &ResolvedValues) -> Value {
     match value {
         Value::String(s) => Value::String(substitute_str(s, values).to_string()),
-        Value::Array(items) => Value::Array(items.iter().map(|v| substitute_json(v, values)).collect()),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|v| substitute_json(v, values)).collect())
+        }
         Value::Object(map) => Value::Object(
             map.iter()
-                .map(|(k, v)| (substitute_str(k, values).to_string(), substitute_json(v, values)))
+                .map(|(k, v)| {
+                    (
+                        substitute_str(k, values).to_string(),
+                        substitute_json(v, values),
+                    )
+                })
                 .collect(),
         ),
         other => other.clone(),
@@ -256,8 +267,14 @@ mod tests {
     fn host_binding_matches_host_scheme_and_port() {
         let uris = vec!["https://api.example.com".to_string()];
         assert!(credential_allows(&uris, &url("https://API.example.com/v1")).is_ok());
-        assert!(credential_allows(&uris, &url("http://api.example.com/v1")).is_err(), "scheme downgrade");
-        assert!(credential_allows(&uris, &url("https://api.example.com:8443/")).is_err(), "other port");
+        assert!(
+            credential_allows(&uris, &url("http://api.example.com/v1")).is_err(),
+            "scheme downgrade"
+        );
+        assert!(
+            credential_allows(&uris, &url("https://api.example.com:8443/")).is_err(),
+            "other port"
+        );
         assert!(credential_allows(&uris, &url("https://evil.example.com/")).is_err());
         assert!(credential_allows(&uris, &url("https://api.example.com.evil.net/")).is_err());
     }
@@ -286,27 +303,50 @@ mod tests {
         // Unreachable vault: any fetch attempt would return VaultUnavailable.
         let vault = VaultClient::new("http://127.0.0.1:1".to_string());
         let mut creds = CredentialMap::new();
-        creds.insert("dup".into(), vec![
-            CredentialEntry { id: "1".into(), uris: vec![] },
-            CredentialEntry { id: "2".into(), uris: vec![] },
-        ]);
-        creds.insert("bound".into(), vec![CredentialEntry { id: "3".into(), uris: vec!["https://a.example".into()] }]);
+        creds.insert(
+            "dup".into(),
+            vec![
+                CredentialEntry {
+                    id: "1".into(),
+                    uris: vec![],
+                },
+                CredentialEntry {
+                    id: "2".into(),
+                    uris: vec![],
+                },
+            ],
+        );
+        creds.insert(
+            "bound".into(),
+            vec![CredentialEntry {
+                id: "3".into(),
+                uris: vec!["https://a.example".into()],
+            }],
+        );
         let target = url("https://b.example/");
 
         let names: HashSet<String> = ["missing".to_string()].into();
-        let err = resolve_credentials(&names, &creds, &target, true, &vault).await.unwrap_err();
+        let err = resolve_credentials(&names, &creds, &target, true, &vault)
+            .await
+            .unwrap_err();
         assert!(matches!(err, FerroError::UnknownPlaceholder(_)));
 
         let names: HashSet<String> = ["dup".to_string()].into();
-        let err = resolve_credentials(&names, &creds, &target, true, &vault).await.unwrap_err();
+        let err = resolve_credentials(&names, &creds, &target, true, &vault)
+            .await
+            .unwrap_err();
         assert!(matches!(err, FerroError::AmbiguousCredential(_)));
 
         let names: HashSet<String> = ["bound".to_string()].into();
-        let err = resolve_credentials(&names, &creds, &target, true, &vault).await.unwrap_err();
+        let err = resolve_credentials(&names, &creds, &target, true, &vault)
+            .await
+            .unwrap_err();
         assert!(matches!(err, FerroError::CredentialHostNotAllowed { .. }));
 
         // With enforcement off the binding is skipped and the fetch is attempted.
-        let err = resolve_credentials(&names, &creds, &target, false, &vault).await.unwrap_err();
+        let err = resolve_credentials(&names, &creds, &target, false, &vault)
+            .await
+            .unwrap_err();
         assert!(matches!(err, FerroError::VaultUnavailable));
     }
 

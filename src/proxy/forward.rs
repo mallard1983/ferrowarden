@@ -239,16 +239,30 @@ mod tests {
     }
 
     fn limits() -> ForwardLimits {
-        ForwardLimits { timeout: Duration::from_secs(5), max_response_bytes: 1024 }
+        ForwardLimits {
+            timeout: Duration::from_secs(5),
+            max_response_bytes: 1024,
+        }
     }
 
     async fn fwd(method: &str, url: &str, allowed: &str) -> FerroResult<ProxyResponse> {
-        forward_request(method, &Url::parse(url).unwrap(), HashMap::new(), None, &[], &policy(allowed), &limits()).await
+        forward_request(
+            method,
+            &Url::parse(url).unwrap(),
+            HashMap::new(),
+            None,
+            &[],
+            &policy(allowed),
+            &limits(),
+        )
+        .await
     }
 
     #[tokio::test]
     async fn rejects_invalid_method() {
-        let err = fwd("BAD METHOD", "http://localhost/", "localhost").await.unwrap_err();
+        let err = fwd("BAD METHOD", "http://localhost/", "localhost")
+            .await
+            .unwrap_err();
         assert!(matches!(err, FerroError::InvalidTargetUrl(_)));
     }
 

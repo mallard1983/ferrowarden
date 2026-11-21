@@ -207,7 +207,11 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         // Insert keyed by hash — matches how the admin create_key handler works
-        state.agent_keys.write().await.insert(hash_token("secret_token_value_xyz"), key);
+        state
+            .agent_keys
+            .write()
+            .await
+            .insert(hash_token("secret_token_value_xyz"), key);
 
         let found = state.authenticate("secret_token_value_xyz").await;
         assert!(found.is_some());
@@ -222,7 +226,11 @@ mod tests {
             name: "test-agent".to_string(),
             created_at: chrono::Utc::now(),
         };
-        state.agent_keys.write().await.insert(hash_token("correct_token"), key);
+        state
+            .agent_keys
+            .write()
+            .await
+            .insert(hash_token("correct_token"), key);
 
         assert!(state.authenticate("wrong_token").await.is_none());
     }

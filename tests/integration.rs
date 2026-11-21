@@ -64,8 +64,8 @@ impl TestEnv {
             .expect("FERROWARDEN_TEST_ADMIN_KEY must be set when FERROWARDEN_INTEGRATION=1");
         let agent_key = env::var("FERROWARDEN_TEST_AGENT_KEY")
             .expect("FERROWARDEN_TEST_AGENT_KEY must be set when FERROWARDEN_INTEGRATION=1");
-        let mock_url = env::var("MOCK_API_URL")
-            .unwrap_or_else(|_| "http://localhost:7777".to_string());
+        let mock_url =
+            env::var("MOCK_API_URL").unwrap_or_else(|_| "http://localhost:7777".to_string());
 
         Some(Self {
             fw_url,
@@ -77,7 +77,13 @@ impl TestEnv {
     }
 
     /// Forward a request through Ferrowarden to the mock API.
-    async fn forward(&self, method: &str, path: &str, headers: Value, body: Option<Value>) -> reqwest::Response {
+    async fn forward(
+        &self,
+        method: &str,
+        path: &str,
+        headers: Value,
+        body: Option<Value>,
+    ) -> reqwest::Response {
         let url = format!("{}/mock-api{}", self.mock_url_via_ferrowarden(), path);
         let payload = json!({
             "request": {
@@ -98,7 +104,13 @@ impl TestEnv {
     }
 
     /// Forward a request to an arbitrary URL (not necessarily the mock API).
-    async fn forward_url(&self, method: &str, url: &str, headers: Value, body: Option<Value>) -> reqwest::Response {
+    async fn forward_url(
+        &self,
+        method: &str,
+        url: &str,
+        headers: Value,
+        body: Option<Value>,
+    ) -> reqwest::Response {
         let payload = json!({
             "request": { "method": method, "url": url, "headers": headers, "body": body }
         });
@@ -116,8 +128,7 @@ impl TestEnv {
     fn mock_url_via_ferrowarden(&self) -> String {
         // When running in Docker, Ferrowarden reaches the mock API as "mock-api:7777".
         // When running against a local stack, we use the mapped localhost port.
-        env::var("MOCK_API_INTERNAL_URL")
-            .unwrap_or_else(|_| "http://mock-api:7777".to_string())
+        env::var("MOCK_API_INTERNAL_URL").unwrap_or_else(|_| "http://mock-api:7777".to_string())
     }
 
     /// Get the most recently captured request from the mock API.
@@ -155,7 +166,8 @@ impl TestEnv {
 
     /// Assert the mock API is healthy and reachable.
     async fn assert_mock_healthy(&self) {
-        let resp = self.client
+        let resp = self
+            .client
             .get(format!("{}/__health__", self.mock_url))
             .send()
             .await
@@ -181,12 +193,14 @@ async fn test_credential_substituted_in_authorization_header() {
     env.assert_mock_healthy().await;
     env.reset_mock().await;
 
-    let resp = env.forward(
-        "GET",
-        "/api/check",
-        json!({ "Authorization": "Bearer {{vault:test_api_token}}" }),
-        None,
-    ).await;
+    let resp = env
+        .forward(
+            "GET",
+            "/api/check",
+            json!({ "Authorization": "Bearer {{vault:test_api_token}}" }),
+            None,
+        )
+        .await;
 
     assert_eq!(resp.status(), 200, "proxy forward failed");
 
@@ -222,12 +236,14 @@ async fn test_placeholder_text_never_reaches_target() {
     let Some(env) = TestEnv::load() else { return };
     env.reset_mock().await;
 
-    let resp = env.forward(
-        "POST",
-        "/api/data",
-        json!({ "X-API-Key": "{{vault:test_api_token}}" }),
-        Some(json!({ "token": "{{vault:test_bearer}}" })),
-    ).await;
+    let resp = env
+        .forward(
+            "POST",
+            "/api/data",
+            json!({ "X-API-Key": "{{vault:test_api_token}}" }),
+            Some(json!({ "token": "{{vault:test_bearer}}" })),
+        )
+        .await;
 
     assert_eq!(resp.status(), 200);
 
@@ -271,12 +287,14 @@ async fn test_response_body_is_scrubbed() {
     //
     // We test scrubbing directly via the scrub unit tests in proxy/scrub.rs.
     // This integration test verifies the scrubber runs in the full pipeline.
-    let resp = env.forward(
-        "GET",
-        "/api/status",
-        json!({ "Authorization": "Bearer {{vault:test_bearer}}" }),
-        None,
-    ).await;
+    let resp = env
+        .forward(
+            "GET",
+            "/api/status",
+            json!({ "Authorization": "Bearer {{vault:test_bearer}}" }),
+            None,
+        )
+        .await;
 
     assert_eq!(resp.status(), 200, "forward failed");
 
@@ -302,12 +320,14 @@ async fn test_multiple_placeholders_all_substituted() {
     let Some(env) = TestEnv::load() else { return };
     env.reset_mock().await;
 
-    let resp = env.forward(
-        "POST",
-        "/api/create",
-        json!({ "X-API-Key": "{{vault:nas_api_key}}" }),
-        Some(json!({ "auth": "Bearer {{vault:test_bearer}}" })),
-    ).await;
+    let resp = env
+        .forward(
+            "POST",
+            "/api/create",
+            json!({ "X-API-Key": "{{vault:nas_api_key}}" }),
+            Some(json!({ "auth": "Bearer {{vault:test_bearer}}" })),
+        )
+        .await;
 
     assert_eq!(resp.status(), 200);
 
@@ -347,12 +367,14 @@ async fn test_unknown_placeholder_returns_422_and_no_forward() {
 
     let initial_count = env.all_captured_requests().await.len();
 
-    let resp = env.forward(
-        "GET",
-        "/api/secret",
-        json!({ "Authorization": "Bearer {{vault:this_credential_does_not_exist}}" }),
-        None,
-    ).await;
+    let resp = env
+        .forward(
+            "GET",
+            "/api/secret",
+            json!({ "Authorization": "Bearer {{vault:this_credential_does_not_exist}}" }),
+            None,
+        )
+        .await;
 
     // 422 Unprocessable Entity: the placeholder name is not in the vault
     assert_eq!(
@@ -388,7 +410,8 @@ async fn test_missing_agent_key_returns_401() {
     let initial_count = env.all_captured_requests().await.len();
 
     // Send a forward request with NO agent key header
-    let resp = env.client
+    let resp = env
+        .client
         .post(format!("{}/v1/forward", env.fw_url))
         // No X-Agent-Key header
         .json(&json!({
@@ -419,7 +442,8 @@ async fn test_missing_agent_key_returns_401() {
 async fn test_invalid_agent_key_returns_401() {
     let Some(env) = TestEnv::load() else { return };
 
-    let resp = env.client
+    let resp = env
+        .client
         .get(format!("{}/v1/credentials", env.fw_url))
         .header("X-Agent-Key", "not-a-real-token-aaaaaaaaaaaaaaaa")
         .send()
@@ -438,7 +462,8 @@ async fn test_invalid_agent_key_returns_401() {
 async fn test_credential_list_returns_seeded_names_only() {
     let Some(env) = TestEnv::load() else { return };
 
-    let resp = env.client
+    let resp = env
+        .client
         .get(format!("{}/v1/credentials", env.fw_url))
         .header("X-Agent-Key", &env.agent_key)
         .send()
@@ -483,7 +508,8 @@ async fn test_admin_key_lifecycle_create_use_revoke() {
     let Some(env) = TestEnv::load() else { return };
 
     // Create a new key
-    let create_resp = env.client
+    let create_resp = env
+        .client
         .post(format!("{}/v1/admin/keys", env.fw_url))
         .header("X-Admin-Key", &env.admin_key)
         .json(&json!({ "name": "lifecycle-test-key" }))
@@ -495,19 +521,28 @@ async fn test_admin_key_lifecycle_create_use_revoke() {
 
     let created: Value = create_resp.json().await.expect("response was not JSON");
     let key_id = created["id"].as_str().expect("id missing");
-    let key_token = created["token"].as_str().expect("token missing").to_string();
+    let key_token = created["token"]
+        .as_str()
+        .expect("token missing")
+        .to_string();
 
     // The new key must work
-    let use_resp = env.client
+    let use_resp = env
+        .client
         .get(format!("{}/v1/credentials", env.fw_url))
         .header("X-Agent-Key", &key_token)
         .send()
         .await
         .expect("use key request failed");
-    assert_eq!(use_resp.status(), 200, "new key should be usable immediately");
+    assert_eq!(
+        use_resp.status(),
+        200,
+        "new key should be usable immediately"
+    );
 
     // The key must appear in the listing (but without its token value)
-    let list_resp = env.client
+    let list_resp = env
+        .client
         .get(format!("{}/v1/admin/keys", env.fw_url))
         .header("X-Admin-Key", &env.admin_key)
         .send()
@@ -524,7 +559,8 @@ async fn test_admin_key_lifecycle_create_use_revoke() {
     );
 
     // Revoke the key
-    let revoke_resp = env.client
+    let revoke_resp = env
+        .client
         .delete(format!("{}/v1/admin/keys/{}", env.fw_url, key_id))
         .header("X-Admin-Key", &env.admin_key)
         .send()
@@ -533,7 +569,8 @@ async fn test_admin_key_lifecycle_create_use_revoke() {
     assert_eq!(revoke_resp.status(), 200, "revoke should succeed");
 
     // The revoked key must immediately stop working
-    let after_revoke = env.client
+    let after_revoke = env
+        .client
         .get(format!("{}/v1/credentials", env.fw_url))
         .header("X-Agent-Key", &key_token)
         .send()
@@ -557,15 +594,18 @@ async fn test_audit_log_records_credential_names_not_values() {
     env.reset_mock().await;
 
     // Make a known request
-    let _ = env.forward(
-        "GET",
-        "/api/audited",
-        json!({ "Authorization": "Bearer {{vault:grafana_service_account}}" }),
-        None,
-    ).await;
+    let _ = env
+        .forward(
+            "GET",
+            "/api/audited",
+            json!({ "Authorization": "Bearer {{vault:grafana_service_account}}" }),
+            None,
+        )
+        .await;
 
     // Check the audit log
-    let audit_resp = env.client
+    let audit_resp = env
+        .client
         .get(format!("{}/v1/admin/audit", env.fw_url))
         .header("X-Admin-Key", &env.admin_key)
         .send()
@@ -575,15 +615,22 @@ async fn test_audit_log_records_credential_names_not_values() {
     assert_eq!(audit_resp.status(), 200);
 
     let entries: Vec<Value> = audit_resp.json().await.expect("audit was not JSON");
-    assert!(!entries.is_empty(), "audit log is empty after a successful forward");
+    assert!(
+        !entries.is_empty(),
+        "audit log is empty after a successful forward"
+    );
 
     // The most recent entry should be our request
     let entry = &entries[0];
 
     // Credential NAME must be recorded
-    let cred_names = entry["credential_names"].as_array().expect("credential_names missing");
+    let cred_names = entry["credential_names"]
+        .as_array()
+        .expect("credential_names missing");
     assert!(
-        cred_names.iter().any(|n| n.as_str() == Some("grafana_service_account")),
+        cred_names
+            .iter()
+            .any(|n| n.as_str() == Some("grafana_service_account")),
         "credential name not recorded in audit log.\nEntry: {entry}"
     );
 
@@ -602,7 +649,10 @@ async fn test_audit_log_records_credential_names_not_values() {
         "unexpected outcome in audit entry"
     );
 
-    println!("Audit entry: {}", serde_json::to_string_pretty(entry).unwrap());
+    println!(
+        "Audit entry: {}",
+        serde_json::to_string_pretty(entry).unwrap()
+    );
 }
 
 /// Admin: the status endpoint reflects current operational state.
@@ -610,7 +660,8 @@ async fn test_audit_log_records_credential_names_not_values() {
 async fn test_admin_status_shows_unlocked_and_credential_count() {
     let Some(env) = TestEnv::load() else { return };
 
-    let resp = env.client
+    let resp = env
+        .client
         .get(format!("{}/v1/admin/status", env.fw_url))
         .header("X-Admin-Key", &env.admin_key)
         .send()
@@ -659,20 +710,28 @@ async fn test_echoed_credential_is_scrubbed_from_body() {
     let Some(env) = TestEnv::load() else { return };
     env.reset_mock().await;
 
-    let resp = env.forward(
-        "GET",
-        "/echo",
-        json!({ "X-Arbitrary-Name": "{{vault:test_api_token}}" }),
-        None,
-    ).await;
+    let resp = env
+        .forward(
+            "GET",
+            "/echo",
+            json!({ "X-Arbitrary-Name": "{{vault:test_api_token}}" }),
+            None,
+        )
+        .await;
     assert_eq!(resp.status(), 200);
     let text = resp.text().await.unwrap();
 
     // The target really received the credential...
     let captured = env.last_captured_request().await;
-    assert_eq!(captured_header(&captured, "X-Arbitrary-Name"), Some(TEST_API_TOKEN_VALUE));
+    assert_eq!(
+        captured_header(&captured, "X-Arbitrary-Name"),
+        Some(TEST_API_TOKEN_VALUE)
+    );
     // ...but the agent never sees it.
-    assert!(!text.contains(TEST_API_TOKEN_VALUE), "credential leaked via echo: {text}");
+    assert!(
+        !text.contains(TEST_API_TOKEN_VALUE),
+        "credential leaked via echo: {text}"
+    );
     assert!(text.contains("[REDACTED]"));
 }
 
@@ -682,15 +741,20 @@ async fn test_echoed_credential_is_scrubbed_from_headers() {
     let Some(env) = TestEnv::load() else { return };
     env.reset_mock().await;
 
-    let resp = env.forward(
-        "GET",
-        "/echo-header",
-        json!({ "X-Arbitrary-Name": "{{vault:test_api_token}}" }),
-        None,
-    ).await;
+    let resp = env
+        .forward(
+            "GET",
+            "/echo-header",
+            json!({ "X-Arbitrary-Name": "{{vault:test_api_token}}" }),
+            None,
+        )
+        .await;
     assert_eq!(resp.status(), 200);
     let text = resp.text().await.unwrap();
-    assert!(!text.contains(TEST_API_TOKEN_VALUE), "credential leaked via header echo: {text}");
+    assert!(
+        !text.contains(TEST_API_TOKEN_VALUE),
+        "credential leaked via header echo: {text}"
+    );
 }
 
 /// Security property: the agent cannot use the proxy to call bw serve
@@ -734,14 +798,19 @@ async fn test_credential_not_sent_to_unbound_host() {
     let Some(env) = TestEnv::load() else { return };
     env.reset_mock().await;
 
-    let resp = env.forward(
-        "GET",
-        "/api/unbound",
-        json!({ "Authorization": "Bearer {{vault:test_unbound}}" }),
-        None,
-    ).await;
+    let resp = env
+        .forward(
+            "GET",
+            "/api/unbound",
+            json!({ "Authorization": "Bearer {{vault:test_unbound}}" }),
+            None,
+        )
+        .await;
     assert_eq!(resp.status(), 403);
-    assert!(env.all_captured_requests().await.is_empty(), "request must not be forwarded");
+    assert!(
+        env.all_captured_requests().await.is_empty(),
+        "request must not be forwarded"
+    );
 }
 
 /// Security property: a placeholder cannot choose the destination host (the
@@ -750,12 +819,14 @@ async fn test_credential_not_sent_to_unbound_host() {
 async fn test_placeholder_in_host_is_rejected() {
     let Some(env) = TestEnv::load() else { return };
 
-    let resp = env.forward_url(
-        "GET",
-        "http://{{vault:test_api_token}}.mock-api:7777/",
-        json!({}),
-        None,
-    ).await;
+    let resp = env
+        .forward_url(
+            "GET",
+            "http://{{vault:test_api_token}}.mock-api:7777/",
+            json!({}),
+            None,
+        )
+        .await;
     assert_eq!(resp.status(), 400);
 }
 
@@ -767,12 +838,14 @@ async fn test_json_body_with_special_characters_stays_valid() {
     let Some(env) = TestEnv::load() else { return };
     env.reset_mock().await;
 
-    let resp = env.forward(
-        "POST",
-        "/api/login",
-        json!({}),
-        Some(json!({ "user": "admin", "password": "{{vault:test_special_chars}}" })),
-    ).await;
+    let resp = env
+        .forward(
+            "POST",
+            "/api/login",
+            json!({}),
+            Some(json!({ "user": "admin", "password": "{{vault:test_special_chars}}" })),
+        )
+        .await;
     assert_eq!(resp.status(), 200);
 
     let captured = env.last_captured_request().await;
@@ -780,7 +853,10 @@ async fn test_json_body_with_special_characters_stays_valid() {
         .expect("forwarded body must be valid JSON");
     assert_eq!(body["password"], r#"quote"back\slash-55555"#);
     assert_eq!(body.as_object().unwrap().len(), 2);
-    assert_eq!(captured_header(&captured, "Content-Type"), Some("application/json"));
+    assert_eq!(
+        captured_header(&captured, "Content-Type"),
+        Some("application/json")
+    );
 }
 
 /// Correctness: a JSON string body is sent as raw text, not as a quoted JSON string.
@@ -789,14 +865,19 @@ async fn test_string_body_is_sent_raw() {
     let Some(env) = TestEnv::load() else { return };
     env.reset_mock().await;
 
-    let resp = env.forward(
-        "POST",
-        "/api/form",
-        json!({ "Content-Type": "application/x-www-form-urlencoded" }),
-        Some(json!("token={{vault:test_api_token}}&x=1")),
-    ).await;
+    let resp = env
+        .forward(
+            "POST",
+            "/api/form",
+            json!({ "Content-Type": "application/x-www-form-urlencoded" }),
+            Some(json!("token={{vault:test_api_token}}&x=1")),
+        )
+        .await;
     assert_eq!(resp.status(), 200);
 
     let captured = env.last_captured_request().await;
-    assert_eq!(captured["body"], format!("token={TEST_API_TOKEN_VALUE}&x=1"));
+    assert_eq!(
+        captured["body"],
+        format!("token={TEST_API_TOKEN_VALUE}&x=1")
+    );
 }

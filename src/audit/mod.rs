@@ -117,7 +117,15 @@ mod tests {
     use super::*;
 
     fn entry(method: &str) -> AuditEntry {
-        build_entry("agent-1", "test", method, "http://target/api", vec![], Outcome::Success, Some(200))
+        build_entry(
+            "agent-1",
+            "test",
+            method,
+            "http://target/api",
+            vec![],
+            Outcome::Success,
+            Some(200),
+        )
     }
 
     #[tokio::test]
@@ -171,8 +179,13 @@ mod tests {
     #[test]
     fn build_entry_populates_fields() {
         let e = build_entry(
-            "id-1", "agent", "PUT", "http://host/path",
-            vec!["cred_a".to_string()], Outcome::ForwardFailed, None,
+            "id-1",
+            "agent",
+            "PUT",
+            "http://host/path",
+            vec!["cred_a".to_string()],
+            Outcome::ForwardFailed,
+            None,
         );
         assert_eq!(e.agent_id, "id-1");
         assert_eq!(e.method, "PUT");

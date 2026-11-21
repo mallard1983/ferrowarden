@@ -24,7 +24,9 @@ pub enum FerroError {
     #[error("Vault backend (bw serve) is unreachable")]
     VaultUnavailable,
 
-    #[error("Credential name is ambiguous — {0} matches more than one vault item; rename one of them")]
+    #[error(
+        "Credential name is ambiguous — {0} matches more than one vault item; rename one of them"
+    )]
     AmbiguousCredential(String),
 
     #[error("Credential {name} may not be sent to {host}: {reason}")]
@@ -88,14 +90,18 @@ impl IntoResponse for FerroError {
             ),
             FerroError::VaultUnavailable => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
             FerroError::AmbiguousCredential(_) => (StatusCode::CONFLICT, self.to_string()),
-            FerroError::CredentialHostNotAllowed { .. } => (StatusCode::FORBIDDEN, self.to_string()),
+            FerroError::CredentialHostNotAllowed { .. } => {
+                (StatusCode::FORBIDDEN, self.to_string())
+            }
             FerroError::TargetBlocked(_) => (StatusCode::FORBIDDEN, self.to_string()),
             FerroError::ResponseTooLarge(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             FerroError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
             FerroError::AgentKeyNotFound => (StatusCode::UNAUTHORIZED, self.to_string()),
             FerroError::ForwardFailed(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             FerroError::InvalidTargetUrl(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            FerroError::UnknownPlaceholder(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
+            FerroError::UnknownPlaceholder(_) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
+            }
             FerroError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             FerroError::UnlockEndpointDisabled => (StatusCode::NOT_FOUND, self.to_string()),
             FerroError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
