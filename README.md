@@ -101,6 +101,23 @@ curl -X POST http://localhost:3000/v1/forward \
 | [Setup Guide](docs/setup.md) | Installation, Vaultwarden setup, first run |
 | [API Reference](docs/api-reference.md) | All endpoints, request/response shapes, error codes |
 | [Operations](docs/operations.md) | Unlock modes, key rotation, monitoring, troubleshooting |
+| [Logging](docs/logging.md) | Log levels, Loki, Wazuh, retention |
+| [TLS](docs/tls.md) | Pangolin reverse proxy and self-signed CA setup |
+| [Agent Skill](docs/agent-skill.md) | Reference doc for agents using the proxy (non-skill format) |
+
+### Claude Code skill
+
+If you use Claude Code, a ready-made skill is included at `.claude/skills/ferrowarden/`. Copy it to your personal skill directory to load it automatically whenever Claude needs to make a credentialed API call:
+
+```sh
+# Linux/Mac
+cp -r .claude/skills/ferrowarden ~/.claude/skills/ferrowarden
+
+# Windows (PowerShell)
+Copy-Item -Recurse .claude\skills\ferrowarden $env:USERPROFILE\.claude\skills\ferrowarden
+```
+
+The skill covers endpoint schemas, placeholder syntax, error handling, and worked examples. It has `user-invocable: false` so Claude loads it automatically when the task involves credentialed API calls — no slash command needed.
 
 ---
 
