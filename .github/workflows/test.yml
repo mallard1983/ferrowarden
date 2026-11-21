@@ -1,0 +1,88 @@
+# .github/workflows/test.yml
+#
+# UNTESTED — see docs/cicd.md before using this.
+# This is a draft based on the project's requirements. It will likely need
+# adjustment for your specific repository configuration.
+
+name: Test
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+
+jobs:
+  # ── Unit tests ───────────────────────────────────────────────────────────────
+  # Runs on every push. No Docker required.
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run unit tests
+        run: cargo test --lib
+
+  # ── Integration tests ─────────────────────────────────────────────────────────
+  # Requires Docker Compose. Runs on pull requests and the default branch.
+  #
+  # KNOWN UNKNOWNS (see docs/cicd.md):
+  # - Assumes docker compose (v2 plugin) is available on ubuntu-latest
+  # - dev-setup.sh wait times may need tuning for GitHub-hosted runner speed
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    # Only run on PRs and the default branch to save runner minutes
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Verify Docker Compose available
+        run: docker compose version
+
+      - name: Clean up any previous run
+        run: docker compose -f docker-compose.test.yml down -v 2>/dev/null || true
+
+      - name: Run dev setup (starts full stack)
+        run: |
+          chmod +x scripts/dev-setup.sh
+          scripts/dev-setup.sh
+
+      - name: Run integration tests
+        run: |
+          set -a; source .env.test; set +a
+          cargo test --test integration -- --nocapture --test-threads=1
+
+      - name: Collect logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.test.yml logs
+
+      - name: Tear down stack
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v

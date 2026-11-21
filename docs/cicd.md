@@ -1,0 +1,131 @@
+# CI/CD Pipeline
+
+> **Status: UNTESTED**
+> This document and the accompanying pipeline files have not been run against a real CI environment. They are a reasonable starting point based on the project's requirements, but will likely need adjustment. Known unknowns are called out inline.
+
+---
+
+## What the Pipeline Needs to Do
+
+```
+push → build → unit tests → integration tests → (optional) build Docker image
+```
+
+The unit tests (50 tests across all modules) run in a plain Rust environment with no external dependencies.
+
+The integration tests (11 tests in `tests/integration.rs`) require the full Docker Compose stack — Vaultwarden, bw-serve, ferrowarden, and mock-api — all healthy and communicating. This makes integration tests significantly harder to run in CI than unit tests, and the two are separated below so unit tests can pass without a Docker environment.
+
+---
+
+## Option A: GitLab CI
+
+Place `.gitlab-ci.yml` at the repo root. A draft is provided at `.gitlab-ci.yml` in this repository.
+
+### Runner Requirements
+
+The unit test job requires only a standard GitLab runner with Docker executor.
+
+The integration test job requires Docker-in-Docker (dind). The runner must have:
+- Docker executor with privileged mode enabled, **or**
+- A runner configured with the Docker socket mounted (`/var/run/docker.sock`)
+
+For a self-hosted GitLab in a homelab, the easiest path is a runner registered with `--docker-privileged` and the dind service. See the [GitLab DinD docs](https://docs.gitlab.com/ee/ci/docker/using_docker_build.html).
+
+### Secrets
+
+The integration tests need an admin key and agent key at runtime. These are generated during stack setup (the pipeline runs `dev-setup.sh`), so they do not need to be pre-seeded as CI secrets. The admin key ends up in `secrets/ferrowarden_admin_key` after setup.
+
+> **Unknown:** Whether GitLab's dind environment has network access between the CI container and the Docker Compose services on the same bridge network. If the `until curl` health checks in `dev-setup.sh` time out, the services may be on an isolated network. Setting `FERROWARDEN_URL` to the container's service name instead of `localhost` may be needed.
+
+### Draft Pipeline
+
+See [`.gitlab-ci.yml`](../.gitlab-ci.yml).
+
+---
+
+## Option B: GitHub Actions
+
+Place `.github/workflows/test.yml` at the repo root. A draft is provided in this repository.
+
+### Services vs Docker Compose
+
+GitHub Actions supports `services:` for simple containers but not Docker Compose stacks. The integration test workflow uses `docker compose` directly (the runner has Docker available).
+
+> **Unknown:** Whether `docker compose` is available on GitHub-hosted runners by default. As of mid-2024 it is available on `ubuntu-latest`, but this may change. If not available, `pip install docker-compose` or `apt-get install docker-compose-plugin` may be needed.
+
+### Secrets
+
+GitHub Actions secrets are set in the repository settings. The admin key does not need to be pre-configured — `dev-setup.sh` generates it. No secrets are required in the CI environment for the tests to run.
+
+### Draft Pipeline
+
+See [`.github/workflows/test.yml`](../.github/workflows/test.yml).
+
+---
+
+## Separating Unit and Integration Tests
+
+The integration tests are gated behind the `FERROWARDEN_INTEGRATION` environment variable. Without it, `cargo test` skips them entirely and only runs unit tests.
+
+```sh
+# Unit tests only (no Docker required):
+cargo test --lib
+
+# Unit + all non-integration tests:
+cargo test
+
+# Full suite including integration tests:
+FERROWARDEN_INTEGRATION=1 cargo test --test integration -- --test-threads=1
+```
+
+A pipeline that only wants fast feedback on every push can skip integration tests and run them only on merge requests or on a schedule.
+
+---
+
+## Caching
+
+Cargo compiles all dependencies before the application. Without caching, every pipeline run recompiles everything from scratch (~3–5 minutes on a small runner). Cache the Cargo registry and target directory:
+
+**GitLab:**
+```yaml
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - .cargo/registry/
+    - .cargo/git/
+    - target/
+```
+
+**GitHub Actions:**
+```yaml
+- uses: actions/cache@v4
+  with:
+    path: |
+      ~/.cargo/registry
+      ~/.cargo/git
+      target/
+    key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+```
+
+---
+
+## Known Issues and Gotchas
+
+**`--test-threads=1` is required for integration tests.**
+The 11 integration tests share mock-api state and must run serially. Without this flag, two tests that modify the mock state will race.
+
+**bw-serve takes ~15 seconds to initialize.**
+The dev-setup script has a sleep and health-check loop. In CI the Docker network round-trip may be slower. If tests fail with "vault locked" or connection refused on the first few runs, increase the wait time in `scripts/dev-setup.sh`.
+
+**bw-cli version is pinned to 2023.12.1.**
+This version accepts HTTP server URLs. Newer versions require HTTPS. Do not upgrade without testing against Vaultwarden's current cipher format.
+
+**Cargo build toolchain on Windows runners.**
+If running on a Windows GitHub Actions runner, use the MSVC toolchain:
+```yaml
+- run: rustup default stable-x86_64-pc-windows-msvc
+```
+The GNU toolchain requires MinGW and will fail to build `ring`.
+
+**Docker volume ownership.**
+The first run creates named volumes. If a previous run left behind a root-owned volume (from a failed setup), the next run's `bw-serve` or `ferrowarden` container will fail to write to it. Add `docker compose down -v` at the start of the integration test job to ensure a clean state.

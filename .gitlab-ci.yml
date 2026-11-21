@@ -1,0 +1,85 @@
+# .gitlab-ci.yml
+#
+# UNTESTED — see docs/cicd.md before using this.
+# This is a draft based on the project's requirements. It will likely need
+# adjustment for your specific runner configuration.
+
+stages:
+  - test
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  # Docker-in-Docker TLS
+  DOCKER_HOST: tcp://docker:2376
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_TLS_VERIFY: 1
+  DOCKER_CERT_PATH: "/certs/client"
+
+# ── Cache ──────────────────────────────────────────────────────────────────────
+
+.cargo-cache: &cargo-cache
+  cache:
+    key: "$CI_COMMIT_REF_SLUG-cargo"
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
+
+# ── Unit tests ─────────────────────────────────────────────────────────────────
+# Runs on every push. No Docker required.
+
+unit-tests:
+  stage: test
+  image: rust:slim
+  <<: *cargo-cache
+  script:
+    - cargo test --lib
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ── Integration tests ──────────────────────────────────────────────────────────
+# Requires Docker-in-Docker. Runs on merge requests and the default branch.
+#
+# KNOWN UNKNOWNS (see docs/cicd.md):
+# - Privileged runner with dind service required
+# - Network access between CI container and Docker Compose services
+#   may need FERROWARDEN_URL set to the container name rather than localhost
+
+integration-tests:
+  stage: test
+  image: rust:slim
+  services:
+    - name: docker:dind
+      alias: docker
+  <<: *cargo-cache
+  variables:
+    FERROWARDEN_URL: "http://localhost:3000"
+  before_script:
+    # Install Docker CLI and compose plugin into the Rust image
+    - apt-get update -qq
+    - apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release
+    - install -m 0755 -d /etc/apt/keyrings
+    - curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    - >
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg]
+      https://download.docker.com/linux/debian $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+    - apt-get update -qq
+    - apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin
+    # Verify Docker is reachable
+    - docker info
+  script:
+    # Clean slate — previous run may have left volumes in bad state
+    - docker compose -f docker-compose.test.yml down -v 2>/dev/null || true
+    # Run the full setup (generates secrets, registers Vaultwarden account,
+    # seeds credentials, starts all services, creates agent key)
+    - chmod +x scripts/dev-setup.sh
+    - scripts/dev-setup.sh
+    # Load the generated env vars and run integration tests
+    - . .env.test
+    - cargo test --test integration -- --nocapture --test-threads=1
+  after_script:
+    - docker compose -f docker-compose.test.yml down -v 2>/dev/null || true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
