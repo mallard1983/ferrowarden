@@ -1,0 +1,138 @@
+/* Ferrowarden admin UI. No scripts, no external assets or fonts. */
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #1b1f24;
+  --muted: #59636e;
+  --border: #d0d7de;
+  --accent: #0b5cad;
+  --accent-text: #ffffff;
+  --ok: #1a7f37;
+  --bad: #b42318;
+  --focus: #0b5cad;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12161b;
+    --surface: #1b2128;
+    --text: #e6eaee;
+    --muted: #9aa5b1;
+    --border: #38414b;
+    --accent: #5aa3ee;
+    --accent-text: #0a1017;
+    --ok: #4cc26b;
+    --bad: #ff8b7e;
+    --focus: #8cc0f5;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.top {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.brand { font-weight: 700; }
+.sub { color: var(--muted); }
+
+main {
+  max-width: 40rem;
+  margin: 1.5rem auto;
+  padding: 1.25rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+@media (max-width: 42rem) {
+  main { margin: 0; border-radius: 0; border-left: 0; border-right: 0; }
+}
+
+h1 { margin: 0 0 0.5rem; font-size: 1.5rem; }
+.muted { color: var(--muted); }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
+
+form { margin: 1rem 0; }
+form.inline { margin: 0.5rem 0 1rem; }
+label { display: block; margin-bottom: 0.25rem; font-weight: 600; }
+
+input[type="password"],
+input[type="text"] {
+  display: block;
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  margin-bottom: 1rem;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+button {
+  padding: 0.6rem 1.1rem;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  cursor: pointer;
+}
+button.secondary {
+  color: var(--text);
+  background: transparent;
+  border-color: var(--border);
+}
+
+a { color: var(--accent); }
+
+input:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.alert {
+  margin: 1rem 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 6px;
+}
+.alert.error { border-left-color: var(--bad); }
+
+.choices { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 1rem 0; }
+.choices a {
+  padding: 0.35rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  text-decoration: none;
+}
+.choices a.current { border-color: var(--accent); font-weight: 600; }
+
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.5rem 1.25rem; margin: 1rem 0; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 28rem) {
+  .facts { grid-template-columns: 1fr; gap: 0; }
+  .facts dd { margin-bottom: 0.6rem; }
+}
+
+.badge { font-weight: 700; }
+.badge.ok { color: var(--ok); }
+.badge.bad { color: var(--bad); }

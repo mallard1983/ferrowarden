@@ -1,0 +1,13 @@
+{% extends "ui/base.html" %}
+{% block title %}HTTPS required{% endblock %}
+{% block content %}
+<h1>HTTPS is required</h1>
+<p>This page accepts the vault master password, so Ferrowarden only serves it over an encrypted connection. This request arrived over plain HTTP, so the sign-in form is not shown.</p>
+<p>To fix this, do one of the following:</p>
+<ul>
+<li>Put a reverse proxy with a TLS certificate in front of this port, add the proxy's address to <code>trusted_proxies</code>, and make it send <code>X-Forwarded-Proto: https</code>.</li>
+<li>Enable TLS for Ferrowarden itself (<code>tls_enabled</code>); the UI listener then uses the same certificate.</li>
+<li>For a local test only, set <code>ui.insecure_http = true</code> (<code>FERROWARDEN_UI__INSECURE_HTTP=true</code>).</li>
+</ul>
+<p>See <code>docs/admin-ui.md</code>.</p>
+{% endblock %}

@@ -21,6 +21,8 @@ RUN rm src/main.rs
 
 # Build the actual application
 COPY src ./src
+# Admin UI page templates (compiled into the binary by askama).
+COPY templates ./templates
 # Touch main.rs so cargo knows to recompile (the dummy above changed mtime)
 RUN touch src/main.rs
 RUN cargo build --release

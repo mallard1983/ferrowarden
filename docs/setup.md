@@ -323,6 +323,12 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `admin_rate_limit_per_minute` | `FERROWARDEN_ADMIN_RATE_LIMIT_PER_MINUTE` | `30` — sustained admin requests per minute per client IP |
 | `admin_rate_limit_burst` | `FERROWARDEN_ADMIN_RATE_LIMIT_BURST` | `5` — keep low; slows admin key guessing |
 | `trusted_proxies` | `FERROWARDEN_TRUSTED_PROXIES` | *(empty)* — CIDRs/IPs of reverse proxies whose `X-Forwarded-For` is trusted for rate limiting |
+| `ui.bind` | `FERROWARDEN_UI__BIND` | *(empty: admin web UI disabled)* — e.g. `0.0.0.0:3001`; see [admin-ui.md](admin-ui.md) |
+| `ui.vaultwarden_url` | `FERROWARDEN_UI__VAULTWARDEN_URL` | `https://vaultwarden` |
+| `ui.vaultwarden_ca_file` | `FERROWARDEN_UI__VAULTWARDEN_CA_FILE` | *(empty; the Compose files set `/ca-public/ca.crt`)* |
+| `ui.insecure_http` | `FERROWARDEN_UI__INSECURE_HTTP` | `false` — serve the sign-in form over plain HTTP (local testing only) |
+| `ui.session_idle_minutes` | `FERROWARDEN_UI__SESSION_IDLE_MINUTES` | `15` |
+| `ui.session_max_hours` | `FERROWARDEN_UI__SESSION_MAX_HOURS` | `8` |
 | *(env only)* | `FERROWARDEN_LOG_LEVEL` | `info` — requires restart to change |
 
 ---

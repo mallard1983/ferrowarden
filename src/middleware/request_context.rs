@@ -34,6 +34,9 @@ pub struct RequestContext {
     /// UUID v7, always generated here — an incoming `X-Request-Id` is ignored.
     pub request_id: String,
     pub client_ip: IpAddr,
+    /// The TCP peer itself (the reverse proxy, when there is one). Only the
+    /// admin UI needs it, to decide whether `X-Forwarded-Proto` is trusted.
+    pub peer_ip: IpAddr,
     pub started: Instant,
 }
 
@@ -42,6 +45,7 @@ impl RequestContext {
         Self {
             request_id: Uuid::now_v7().to_string(),
             client_ip,
+            peer_ip: client_ip,
             started: Instant::now(),
         }
     }
@@ -64,19 +68,23 @@ impl<S: Send + Sync> FromRequestParts<S> for RequestContext {
     }
 }
 
-/// The client IP: the TCP peer address, or — when the peer is a trusted proxy
-/// — the rightmost untrusted address in `X-Forwarded-For`. Falls back to
-/// 127.0.0.1 when ConnectInfo is absent (unit tests, manual serve).
-fn resolve_client_ip(request: &Request, trusted: &[Cidr]) -> IpAddr {
+/// The TCP peer address; 127.0.0.1 when ConnectInfo is absent (unit tests,
+/// manual serve).
+fn peer_ip(request: &Request) -> IpAddr {
     // Read ConnectInfo from extensions rather than using it as a function-level
     // extractor: the Option<ConnectInfo<_>> extractor has trait bound
     // complications in Axum 0.8; reading extensions directly is more reliable.
-    let peer = request
+    request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip())
-        .unwrap_or_else(|| IpAddr::from([127, 0, 0, 1]));
+        .unwrap_or_else(|| IpAddr::from([127, 0, 0, 1]))
+}
 
+/// The client IP: the TCP peer address, or — when the peer is a trusted proxy
+/// — the rightmost untrusted address in `X-Forwarded-For`. Falls back to
+/// 127.0.0.1 when ConnectInfo is absent (unit tests, manual serve).
+fn resolve_client_ip(request: &Request, peer: IpAddr, trusted: &[Cidr]) -> IpAddr {
     if trusted.is_empty() {
         return peer;
     }
@@ -93,7 +101,9 @@ pub async fn request_context(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let ctx = RequestContext::new(resolve_client_ip(&request, &trusted));
+    let peer = peer_ip(&request);
+    let mut ctx = RequestContext::new(resolve_client_ip(&request, peer, &trusted));
+    ctx.peer_ip = peer;
     let request_id = ctx.request_id.clone();
     request.extensions_mut().insert(ctx);
 

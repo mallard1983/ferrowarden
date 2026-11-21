@@ -101,6 +101,10 @@ All rules carry group `ferrowarden` and use ids 100200 to 100299. Fields appear 
 | 100261 | 5 | `key_revoke` (success) |
 | 100262 | 5 | `key_policy_change` (success) |
 | 100270 | 10 | `events_dropped` |
+| 100290 | 7 | admin UI sign-in failure (`ui_login`, any reason except the lockout) |
+| 100291 | 12 | 5 admin UI sign-in failures from the same `source.ip` within 300 s |
+| 100292 | 10 | admin UI sign-in refused by a lockout (`login_locked_out`) |
+| 100293 | 3 | admin UI sign-in success |
 | 100280 / 100281 | 3 | `startup` / `shutdown` |
 
 Other events (successful forwards, credential listings, other forward failure reasons, ...) match only the level-0 base rule. Add rules on `event.reason` for them if you want alerts. Note that Wazuh's `frequency` fires on the Nth event (the fifth failure, the third admin failure).

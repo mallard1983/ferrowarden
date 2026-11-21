@@ -8,6 +8,7 @@ mod net;
 mod policy;
 mod proxy;
 mod state;
+mod ui;
 mod vault;
 
 use std::net::SocketAddr;
@@ -45,6 +46,12 @@ fn startup_event(
         .detail("api_prefix_set", !config.api_prefix.is_empty())
         .detail("agent_key_count", agent_key_count)
         .detail("sinks", config.events.enabled_sinks())
+        .detail("ui_enabled", config.ui.enabled())
+        .detail("ui_tls", config.ui.enabled() && config.tls_enabled)
+        .detail(
+            "ui_insecure_http",
+            config.ui.enabled() && config.ui.insecure_http,
+        )
 }
 
 #[tokio::main]
@@ -142,14 +149,41 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("allow_private_targets = true: agents may reach private/internal addresses (bw serve is still blocked)");
     }
 
-    let router = api::router(state);
+    let router = api::router(state.clone());
 
-    // Set by the signal handler, read after the server stops.
+    // The admin UI is a separate server on its own port: never merged into
+    // the API router above. Disabled unless `ui.bind` is set.
+    let ui_server = if config.ui.enabled() {
+        let addr: SocketAddr = config.ui.bind.trim().parse()?;
+        let ui_state = ui::UiState::new(state.clone()).map_err(|e| anyhow::anyhow!(e))?;
+        if config.ui.insecure_http {
+            tracing::warn!(
+                "ui.insecure_http = true: the admin UI serves its sign-in form over plain HTTP. \
+                 The vault master password crosses the network unencrypted unless a TLS proxy \
+                 sits in front. Use only for local testing."
+            );
+        }
+        Some((addr, ui::router(ui_state)))
+    } else {
+        None
+    };
+
+    // Set by the signal handler, read after the servers stop.
     let signal: Arc<OnceLock<&'static str>> = Arc::new(OnceLock::new());
+    // One stop signal for every listener.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn({
+        let signal = signal.clone();
+        async move {
+            let _ = signal.set(shutdown_signal().await);
+            let _ = stop_tx.send(true);
+        }
+    });
 
     let addr: std::net::SocketAddr = config.bind_addr.parse()?;
 
-    if config.tls_enabled {
+    // The same certificate serves the API and, if enabled, the UI.
+    let tls_config = if config.tls_enabled {
         let cert = config
             .tls_cert_file
             .as_ref()
@@ -158,23 +192,7 @@ async fn main() -> anyhow::Result<()> {
             .tls_key_file
             .as_ref()
             .expect("tls_key_file required when tls_enabled");
-
-        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
-
-        tracing::info!("Listening on https://{} (TLS)", addr);
-        let handle = axum_server::Handle::new();
-        tokio::spawn({
-            let handle = handle.clone();
-            let signal = signal.clone();
-            async move {
-                let _ = signal.set(shutdown_signal().await);
-                handle.graceful_shutdown(Some(SHUTDOWN_GRACE));
-            }
-        });
-        axum_server::bind_rustls(addr, tls_config)
-            .handle(handle)
-            .serve(router.into_make_service_with_connect_info::<SocketAddr>())
-            .await?;
+        Some(axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?)
     } else {
         // TLS is disabled. This is only safe when the agent and ferrowarden
         // run on the same host (e.g. same Docker network, same machine).
@@ -185,19 +203,32 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("║  This is ONLY acceptable when the agent and ferrowarden  ║");
         tracing::warn!("║  run on the SAME HOST with no network hop between them.  ║");
         tracing::warn!("╚══════════════════════════════════════════════════════════╝");
+        None
+    };
 
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        tracing::info!("Listening on http://{} (plaintext)", addr);
-        let signal = signal.clone();
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            let _ = signal.set(shutdown_signal().await);
-        })
-        .await?;
-    }
+    let api = serve(
+        "Listening",
+        router,
+        addr,
+        tls_config.clone(),
+        stop_rx.clone(),
+    );
+    let ui = async {
+        match ui_server {
+            Some((ui_addr, ui_router)) => {
+                serve(
+                    "Admin UI listening",
+                    ui_router,
+                    ui_addr,
+                    tls_config,
+                    stop_rx,
+                )
+                .await
+            }
+            None => Ok(()),
+        }
+    };
+    tokio::try_join!(api, ui)?;
 
     // Graceful stop: tell the stream, then flush the sinks before exiting.
     events.emit(
@@ -207,6 +238,45 @@ async fn main() -> anyhow::Result<()> {
     events.flush().await;
     tracing::info!("Ferrowarden stopped");
 
+    Ok(())
+}
+
+/// Serve `router` on `addr` (with TLS when a config is given) until the stop
+/// signal fires, then let in-flight requests finish.
+async fn serve(
+    name: &'static str,
+    router: axum::Router,
+    addr: SocketAddr,
+    tls: Option<axum_server::tls_rustls::RustlsConfig>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let make_service = router.into_make_service_with_connect_info::<SocketAddr>();
+    match tls {
+        Some(tls) => {
+            tracing::info!("{name} on https://{} (TLS)", addr);
+            let handle = axum_server::Handle::new();
+            tokio::spawn({
+                let handle = handle.clone();
+                async move {
+                    let _ = stop.wait_for(|stopped| *stopped).await;
+                    handle.graceful_shutdown(Some(SHUTDOWN_GRACE));
+                }
+            });
+            axum_server::bind_rustls(addr, tls)
+                .handle(handle)
+                .serve(make_service)
+                .await?;
+        }
+        None => {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            tracing::info!("{name} on http://{} (plaintext)", addr);
+            axum::serve(listener, make_service)
+                .with_graceful_shutdown(async move {
+                    let _ = stop.wait_for(|stopped| *stopped).await;
+                })
+                .await?;
+        }
+    }
     Ok(())
 }
 

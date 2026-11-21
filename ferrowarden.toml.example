@@ -132,6 +132,24 @@ max_response_bytes = 10485760
 # syslog_ca_file = "/run/certs/siem-ca.pem" # extra CA for tls://, besides the public roots
 
 
+# ── Admin web UI ────────────────────────────────────────────────────────────
+#
+# Optional operator UI on its own port (separate from the API): sign in with the
+# Vaultwarden master password (two-step login supported), read-only status page.
+# Off unless `bind` is set. It accepts the master password, so it only serves
+# its sign-in form over HTTPS: its own TLS (tls_enabled) or a reverse proxy
+# listed in trusted_proxies that sends X-Forwarded-Proto: https.
+# See docs/admin-ui.md. Environment: FERROWARDEN_UI__<KEY>.
+#
+# [ui]
+# bind = "0.0.0.0:3001"                          # empty (default) = UI disabled
+# vaultwarden_url = "https://vaultwarden"        # must be https:// (http only for localhost)
+# vaultwarden_ca_file = "/ca-public/ca.crt"      # extra CA (PEM) for vaultwarden_url; never the CA key
+# insecure_http = false                          # true = plain-HTTP sign-in form (local testing only)
+# session_idle_minutes = 15
+# session_max_hours = 8
+
+
 # ── API path prefix ─────────────────────────────────────────────────────────
 
 # Serve every API route except /health under this prefix, e.g. "/k7f3q9"

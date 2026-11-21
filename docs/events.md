@@ -84,7 +84,7 @@ Every response, including `/health`, 404s and 429s, carries an `X-Request-Id` he
 | `agent_auth` | authentication / start | **Failures only.** Reason `missing_key` or `invalid_key`. Details: `endpoint`. Success is implied by `forward` and `credentials_list` carrying `ferrowarden.key` |
 | `admin_auth` | authentication / start | **Failures only**, on any admin route including `/v1/unlock`. Reason `missing_admin_key` or `invalid_admin_key`. Details: `endpoint` |
 | `rate_limited` | network / denied | A request was answered `429`. **Aggregated**, see below. Details: `limiter` (`agent` or `admin`), `suppressed` |
-| `request_rejected` | web / denied | An authenticated request had an invalid body or query. Reason `invalid_json` or `invalid_request`. Details: `endpoint`, `error` (the sanitized message the client received) |
+| `request_rejected` | web / denied | An authenticated request had an invalid body or query. Reason `invalid_json` or `invalid_request`. Details: `endpoint`, `error` (the sanitized message the client received). Also: a POST to the [admin UI](admin-ui.md) refused for a missing or wrong CSRF token or a failed same-origin check (`invalid_request`, status `403`, `error` = `csrf_check_failed` or `origin_check_failed`) |
 | `key_create` | iam / creation | Admin created an agent key. Details: `key_id`, `key_name`, `credentials` and `methods` (the key's policy; `["*"]` = everything) |
 | `key_policy_change` | iam / change | Admin changed a key's policy with `PATCH`. Details: `key_id`, `key_name`, `before` and `after` (each `{ "credentials": [...], "methods": [...] }`). Failures (unknown id `key_not_found`, invalid body) carry the reason and `key_id` |
 | `policy_preview` | iam / access | Admin previewed a draft policy (`POST /v1/admin/keys/{id}/preview`); nothing is changed. Details: `key_id`, `key_name`, `request_checked` (bool) |
@@ -95,9 +95,13 @@ Every response, including `/health`, 404s and 429s, carries an `X-Request-Id` he
 | `vault_unlock` | authentication / start | Details: `mode` = `manual` (`POST /v1/unlock`), `file` (startup) or `reunlock` (automatic, after bw serve restarted). Failure reason `unlock_failed` |
 | `vault_lock` | configuration / change | The vault went from unlocked to locked. Details: `cause` (`bw_serve_locked`, `forward_vault_locked`). Emitted on the transition only |
 | `vault_sync` | configuration / info | Credential refresh. Always on failure (reason `sync_failed`, details `stage`); on success **only when the credential count changed** (details `credential_count`, `previous`) |
-| `startup` | configuration / start | Once at start. Details: `version`, `tls_enabled`, `unlock_mode`, `enforce_credential_hosts`, `allow_private_targets`, `allowed_targets` (count), `trusted_proxies` (count), `api_prefix_set` (bool; **the prefix itself is never logged**), `agent_key_count`, `keys_without_policy` (keys from 0.1.0 that are deny-all until patched), `sinks` |
+| `startup` | configuration / start | Once at start. Details: `version`, `tls_enabled`, `unlock_mode`, `enforce_credential_hosts`, `allow_private_targets`, `allowed_targets` (count), `trusted_proxies` (count), `api_prefix_set` (bool; **the prefix itself is never logged**), `agent_key_count`, `keys_without_policy` (keys from 0.1.0 that are deny-all until patched), `sinks`, `ui_enabled`, `ui_tls` (the UI listener serves TLS), `ui_insecure_http` (the sign-in form is served over plain HTTP: a security downgrade) |
 | `shutdown` | configuration / end | On SIGTERM or Ctrl-C. Details: `signal`. Sinks are flushed before the process exits |
 | `events_dropped` | configuration / info | The sink queue overflowed and events were not delivered to the sinks. Details: `dropped`. `event.outcome` is `unknown` |
+| `ui_login` | authentication / start (+ `denied` when refused) | A sign-in to the [admin UI](admin-ui.md) with the vault master password. `event.outcome` is `success`, `failure`, or `unknown` for **step one of a two-step login** (the password was right, a second factor is pending; reason `two_factor_required`). Reasons: `invalid_credentials`, `two_factor_required`, `two_factor_failed`, `login_locked_out` (details `scope`: `ip` or `global`), `upstream_rate_limited`, `upstream_error`, `insecure_transport` (the form was refused because the connection is not HTTPS; at most one event per 30 s, `details.suppressed` counts the rest). Details: `provider` (`authenticator`, `email` or `yubikey`) on second-factor steps. Never the password, a code, a hash or anything Vaultwarden said |
+| `ui_logout` | authentication / end | The operator signed out of the admin UI |
+| `ui_session_expired` | authentication / end | An admin UI session that ran out (idle or absolute limit) was detected on its next request |
+| `ui_two_factor_email_sent` | authentication / info | The UI asked Vaultwarden to email a second-factor code (failure: reason `upstream_rate_limited` or `upstream_error`). Never the code |
 
 Authentication happens **before** the request body is looked at. A caller without a valid key therefore gets `401` and an `agent_auth` / `admin_auth` event, never a parse error or a `request_rejected` event.
 
@@ -186,6 +190,12 @@ The startup event (shown formatted):
 | `unlock_failed` | varies | Vault unlock failed |
 | `sync_failed` | n/a | Credential refresh failed |
 | `internal_error` | 500 | Unexpected internal error |
+| `invalid_credentials` | 401 | Admin UI: wrong master password |
+| `two_factor_required` | 303 / 422 | Admin UI: the password was right and a second factor is needed (outcome `unknown`), or the account has only second factors the UI cannot complete (outcome `failure`, `422`) |
+| `two_factor_failed` | 401 | Admin UI: a second-factor code was rejected |
+| `login_locked_out` | 429 | Admin UI: refused before any work because too many sign-ins failed (per IP or global) |
+| `upstream_rate_limited` | 429 | Admin UI: Vaultwarden answered `429` |
+| `insecure_transport` | 400 | Admin UI: the request was not over HTTPS, so the sign-in form was not served |
 
 ---
 
@@ -259,7 +269,7 @@ The last `buffer_size` events are kept in memory and returned by `GET /v1/admin/
 
 ## What is never logged
 
-Credential values, agent tokens and their hashes, the admin key, the vault master password, and the `api_prefix` value never appear in an event. A failed-authentication event does not contain the presented key, not even a prefix. The `scripts/check-no-secrets.sh` gate, run in CI, greps the container logs and the event file for every seeded secret and fails the build if one shows up.
+Credential values, agent tokens and their hashes, the admin key, the vault master password (and the login hash derived from it), second-factor codes, admin UI session ids and CSRF tokens, anything Vaultwarden said in an error response, and the `api_prefix` value never appear in an event. A failed-authentication event does not contain the presented key, not even a prefix. The `scripts/check-no-secrets.sh` gate, run in CI, greps the container logs and the event file for every seeded secret and fails the build if one shows up.
 
 Agent-supplied data that **is** logged (URLs before substitution, key names, credential labels) comes from the agent and is treated as data: truncated and JSON-escaped. An agent that puts a real secret literally into a URL has disclosed it itself.
 

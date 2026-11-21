@@ -36,6 +36,8 @@ services:
     entrypoint: ["/bin/sh", "/usr/local/bin/gen-internal-certs.sh"]
     volumes:
       - internal-pki:/pki
+      # Receives a copy of ca.crt only (never the key), for ferrowarden.
+      - internal-ca-public:/ca-public
     environment:
       VW_HOSTNAME: "vaultwarden"
       # Extra names/IPs for the certificate, for browsing to the web vault
@@ -165,6 +167,10 @@ services:
       # tokens are never stored on disk. Keys survive container restarts and
       # can be rotated via the admin API without shell access.
       - ferrowarden-keys:/data
+      # The internal CA certificate (public part only: the CA private key stays
+      # in the internal-pki volume, which ferrowarden must never mount). Lets
+      # the admin UI verify Vaultwarden's certificate when it signs you in.
+      - internal-ca-public:/ca-public:ro
     environment:
       FERROWARDEN_UNLOCK_MODE: "file"
       FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
@@ -213,6 +219,18 @@ services:
       # FERROWARDEN_EVENTS__SYSLOG_CA_FILE: "/run/certs/siem-ca.pem"
       # FERROWARDEN_EVENTS__BUFFER_SIZE: "1000"
       # FERROWARDEN_EVENTS__QUEUE_SIZE: "10000"
+      # Admin web UI (docs/admin-ui.md): off unless FERROWARDEN_UI__BIND is set.
+      # It accepts the vault master password, so it only serves its sign-in form
+      # over HTTPS: put a TLS reverse proxy in front and list it in
+      # FERROWARDEN_TRUSTED_PROXIES, or enable ferrowarden's own TLS.
+      # The CA file is how it trusts Vaultwarden's internal certificate.
+      FERROWARDEN_UI__VAULTWARDEN_CA_FILE: "/ca-public/ca.crt"
+      # FERROWARDEN_UI__BIND: "0.0.0.0:3001"
+      # FERROWARDEN_UI__VAULTWARDEN_URL: "https://vaultwarden"
+      # FERROWARDEN_UI__SESSION_IDLE_MINUTES: "15"
+      # FERROWARDEN_UI__SESSION_MAX_HOURS: "8"
+      # Local testing only (plain-HTTP sign-in form):
+      # FERROWARDEN_UI__INSECURE_HTTP: "true"
     networks:
       - vault-internal
       - agent-facing
@@ -221,7 +239,13 @@ services:
       # TLS is required (default) whenever this port is reachable over a network.
       # Change to 127.0.0.1:3000:3000 if the agent runs on the same host only.
       - "${FERROWARDEN_PUBLISH:-0.0.0.0}:${FERROWARDEN_PORT:-3000}:3000"
+      # Admin web UI port (when FERROWARDEN_UI__BIND is set). Loopback only;
+      # reach it through your TLS reverse proxy.
+      # - "127.0.0.1:3001:3001"
     depends_on:
+      internal-certs:
+        # The CA certificate copy exists once the one-shot has finished.
+        condition: service_completed_successfully
       bw-serve:
         # Wait for bw serve to pass its healthcheck before starting ferrowarden.
         # Without this, ferrowarden's file-mode unlock races against bw serve init
@@ -277,6 +301,9 @@ volumes:
   # Holds the CA private key — back it up with the other volumes or let it be
   # regenerated (bw serve picks up a new CA on restart).
   internal-pki:
+  # Only the CA certificate (ca.crt), copied from internal-pki by internal-certs.
+  # This is what ferrowarden mounts, so it never sees the CA private key.
+  internal-ca-public:
 
 
 # ── Secrets ──────────────────────────────────────────────────────────────────

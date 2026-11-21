@@ -155,6 +155,48 @@
     <description>Ferrowarden: security events were dropped ($(ferrowarden.details.dropped)); the event stream has a gap.</description>
   </rule>
 
+  <!-- Admin web UI sign-ins (docs/admin-ui.md). The lockout rule comes before the
+       generic failure rule: Wazuh stops at the first matching sibling. -->
+  <rule id="100292" level="10">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^ui_login$</field>
+    <field name="event.reason">^login_locked_out$</field>
+    <description>Ferrowarden: admin UI sign-in refused, too many failed attempts (scope $(ferrowarden.details.scope)) from $(source.ip).</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>authentication_failures,</group>
+  </rule>
+
+  <rule id="100290" level="7">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^ui_login$</field>
+    <field name="event.outcome">^failure$</field>
+    <description>Ferrowarden: admin UI sign-in failed ($(event.reason)) from $(source.ip).</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>authentication_failed,</group>
+  </rule>
+
+  <rule id="100291" level="12" frequency="5" timeframe="300">
+    <if_matched_sid>100290</if_matched_sid>
+    <same_field>source.ip</same_field>
+    <description>Ferrowarden: repeated admin UI sign-in failures from $(source.ip): someone is guessing the vault master password.</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>authentication_failures,</group>
+  </rule>
+
+  <rule id="100293" level="3">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^ui_login$</field>
+    <field name="event.outcome">^success$</field>
+    <description>Ferrowarden: admin UI sign-in succeeded from $(source.ip).</description>
+    <group>authentication_success,</group>
+  </rule>
+
   <!-- Lifecycle -->
   <rule id="100280" level="3">
     <if_sid>100200,100201</if_sid>

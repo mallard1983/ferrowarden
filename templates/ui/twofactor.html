@@ -1,0 +1,35 @@
+{% extends "ui/base.html" %}
+{% block title %}Two-step login{% endblock %}
+{% block content %}
+<h1>Two-step login</h1>
+<p class="muted">Your password was accepted. Enter a second factor to finish signing in. This step expires after three minutes.</p>
+{% if let Some(message) = error %}<p class="alert error" role="alert">{{ message }}</p>{% endif %}
+{% if let Some(message) = notice %}<p class="alert" role="status">{{ message }}</p>{% endif %}
+{% if providers.len() > 1 %}
+<nav class="choices" aria-label="Second factor">
+{% for p in providers %}<a href="/ui/login/2fa?provider={{ p.id }}"{% if p.selected %} aria-current="true" class="current"{% endif %}>{{ p.label }}</a>{% endfor %}
+</nav>
+{% endif %}
+{% if is_email %}
+<form method="post" action="/ui/login/2fa" class="inline">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="provider" value="{{ selected_id }}">
+<input type="hidden" name="action" value="send_email">
+<p>{% if let Some(hint) = email_hint %}A code is sent to {{ hint }}.{% else %}A code is sent to the email address of the account.{% endif %}</p>
+<button type="submit" class="secondary">Send code</button>
+</form>
+{% endif %}
+<form method="post" action="/ui/login/2fa">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="provider" value="{{ selected_id }}">
+<input type="hidden" name="action" value="verify">
+<label for="code">{{ selected_label }} code</label>
+{% if is_yubikey %}
+<input id="code" name="code" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="44" required autofocus>
+{% else %}
+<input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="10" required autofocus>
+{% endif %}
+<button type="submit">Verify</button>
+</form>
+<p><a href="/ui/login">Start over</a></p>
+{% endblock %}

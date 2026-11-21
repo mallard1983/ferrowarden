@@ -464,6 +464,16 @@ bw-serve only runs `bw login` when the CLI is not already logged in, so restarts
 - `ERROR: internal CA certificate not found at /pki/ca.crt` — the `internal-pki` volume is not mounted, or `internal-certs` has not run (`docker compose up -d` runs it automatically).
 - TLS errors such as `unable to verify the first certificate` — Vaultwarden's certificate was not issued by the CA in `internal-pki`; run `docker compose run --rm internal-certs` and restart `vaultwarden` and `bw-serve`.
 
+### Admin web UI
+
+The optional UI is described in [admin-ui.md](admin-ui.md). Common problems:
+
+- **"HTTPS is required" instead of the sign-in form** — the request did not arrive over HTTPS. Serve the UI behind a TLS proxy that sends `X-Forwarded-Proto: https` and list the proxy in `trusted_proxies`, enable Ferrowarden's own TLS, or (local testing only) set `ui.insecure_http`.
+- **"Too many attempts"** — the per-IP (5 failures) or global (10 failures) lockout is active for 15 minutes. Behind a proxy, check `trusted_proxies`: without it every client looks like the proxy. Restarting Ferrowarden clears the lockouts.
+- **"Ferrowarden could not complete the sign-in with Vaultwarden"** — `bw serve` is not logged in (the account email comes from it), Vaultwarden is unreachable at `ui.vaultwarden_url`, or its certificate is not trusted. Check `docker compose exec ferrowarden ls -l /ca-public` shows `ca.crt` (run `docker compose up -d` so the `internal-certs` one-shot populates `internal-ca-public`), and set `FERROWARDEN_LOG_LEVEL=ferrowarden=debug` to see Vaultwarden's own message in the log.
+- **"Request rejected"** — a CSRF or same-origin check failed, for example because the proxy rewrites `Host` without sending `X-Forwarded-Host`, or the page was open for over 15 minutes before submitting.
+- **"This account requires a second factor that the admin UI cannot complete"** — the account's only second factors are WebAuthn, Duo or a recovery code. Add an authenticator app, email or YubiKey in the web vault.
+
 ### Ferrowarden fails with "error decoding response body"; bw-serve logs `Blocking request with disallowed Host`
 
 `bw serve` only accepts requests addressed to `localhost` or to the `--hostname` it was started with. `BW_SERVE_HOSTNAME` must be the host name in `FERROWARDEN_BW_SERVE_URL` (`bw-serve` in Docker Compose).

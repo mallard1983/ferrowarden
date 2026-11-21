@@ -87,6 +87,32 @@ struct BwStringData {
     data: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct BwStatusData {
+    template: BwStatusTemplate,
+}
+
+#[derive(Debug, Deserialize)]
+struct BwStatusTemplate {
+    #[serde(default)]
+    status: String,
+    #[serde(default, rename = "userEmail")]
+    user_email: Option<String>,
+    #[serde(default, rename = "lastSync")]
+    last_sync: Option<String>,
+}
+
+/// What `GET /status` of bw serve reports: no secrets, just the session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BwStatus {
+    /// `unauthenticated`, `locked` or `unlocked`.
+    pub status: String,
+    /// Email of the logged-in account (absent when unauthenticated).
+    pub user_email: Option<String>,
+    /// Timestamp of the last sync with the server, as bw serve reports it.
+    pub last_sync: Option<String>,
+}
+
 /// Kind of vault item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
@@ -265,6 +291,36 @@ impl VaultClient {
                 .expect("Failed to build vault HTTP client"),
             base_url,
         }
+    }
+
+    /// `GET /status`: login state, account email and last sync of bw serve.
+    /// Used by the admin UI to learn which account to sign in as. Bounded by
+    /// a short timeout so a slow bw serve cannot hang a page.
+    pub async fn status(&self) -> FerroResult<BwStatus> {
+        let url = format!("{}/status", self.base_url);
+        let resp = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|_| FerroError::VaultUnavailable)?;
+        if !resp.status().is_success() {
+            return Err(FerroError::VaultUnavailable);
+        }
+        let body: BwResponse<BwStatusData> = resp
+            .json()
+            .await
+            .map_err(|_| FerroError::VaultUnavailable)?;
+        let template = match (body.success, body.data) {
+            (true, Some(data)) => data.template,
+            _ => return Err(FerroError::VaultUnavailable),
+        };
+        Ok(BwStatus {
+            status: template.status,
+            user_email: template.user_email.filter(|e| !e.trim().is_empty()),
+            last_sync: template.last_sync,
+        })
     }
 
     /// Pull the latest vault contents from Vaultwarden into bw serve's local

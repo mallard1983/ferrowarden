@@ -33,6 +33,8 @@ services:
     entrypoint: ["/bin/sh", "/usr/local/bin/gen-internal-certs.sh"]
     volumes:
       - internal-pki:/pki
+      # Receives a copy of ca.crt only (never the key), for ferrowarden.
+      - internal-ca-public:/ca-public
     environment:
       VW_HOSTNAME: "vaultwarden"
     network_mode: none
@@ -101,6 +103,9 @@ services:
       - bw_master_password
     volumes:
       - ferrowarden-keys:/data
+      # Public CA certificate only; the CA private key stays in internal-pki,
+      # which ferrowarden must never mount.
+      - internal-ca-public:/ca-public:ro
     environment:
       FERROWARDEN_UNLOCK_MODE: "file"
       FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
@@ -130,6 +135,12 @@ services:
       # UID differs; scripts/check-no-secrets.sh copies it out with
       # `docker compose cp` and scans it for secret values.
       FERROWARDEN_EVENTS__FILE: "/tmp/ferrowarden-events/events.jsonl"
+      # Admin web UI, for the integration tests. The test client speaks plain
+      # HTTP, hence insecure_http; never do this outside a test stack.
+      FERROWARDEN_UI__BIND: "0.0.0.0:3001"
+      FERROWARDEN_UI__INSECURE_HTTP: "true"
+      FERROWARDEN_UI__VAULTWARDEN_URL: "https://vaultwarden"
+      FERROWARDEN_UI__VAULTWARDEN_CA_FILE: "/ca-public/ca.crt"
     networks:
       - vault-internal
       - test-net
@@ -137,8 +148,12 @@ services:
       # Loopback only by default. To test through a reverse proxy on another
       # machine (e.g. Pangolin/newt), set FERROWARDEN_TEST_PUBLISH=0.0.0.0.
       - "${FERROWARDEN_TEST_PUBLISH:-127.0.0.1}:3000:3000"
+      - "${FERROWARDEN_TEST_PUBLISH:-127.0.0.1}:3001:3001"
     depends_on:
-      - bw-serve
+      internal-certs:
+        condition: service_completed_successfully
+      bw-serve:
+        condition: service_started
 
   # ── Mock API ─────────────────────────────────────────────────────────────────
   # Accepts any HTTP request, logs the full details (method, path, headers,
@@ -236,6 +251,8 @@ networks:
 volumes:
   vaultwarden-test-data:
   internal-pki:
+  # Public CA certificate only (see internal-certs); mounted into ferrowarden.
+  internal-ca-public:
   ferrowarden-keys:
 
 secrets:
