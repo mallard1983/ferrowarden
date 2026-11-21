@@ -1,0 +1,147 @@
+<!--
+  Wazuh rules for Ferrowarden security events (docs/events.md, schema_version 1).
+  Rule ids 100200-100299, group "ferrowarden,". Install on the manager as
+  /var/ossec/etc/rules/ferrowarden_rules.xml together with ferrowarden_decoders.xml.
+
+  Levels: 3 low/informational, 5-6 audit/notable, 8 medium-high (act on it soon),
+  10 high, 12+ critical.
+
+  Fields come from the JSON event (ECS names, e.g. event.action, event.reason,
+  source.ip, ferrowarden.key.name); they appear in alerts as data.<field>.
+-->
+<group name="ferrowarden,">
+
+  <!-- Base rules: any Ferrowarden security event, via the file (JSON) or syslog route. No alert on their own. -->
+  <rule id="100200" level="0">
+    <decoded_as>json</decoded_as>
+    <field name="event.dataset">^ferrowarden\.security$</field>
+    <description>Ferrowarden: security event.</description>
+  </rule>
+
+  <rule id="100201" level="0">
+    <decoded_as>ferrowarden-syslog</decoded_as>
+    <field name="event.dataset">^ferrowarden\.security$</field>
+    <description>Ferrowarden: security event (syslog).</description>
+  </rule>
+
+  <!-- Agent authentication -->
+  <rule id="100210" level="4">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^agent_auth$</field>
+    <field name="event.outcome">^failure$</field>
+    <description>Ferrowarden: agent authentication failed ($(event.reason)) from $(source.ip).</description>
+    <mitre>
+      <id>T1078</id>
+    </mitre>
+    <group>authentication_failed,</group>
+  </rule>
+
+  <rule id="100211" level="10" frequency="5" timeframe="120">
+    <if_matched_sid>100210</if_matched_sid>
+    <same_field>source.ip</same_field>
+    <description>Ferrowarden: repeated agent authentication failures from $(source.ip).</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>authentication_failures,</group>
+  </rule>
+
+  <!-- Admin authentication -->
+  <rule id="100220" level="10">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^admin_auth$</field>
+    <field name="event.outcome">^failure$</field>
+    <description>Ferrowarden: admin authentication failed ($(event.reason)) from $(source.ip) on $(ferrowarden.details.endpoint).</description>
+    <mitre>
+      <id>T1078</id>
+    </mitre>
+    <group>authentication_failed,</group>
+  </rule>
+
+  <rule id="100221" level="13" frequency="3" timeframe="300">
+    <if_matched_sid>100220</if_matched_sid>
+    <same_field>source.ip</same_field>
+    <description>Ferrowarden: repeated admin authentication failures from $(source.ip).</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+    <group>authentication_failures,</group>
+  </rule>
+
+  <!-- Blocked forwards: an agent tried to send a credential to a host it is not bound to, or to a blocked target. -->
+  <rule id="100230" level="8">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^forward$</field>
+    <field name="event.outcome">^failure$</field>
+    <field name="event.reason" type="pcre2">^(credential_host_not_allowed|target_blocked)$</field>
+    <description>Ferrowarden: forward blocked ($(event.reason)) for key $(ferrowarden.key.name) to $(url.domain): possible prompt injection or exfiltration attempt.</description>
+    <mitre>
+      <id>T1041</id>
+    </mitre>
+    <group>exfiltration,</group>
+  </rule>
+
+  <!-- Rate limiting (already aggregated by Ferrowarden: at most one event per IP and limiter per minute) -->
+  <rule id="100240" level="6">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^rate_limited$</field>
+    <description>Ferrowarden: rate limit hit by $(source.ip) (limiter $(ferrowarden.details.limiter)).</description>
+    <group>rate_limited,</group>
+  </rule>
+
+  <!-- Vault -->
+  <rule id="100250" level="8">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^vault_lock$</field>
+    <description>Ferrowarden: vault locked ($(ferrowarden.details.cause)); credential forwarding is unavailable until it is unlocked.</description>
+  </rule>
+
+  <rule id="100251" level="9">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^vault_unlock$</field>
+    <field name="event.outcome">^failure$</field>
+    <description>Ferrowarden: vault unlock failed (mode $(ferrowarden.details.mode)).</description>
+    <group>authentication_failed,</group>
+  </rule>
+
+  <!-- Agent key changes (audit) -->
+  <rule id="100260" level="5">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^key_create$</field>
+    <field name="event.outcome">^success$</field>
+    <description>Ferrowarden: agent key created ($(ferrowarden.details.key_name)) from $(source.ip).</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+    <group>audit,</group>
+  </rule>
+
+  <rule id="100261" level="5">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^key_revoke$</field>
+    <field name="event.outcome">^success$</field>
+    <description>Ferrowarden: agent key revoked ($(ferrowarden.details.key_name)) from $(source.ip).</description>
+    <group>audit,</group>
+  </rule>
+
+  <!-- Event pipeline health: events were lost, so the SIEM has a gap -->
+  <rule id="100270" level="10">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^events_dropped$</field>
+    <description>Ferrowarden: security events were dropped ($(ferrowarden.details.dropped)); the event stream has a gap.</description>
+  </rule>
+
+  <!-- Lifecycle -->
+  <rule id="100280" level="3">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^startup$</field>
+    <description>Ferrowarden: started (version $(ferrowarden.details.version)).</description>
+  </rule>
+
+  <rule id="100281" level="3">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^shutdown$</field>
+    <description>Ferrowarden: shut down ($(ferrowarden.details.signal)).</description>
+  </rule>
+
+</group>

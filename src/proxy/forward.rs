@@ -256,6 +256,7 @@ mod tests {
             agent_rate_limit_burst: 20,
             admin_rate_limit_per_minute: 30,
             admin_rate_limit_burst: 5,
+            events: Default::default(),
         }))
     }
 

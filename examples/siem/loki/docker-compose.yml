@@ -1,0 +1,41 @@
+# Loki + Grafana Alloy for Ferrowarden security events.
+#
+#   docker compose up -d
+#   curl -G http://localhost:3100/loki/api/v1/query_range \
+#        --data-urlencode 'query={job="ferrowarden"}' --data-urlencode 'limit=5'
+#
+# Alloy reads the Docker socket to find the Ferrowarden container (Compose
+# service name "ferrowarden") and tails its logs. On Docker Desktop for Windows
+# the "//var/run/docker.sock" form works; on Linux/macOS it is the same socket.
+services:
+  loki:
+    image: grafana/loki:3.5.7
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - ./rules:/etc/loki/rules:ro
+      - loki-data:/loki
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.11.3
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    ports:
+      - "127.0.0.1:12345:12345"
+    volumes:
+      - ./alloy-config.alloy:/etc/alloy/config.alloy:ro
+      - //var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+volumes:
+  loki-data:
+  alloy-data:

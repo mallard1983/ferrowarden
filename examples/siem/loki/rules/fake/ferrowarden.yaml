@@ -1,0 +1,48 @@
+groups:
+  - name: ferrowarden-security
+    interval: 1m
+    rules:
+      - alert: FerrowardenAgentAuthBruteForce
+        expr: |
+          sum by (source_ip) (
+            count_over_time({job="ferrowarden", action="agent_auth", outcome="failure"} | json source_ip="source.ip" [5m])
+          ) >= 5
+        for: 0m
+        labels:
+          severity: high
+        annotations:
+          summary: "5 or more failed agent authentications from {{ $labels.source_ip }} in 5 minutes"
+
+      - alert: FerrowardenAdminAuthFailure
+        expr: |
+          sum(count_over_time({job="ferrowarden", action="admin_auth", outcome="failure"}[5m])) > 0
+        labels:
+          severity: high
+        annotations:
+          summary: "Failed Ferrowarden admin authentication"
+
+      - alert: FerrowardenForwardBlocked
+        expr: |
+          sum by (reason) (
+            count_over_time({job="ferrowarden", action="forward", outcome="failure"} | json reason="event.reason" | reason=~"credential_host_not_allowed|target_blocked" [5m])
+          ) > 0
+        labels:
+          severity: medium
+        annotations:
+          summary: "Forward blocked ({{ $labels.reason }}): possible prompt injection or exfiltration attempt"
+
+      - alert: FerrowardenVaultLocked
+        expr: |
+          sum(count_over_time({job="ferrowarden", action="vault_lock"}[5m])) > 0
+        labels:
+          severity: medium
+        annotations:
+          summary: "Ferrowarden vault was locked"
+
+      - alert: FerrowardenEventsDropped
+        expr: |
+          sum(count_over_time({job="ferrowarden", action="events_dropped"}[15m])) > 0
+        labels:
+          severity: high
+        annotations:
+          summary: "Ferrowarden dropped security events: the SIEM has gaps"

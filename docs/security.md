@@ -218,22 +218,22 @@ Forwarded responses are read in chunks and rejected with `502` once they exceed 
 
 ---
 
-## Audit Log
+## Security Event Log
 
-Every proxy request generates an audit entry containing:
+Every security-relevant action produces one structured event with a stable schema (see [events.md](events.md)):
 
-- Timestamp
-- Agent key ID and name (not the token value)
-- HTTP method and target URL
-- Credential names used (not values)
-- Outcome (success, vault locked, unknown credential, blocked, forward failed, internal error)
-- Response HTTP status code
+- every forwarded request (agent key id and name, method, target URL as the agent sent it, credential names, outcome, a reason code when it failed, the HTTP status, duration);
+- failed agent and admin authentication (missing or invalid key), with source IP and request ID;
+- credential listings, key creation and revocation, vault unlock/lock/sync, startup (security-relevant settings) and shutdown;
+- rate limiting (aggregated: at most one event per client IP per minute), and requests rejected for an invalid body or query.
 
-Credential values are never recorded in the audit log.
+Events carry the client IP and a request ID that is also returned in the `X-Request-Id` response header. Authentication is checked **before** a request body is parsed, so an unauthenticated caller learns nothing from parse errors.
 
-The in-memory ring buffer (default 1000 entries) is accessible via `GET /v1/admin/audit`. The same events are emitted as structured JSON log lines (compatible with Loki/Grafana) so they can be persisted externally.
+Credential values, agent tokens and their hashes, the admin key, the master password and the API prefix are never recorded, and a failed-authentication event does not contain the presented key. Agent-supplied strings are truncated and JSON-escaped, so they cannot forge log lines. `scripts/check-no-secrets.sh` (run in CI) fails the build if any seeded secret shows up in the container logs or the event file.
 
-**Recommendation:** Ship the structured log output to a persistent sink (Loki, Elasticsearch, a log file) so the audit trail survives a restart.
+Events are written to stdout (default), optionally a rotating file and syslog (UDP, TCP or TLS), and to an in-memory ring buffer (default 1000 events) behind `GET /v1/admin/audit`. Logging never blocks or fails a request; if the sink queue overflows, events are dropped for the sinks and an `events_dropped` event reports the count.
+
+**Recommendation:** ship the events to a persistent sink (Loki, Wazuh, a file, syslog) so the trail survives a restart, and alert on repeated `agent_auth` failures, any `credential_host_not_allowed` or `target_blocked` forward, and `admin_auth` failures.
 
 ---
 

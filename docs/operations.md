@@ -233,26 +233,34 @@ Treat a compromised admin key as a full-access breach of key management:
 
 ### Structured Log Output
 
-Ferrowarden emits JSON-structured logs to stdout. Every audit event includes:
+Ferrowarden writes one JSON security event per security-relevant action to stdout (and optionally to a rotating file and syslog; see [events.md](events.md)). A forward:
 
 ```json
 {
-  "timestamp": "2026-11-20T14:32:11.123456789Z",
-  "level": "INFO",
-  "fields": {
-    "message": "audit",
-    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-    "agent_name": "homelab-agent",
-    "method": "GET",
-    "target_url": "https://proxmox.lan:8006/api2/json/nodes",
-    "credential_names": ["proxmox_api_token"],
-    "outcome": "Success",
-    "response_status": 200
+  "@timestamp": "2026-11-21T16:09:25.075Z",
+  "message": "forward succeeded",
+  "event": {
+    "kind": "event",
+    "dataset": "ferrowarden.security",
+    "action": "forward",
+    "category": ["web"],
+    "type": ["access"],
+    "outcome": "success",
+    "duration": 21662683
+  },
+  "source": { "ip": "172.18.0.1" },
+  "http": { "request": { "method": "GET" }, "response": { "status_code": 200 } },
+  "url": { "original": "https://proxmox.lan:8006/api2/json/nodes", "domain": "proxmox.lan" },
+  "ferrowarden": {
+    "schema_version": 1,
+    "request_id": "01a1fede-9f3e-76eb-985e-c6beffe1e906",
+    "key": { "id": "a35c6bd3-1a1e-48ea-8e90-ebc0718399c4", "name": "homelab-agent" },
+    "credentials": ["proxmox_api_token"]
   }
 }
 ```
 
-Ship these logs to Loki, Elasticsearch, or any JSON log aggregator for persistent storage. The in-memory audit ring buffer is lost on restart.
+Ship these logs to Loki, Elasticsearch, Wazuh or any JSON log aggregator for persistent storage. The in-memory buffer behind `GET /v1/admin/audit` is lost on restart. Every response carries an `X-Request-Id` header; the same ID is in the events for that request.
 
 ### Grafana / Loki
 

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::audit::AuditLog;
 use crate::config::Config;
+use crate::events::{Action, EventLog, SecurityEvent};
 use crate::keys::hash_token;
 use crate::net::TargetPolicy;
 use crate::vault::CredentialMap;
@@ -57,12 +57,13 @@ pub struct AppState {
     /// Outbound target policy (SSRF protection), built once from config.
     pub target_policy: Arc<TargetPolicy>,
 
-    /// Audit log — shared with the admin API handler.
-    pub audit: Arc<AuditLog>,
+    /// Security event stream (ring buffer + sinks) — the one emitter, also
+    /// read by the admin audit endpoint.
+    pub events: Arc<EventLog>,
 }
 
 impl AppState {
-    pub fn new_with_audit(config: Config, audit: Arc<AuditLog>) -> Self {
+    pub fn new(config: Config, events: Arc<EventLog>) -> Self {
         // Start locked regardless of unlock mode — unlock happens during
         // startup (file mode) or on first POST /v1/unlock (manual mode).
         let target_policy = Arc::new(TargetPolicy::from_config(&config));
@@ -74,7 +75,7 @@ impl AppState {
             keys_file_lock: Arc::new(tokio::sync::Mutex::new(())),
             unlock_lock: Arc::new(tokio::sync::Mutex::new(())),
             target_policy,
-            audit,
+            events,
         }
     }
 
@@ -86,8 +87,20 @@ impl AppState {
         *self.lock_state.write().await = LockState::Unlocked;
     }
 
-    pub async fn set_locked(&self) {
-        *self.lock_state.write().await = LockState::Locked;
+    /// Mark the vault locked. Emits a `vault_lock` event on the transition
+    /// from unlocked only — repeated checks of an already-locked vault are
+    /// silent. `cause` is a fixed code such as `bw_serve_locked`.
+    pub async fn set_locked(&self, cause: &'static str) {
+        let was_unlocked = {
+            let mut state = self.lock_state.write().await;
+            let was_unlocked = *state == LockState::Unlocked;
+            *state = LockState::Locked;
+            was_unlocked
+        };
+        if was_unlocked {
+            self.events
+                .emit(SecurityEvent::new(Action::VaultLock).detail("cause", cause));
+        }
     }
 
     /// Validate a bearer token and return the matching key entry if found.
@@ -126,7 +139,6 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::AuditLog;
     use crate::config::{Config, UnlockMode};
 
     fn test_config() -> Config {
@@ -152,11 +164,12 @@ mod tests {
             agent_rate_limit_burst: 20,
             admin_rate_limit_per_minute: 30,
             admin_rate_limit_burst: 5,
+            events: Default::default(),
         }
     }
 
     fn test_state() -> AppState {
-        AppState::new_with_audit(test_config(), Arc::new(AuditLog::new(10)))
+        AppState::new(test_config(), Arc::new(EventLog::buffer_only(10)))
     }
 
     #[tokio::test]
@@ -176,8 +189,25 @@ mod tests {
     async fn set_locked_restores_lock() {
         let state = test_state();
         state.set_unlocked().await;
-        state.set_locked().await;
+        state.set_locked("test").await;
         assert!(state.is_locked().await);
+    }
+
+    #[tokio::test]
+    async fn vault_lock_event_is_emitted_on_the_transition_only() {
+        let state = test_state();
+        // Already locked at start: no transition, no event.
+        state.set_locked("bw_serve_locked").await;
+        assert!(state.events.recent(10).is_empty());
+
+        state.set_unlocked().await;
+        state.set_locked("bw_serve_locked").await;
+        state.set_locked("bw_serve_locked").await;
+        let events = state.events.recent(10);
+        assert_eq!(events.len(), 1);
+        let v = serde_json::to_value(&*events[0]).unwrap();
+        assert_eq!(v["event"]["action"], "vault_lock");
+        assert_eq!(v["ferrowarden"]["details"]["cause"], "bw_serve_locked");
     }
 
     #[tokio::test]

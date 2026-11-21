@@ -165,7 +165,7 @@ The skill covers endpoint schemas, placeholder syntax, error handling, and worke
 - Each credential is bound to the hosts in its vault item's URIs; it is never sent anywhere else.
 - Outbound targets are checked at DNS-resolution time: bw serve is always refused, and private/internal addresses (including cloud metadata) are refused unless listed in `allowed_targets`.
 - The admin key is enforced environment-only (minimum 32 characters); it cannot be set in a config file.
-- All credential names (not values) used in a request are recorded in the audit log.
+- Every security-relevant action is recorded as a structured security event (credential names, never values; failed authentication included) and can be shipped to stdout, a rotating file or syslog ([docs/events.md](docs/events.md)).
 - Every credential value used in a request is scrubbed from the response body, headers and error messages (raw, JSON-escaped, URL-encoded and base64 forms), followed by common credential patterns.
 
 See [Security Model](docs/security.md) for the full threat model and design rationale. To report a vulnerability, follow the [Security Policy](SECURITY.md) — please don't open a public issue.

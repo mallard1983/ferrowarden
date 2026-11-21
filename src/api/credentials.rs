@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::error::{FerroError, FerroResult};
+use crate::events::{emit_rejected, Action, Reason, SecurityEvent};
+use crate::middleware::request_context::RequestContext;
 use crate::proxy::placeholder::{Placeholder, Selector};
 use crate::state::AppState;
 use crate::vault::client::{CredentialEntry, FieldKind, FieldLookup, ItemKind};
@@ -157,19 +159,44 @@ fn parse_detail(params: &[(String, String)]) -> FerroResult<bool> {
 /// Requires a valid agent key in the X-Agent-Key header.
 pub async fn list_credentials(
     State(state): State<Arc<AppState>>,
+    ctx: RequestContext,
     headers: HeaderMap,
     Query(params): Query<Vec<(String, String)>>,
 ) -> FerroResult<Json<Value>> {
-    authenticate_agent(&state, &headers).await?;
-    let detailed = parse_detail(&params)?;
+    const ENDPOINT: &str = "/v1/credentials";
+    let agent = authenticate_agent(&state, &ctx, &headers, ENDPOINT).await?;
+    let detailed = match parse_detail(&params) {
+        Ok(detailed) => detailed,
+        Err(e) => {
+            emit_rejected(&state.events, &ctx, Some(&agent), ENDPOINT, &e);
+            return Err(e);
+        }
+    };
 
+    let result = list(&state, detailed).await;
+
+    let event = SecurityEvent::new(Action::CredentialsList)
+        .request(&ctx)
+        .key(&agent)
+        .detail("detail", detailed);
+    state.events.emit(match &result {
+        Ok((_, count)) => event.detail("count", *count).status(200),
+        Err(e) => event.failed_with(e).status(e.status_code().as_u16()),
+    });
+
+    result.map(|(body, _)| Json(body))
+}
+
+/// The credential listing and how many credentials it holds.
+async fn list(state: &Arc<AppState>, detailed: bool) -> FerroResult<(Value, usize)> {
     // In file mode, try to unlock again right away (e.g. after a bw serve
     // restart) instead of failing until the next refresh.
-    if state.is_locked().await && !crate::vault::refresh::reunlock_if_possible(&state).await {
+    if state.is_locked().await && !crate::vault::refresh::reunlock_if_possible(state).await {
         return Err(FerroError::VaultLocked);
     }
 
     let credentials = state.credentials.read().await;
+    let count = credentials.len();
     let body = if detailed {
         let list: Vec<CredentialDetail> = credentials
             .iter()
@@ -182,23 +209,39 @@ pub async fn list_credentials(
     }
     .map_err(|e| FerroError::Internal(e.to_string()))?;
 
-    Ok(Json(body))
+    Ok((body, count))
 }
 
-/// Extract and validate the agent key from the X-Agent-Key header.
+/// Extract and validate the agent key from the X-Agent-Key header. A failure
+/// is recorded as an `agent_auth` event (reason `missing_key` or
+/// `invalid_key`) — never with the presented token, not even a prefix.
+/// `endpoint` is the route template, not the raw request path.
 pub async fn authenticate_agent(
     state: &Arc<AppState>,
+    ctx: &RequestContext,
     headers: &HeaderMap,
+    endpoint: &'static str,
 ) -> FerroResult<crate::state::AgentKey> {
-    let token = headers
-        .get("x-agent-key")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(FerroError::Unauthorized)?;
-
-    state
-        .authenticate(token)
-        .await
-        .ok_or(FerroError::Unauthorized)
+    let reason = match headers.get("x-agent-key") {
+        None => Reason::MissingKey,
+        Some(value) => {
+            if let Some(key) = match value.to_str() {
+                Ok(token) => state.authenticate(token).await,
+                Err(_) => None,
+            } {
+                return Ok(key);
+            }
+            Reason::InvalidKey
+        }
+    };
+    state.events.emit(
+        SecurityEvent::new(Action::AgentAuth)
+            .request(ctx)
+            .reason(reason)
+            .status(401)
+            .detail("endpoint", endpoint),
+    );
+    Err(FerroError::Unauthorized)
 }
 
 #[cfg(test)]
