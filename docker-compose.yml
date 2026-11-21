@@ -200,6 +200,19 @@ services:
       # Admin endpoint rate limit per client IP (defaults 30/min, burst 5).
       FERROWARDEN_ADMIN_RATE_LIMIT_PER_MINUTE: "${FERROWARDEN_ADMIN_RATE_LIMIT_PER_MINUTE:-}"
       FERROWARDEN_ADMIN_RATE_LIMIT_BURST: "${FERROWARDEN_ADMIN_RATE_LIMIT_BURST:-}"
+      # Security event stream (docs/events.md). Events go to stdout by default.
+      # Uncomment to also write a rotating JSON-lines file (mount a volume at
+      # that path to keep it) and/or forward to syslog. Defaults are unchanged
+      # when these stay commented out.
+      # FERROWARDEN_EVENTS__STDOUT: "true"
+      # FERROWARDEN_EVENTS__FILE: "/data/events/events.jsonl"
+      # FERROWARDEN_EVENTS__FILE_MAX_BYTES: "52428800"
+      # FERROWARDEN_EVENTS__FILE_KEEP: "10"
+      # FERROWARDEN_EVENTS__SYSLOG: "tls://wazuh.example.lan:6514"
+      # FERROWARDEN_EVENTS__SYSLOG_FACILITY: "auth"
+      # FERROWARDEN_EVENTS__SYSLOG_CA_FILE: "/run/certs/siem-ca.pem"
+      # FERROWARDEN_EVENTS__BUFFER_SIZE: "1000"
+      # FERROWARDEN_EVENTS__QUEUE_SIZE: "10000"
     networks:
       - vault-internal
       - agent-facing

@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use crate::config::UnlockMode;
 use crate::error::{FerroError, FerroResult};
+use crate::events::{Action, Outcome, Reason, SecurityEvent};
 use crate::state::AppState;
 use crate::vault::{read_password_file, unlock_vault, VaultClient};
 
@@ -18,15 +19,19 @@ use crate::vault::{read_password_file, unlock_vault, VaultClient};
 /// A failed sync (e.g. Vaultwarden briefly down) is logged and the cached
 /// copy in bw serve is used instead. Marks the state locked if bw serve
 /// reports the vault locked.
+///
+/// Emits `vault_sync`: always on failure, and on success only when the
+/// credential count changed.
 pub async fn refresh_credentials(state: &AppState) -> FerroResult<()> {
     let vault = VaultClient::new(state.config.bw_serve_url.clone());
 
     if let Err(e) = vault.sync().await {
         if matches!(e, FerroError::VaultLocked) {
-            state.set_locked().await;
+            state.set_locked("bw_serve_locked").await;
             return Err(e);
         }
         tracing::warn!(error = %e, "bw serve sync failed; using its cached vault copy");
+        emit_sync_failed(state, "sync");
     }
 
     // The first list after a fresh login/unlock can fail transiently while the
@@ -44,22 +49,51 @@ pub async fn refresh_credentials(state: &AppState) -> FerroResult<()> {
     match listed {
         Ok(map) => {
             let count = map.len();
-            *state.credentials.write().await = map;
+            let previous = std::mem::replace(&mut *state.credentials.write().await, map).len();
             tracing::debug!(credential_count = count, "Credential cache refreshed");
+            if count != previous {
+                state.events.emit(
+                    SecurityEvent::new(Action::VaultSync)
+                        .detail("credential_count", count)
+                        .detail("previous", previous),
+                );
+            }
             Ok(())
         }
         Err(e) => {
             if matches!(e, FerroError::VaultLocked) {
-                state.set_locked().await;
+                state.set_locked("bw_serve_locked").await;
+            } else {
+                emit_sync_failed(state, "list");
             }
             Err(e)
         }
     }
 }
 
+fn emit_sync_failed(state: &AppState, stage: &'static str) {
+    state.events.emit(
+        SecurityEvent::new(Action::VaultSync)
+            .outcome(Outcome::Failure)
+            .reason(Reason::SyncFailed)
+            .detail("stage", stage),
+    );
+}
+
 /// Unlock bw serve using the configured password file (file mode only),
-/// then refresh the cache and mark the state unlocked.
-pub async fn unlock_from_file(state: &AppState) -> FerroResult<()> {
+/// then refresh the cache and mark the state unlocked. Emits `vault_unlock`
+/// with the given `mode` (`"file"` at startup, `"reunlock"` afterwards).
+pub async fn unlock_from_file(state: &AppState, mode: &'static str) -> FerroResult<()> {
+    let result = unlock_from_file_inner(state).await;
+    let event = SecurityEvent::new(Action::VaultUnlock).detail("mode", mode);
+    state.events.emit(match &result {
+        Ok(()) => event,
+        Err(_) => event.outcome(Outcome::Failure).reason(Reason::UnlockFailed),
+    });
+    result
+}
+
+async fn unlock_from_file_inner(state: &AppState) -> FerroResult<()> {
     let path = state
         .config
         .unlock_file
@@ -85,7 +119,7 @@ pub async fn reunlock_if_possible(state: &AppState) -> bool {
     if !state.is_locked().await {
         return true;
     }
-    match unlock_from_file(state).await {
+    match unlock_from_file(state, "reunlock").await {
         Ok(()) => {
             tracing::info!("Vault re-unlocked from password file");
             true

@@ -7,6 +7,8 @@ use crate::api::admin::authenticate_admin;
 use crate::api::strict_json::StrictJson;
 use crate::config::UnlockMode;
 use crate::error::{FerroError, FerroResult};
+use crate::events::{emit_rejected, Action, Outcome, Reason, SecurityEvent};
+use crate::middleware::request_context::RequestContext;
 use crate::state::AppState;
 use crate::vault::refresh::refresh_credentials;
 use crate::vault::unlock_vault;
@@ -25,29 +27,62 @@ pub struct UnlockPayload {
 /// Returns 404 in file unlock mode — the endpoint does not exist.
 pub async fn unlock(
     State(state): State<Arc<AppState>>,
+    ctx: RequestContext,
     headers: HeaderMap,
-    StrictJson(payload): StrictJson<UnlockPayload>,
+    body: Result<StrictJson<UnlockPayload>, FerroError>,
 ) -> FerroResult<Json<serde_json::Value>> {
-    // Wrap the password in Zeroizing immediately so it's wiped even if we
-    // return early due to an error
-    let password = Zeroizing::new(payload.password);
+    const ENDPOINT: &str = "/v1/unlock";
 
-    // Only the admin can call this endpoint
-    authenticate_admin(&state, &headers)?;
+    // Wrap the password in Zeroizing immediately so it's wiped even if we
+    // return early (including when authentication fails below).
+    let body = body.map(|StrictJson(payload)| Zeroizing::new(payload.password));
+
+    // Only the admin can call this endpoint — and only after that is the body
+    // looked at, so an unauthenticated caller learns nothing from parse errors.
+    authenticate_admin(&state, &ctx, &headers, ENDPOINT)?;
+    let password = match body {
+        Ok(password) => password,
+        Err(e) => {
+            emit_rejected(&state.events, &ctx, None, ENDPOINT, &e);
+            return Err(e);
+        }
+    };
+
+    let event = SecurityEvent::new(Action::VaultUnlock)
+        .request(&ctx)
+        .detail("mode", "manual");
 
     // Endpoint disabled in file mode
     if state.config.unlock_mode == UnlockMode::File {
-        return Err(FerroError::UnlockEndpointDisabled);
+        let e = FerroError::UnlockEndpointDisabled;
+        state
+            .events
+            .emit(event.failed_with(&e).status(e.status_code().as_u16()));
+        return Err(e);
     }
 
-    unlock_vault(&state.config.bw_serve_url, password).await?;
+    let result = async {
+        unlock_vault(&state.config.bw_serve_url, password).await?;
+        // Sync and refresh the credential cache now that the vault is unlocked
+        refresh_credentials(&state).await
+    }
+    .await;
 
-    // Sync and refresh the credential cache now that the vault is unlocked
-    refresh_credentials(&state).await?;
-
-    state.set_unlocked().await;
-
-    tracing::info!("Vault unlocked via manual endpoint");
-
-    Ok(Json(serde_json::json!({ "status": "unlocked" })))
+    match result {
+        Ok(()) => {
+            state.set_unlocked().await;
+            tracing::info!("Vault unlocked via manual endpoint");
+            state.events.emit(event.status(200));
+            Ok(Json(serde_json::json!({ "status": "unlocked" })))
+        }
+        Err(e) => {
+            state.events.emit(
+                event
+                    .outcome(Outcome::Failure)
+                    .reason(Reason::UnlockFailed)
+                    .status(e.status_code().as_u16()),
+            );
+            Err(e)
+        }
+    }
 }

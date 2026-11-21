@@ -597,18 +597,96 @@ async fn test_admin_key_lifecycle_create_use_revoke() {
     );
 }
 
-/// Correctness: audit log records every proxy request.
-///
-/// Every forwarded request must appear in the audit log with the credential
-/// names used (not values) and the correct outcome. This verifies the audit
-/// trail is intact.
+// ── Security event stream ─────────────────────────────────────────────────────
+//
+// Every test below finds its event by the `X-Request-Id` the response carried,
+// which is also what ties a SIEM alert back to one request.
+
+impl TestEnv {
+    /// The newest `limit` security events, newest first.
+    async fn events(&self, limit: usize) -> Vec<Value> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/admin/audit?limit={limit}", self.fw_url))
+            .header("X-Admin-Key", &self.admin_key)
+            .send()
+            .await
+            .expect("audit request failed");
+        assert_eq!(resp.status(), 200);
+        resp.json().await.expect("audit was not JSON")
+    }
+
+    /// The event recorded for the request whose response carried `request_id`.
+    async fn event_for(&self, request_id: &str, action: &str) -> Value {
+        let events = self.events(200).await;
+        events
+            .iter()
+            .find(|e| {
+                e["ferrowarden"]["request_id"].as_str() == Some(request_id)
+                    && e["event"]["action"].as_str() == Some(action)
+            })
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!("no `{action}` event for request {request_id}; newest events:\n{events:#?}")
+            })
+    }
+
+    /// Every events for a request (all actions).
+    async fn events_for(&self, request_id: &str) -> Vec<Value> {
+        self.events(200)
+            .await
+            .into_iter()
+            .filter(|e| e["ferrowarden"]["request_id"].as_str() == Some(request_id))
+            .collect()
+    }
+}
+
+/// The `X-Request-Id` of a response.
+fn request_id(resp: &reqwest::Response) -> String {
+    resp.headers()
+        .get("x-request-id")
+        .expect("response has no X-Request-Id header")
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Every secret value in the seed data: passwords, notes, custom field values
+/// and TOTP seeds. None of them may appear in any event.
+fn seeded_secrets() -> Vec<String> {
+    let seed: Vec<Value> =
+        serde_json::from_str(include_str!("seed/credentials.json")).expect("seed is not JSON");
+    let mut out = Vec::new();
+    for item in &seed {
+        for key in ["value", "note", "totp"] {
+            if let Some(s) = item[key].as_str() {
+                out.push(s.to_string());
+            }
+        }
+        for field in item["fields"].as_array().into_iter().flatten() {
+            // `ferrowarden_uris` is metadata (the item's allowed hosts), not a
+            // secret: its value is a URL that legitimately appears in events.
+            if field["name"] == "ferrowarden_uris" {
+                continue;
+            }
+            if let Some(s) = field["value"].as_str() {
+                out.push(s.to_string());
+            }
+        }
+    }
+    out.retain(|s| s.len() >= 6);
+    out
+}
+
+/// Correctness: a successful forward is recorded as one `forward` event with
+/// the credential names (not values), the response status as a number, the
+/// URL as the agent sent it, and the request ID the response carried.
 #[tokio::test]
 async fn test_audit_log_records_credential_names_not_values() {
     let Some(env) = TestEnv::load() else { return };
     env.reset_mock().await;
 
-    // Make a known request
-    let _ = env
+    let resp = env
         .forward(
             "GET",
             "/api/audited",
@@ -616,8 +694,9 @@ async fn test_audit_log_records_credential_names_not_values() {
             None,
         )
         .await;
+    assert_eq!(resp.status(), 200);
+    let rid = request_id(&resp);
 
-    // Check the audit log
     let audit_resp = env
         .client
         .get(format!("{}/v1/admin/audit", env.fw_url))
@@ -625,48 +704,459 @@ async fn test_audit_log_records_credential_names_not_values() {
         .send()
         .await
         .expect("audit request failed");
-
     assert_eq!(audit_resp.status(), 200);
-
+    assert!(
+        audit_resp.headers().contains_key("x-request-id"),
+        "admin responses carry a request id too"
+    );
     let entries: Vec<Value> = audit_resp.json().await.expect("audit was not JSON");
-    assert!(
-        !entries.is_empty(),
-        "audit log is empty after a successful forward"
-    );
+    assert!(!entries.is_empty(), "audit log is empty after a forward");
 
-    // The most recent entry should be our request
+    // Newest first: our request is the most recent event.
     let entry = &entries[0];
+    assert_eq!(entry["event"]["action"], "forward");
+    assert_eq!(entry["ferrowarden"]["request_id"], rid.as_str());
+    assert_eq!(entry["event"]["dataset"], "ferrowarden.security");
+    assert_eq!(entry["event"]["kind"], "event");
+    assert_eq!(entry["event"]["outcome"], "success");
+    assert!(entry["event"].get("reason").is_none());
+    assert_eq!(entry["event"]["category"][0], "web");
+    assert_eq!(entry["event"]["type"][0], "access");
+    assert!(entry["event"]["duration"].as_u64().unwrap() > 0);
+    assert_eq!(entry["ferrowarden"]["schema_version"], 1);
+    assert!(entry["ferrowarden"]["key"]["id"].as_str().is_some());
+    assert!(entry["ferrowarden"]["key"]["name"].as_str().is_some());
+    assert!(entry["source"]["ip"].as_str().is_some());
+    assert_eq!(entry["http"]["request"]["method"], "GET");
+    // A number, not the old "Some(200)" string.
+    assert_eq!(entry["http"]["response"]["status_code"], 200);
+    assert_eq!(entry["url"]["domain"], "mock-api");
+    assert!(entry["url"]["original"]
+        .as_str()
+        .unwrap()
+        .ends_with("/mock-api/api/audited"));
+    assert!(entry["@timestamp"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(entry["service"]["name"], "ferrowarden");
 
-    // Credential NAME must be recorded
-    let cred_names = entry["credential_names"]
-        .as_array()
-        .expect("credential_names missing");
-    assert!(
-        cred_names
-            .iter()
-            .any(|n| n.as_str() == Some("grafana_service_account")),
-        "credential name not recorded in audit log.\nEntry: {entry}"
+    // Credential NAME recorded, VALUE absent.
+    assert_eq!(
+        entry["ferrowarden"]["credentials"],
+        json!(["grafana_service_account"])
     );
-
-    // Credential VALUE must NOT appear anywhere in the entry
     let entry_str = serde_json::to_string(entry).unwrap();
     assert!(
         !entry_str.contains("test-glsa-22222222222222"),
-        "credential VALUE appeared in audit log entry — this is a security violation.\n\
-         Audit entries must contain only names, never values.\nEntry: {entry_str}"
+        "credential VALUE appeared in an event — security violation (entry not printed)"
+    );
+}
+
+/// Every way a forward can be refused is recorded with a stable reason code,
+/// the HTTP status the agent saw, and no request is forwarded.
+#[tokio::test]
+async fn test_forward_blocks_are_recorded_with_reason_codes() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    // (header value or URL override, expected HTTP status, expected reason)
+    let header_cases = [
+        (
+            "{{vault:this_credential_does_not_exist}}",
+            422,
+            "unknown_credential",
+        ),
+        ("{{vault:test_unbound}}", 403, "credential_host_not_allowed"),
+        ("{{vault:test_reprompt}}", 403, "reprompt_required"),
+        (
+            "{{vault:test_login_full:field:dup}}",
+            409,
+            "ambiguous_field",
+        ),
+        (
+            "{{vault:test_login_full:bogus}}",
+            422,
+            "malformed_placeholder",
+        ),
+    ];
+    for (header, status, reason) in header_cases {
+        let resp = env
+            .forward("GET", "/api/blocked", json!({ "X": header }), None)
+            .await;
+        assert_eq!(resp.status(), status, "{header}");
+        let e = env.event_for(&request_id(&resp), "forward").await;
+        assert_eq!(e["event"]["outcome"], "failure", "{header}");
+        assert_eq!(e["event"]["reason"], reason, "{header}");
+        assert_eq!(e["http"]["response"]["status_code"], status, "{header}");
+        assert!(e["message"].as_str().unwrap().starts_with("forward "));
+    }
+
+    // Outbound policy.
+    let resp = env
+        .forward_url("GET", "http://bw-serve:8087/status", json!({}), None)
+        .await;
+    assert_eq!(resp.status(), 403);
+    let e = env.event_for(&request_id(&resp), "forward").await;
+    assert_eq!(e["event"]["reason"], "target_blocked");
+    assert_eq!(e["event"]["type"], json!(["access", "denied"]));
+    assert_eq!(e["url"]["domain"], "bw-serve");
+
+    // Placeholder in the host.
+    let resp = env
+        .forward_url(
+            "GET",
+            "http://{{vault:test_api_token}}.mock-api:7777/",
+            json!({}),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), 400);
+    let e = env.event_for(&request_id(&resp), "forward").await;
+    assert_eq!(e["event"]["reason"], "invalid_target_url");
+    // The URL is logged as the agent sent it: placeholder, never the value.
+    assert!(e["url"]["original"]
+        .as_str()
+        .unwrap()
+        .contains("{{vault:test_api_token}}"));
+
+    assert!(
+        env.all_captured_requests().await.is_empty(),
+        "nothing may have been forwarded"
+    );
+}
+
+/// Security: failed agent authentication (missing and invalid key) is recorded
+/// with the right reason, the route template and the client IP — and never
+/// with the presented key.
+#[tokio::test]
+async fn test_agent_auth_failures_are_recorded() {
+    let Some(env) = TestEnv::load() else { return };
+    let bad_key = "presented-but-invalid-agent-key-0123";
+
+    let missing = env
+        .client
+        .get(format!("{}/v1/credentials", env.fw_url))
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(missing.status(), 401);
+    let invalid = env
+        .client
+        .post(format!("{}/v1/forward", env.fw_url))
+        .header("X-Agent-Key", bad_key)
+        .json(&json!({ "request": { "method": "GET", "url": "http://mock-api:7777/" } }))
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(invalid.status(), 401);
+
+    let e = env.event_for(&request_id(&missing), "agent_auth").await;
+    assert_eq!(e["event"]["outcome"], "failure");
+    assert_eq!(e["event"]["reason"], "missing_key");
+    assert_eq!(e["event"]["category"][0], "authentication");
+    assert_eq!(e["ferrowarden"]["details"]["endpoint"], "/v1/credentials");
+    assert!(e["source"]["ip"].as_str().is_some());
+    assert!(e["ferrowarden"].get("key").is_none());
+
+    let e = env.event_for(&request_id(&invalid), "agent_auth").await;
+    assert_eq!(e["event"]["reason"], "invalid_key");
+    assert_eq!(e["ferrowarden"]["details"]["endpoint"], "/v1/forward");
+
+    let text = serde_json::to_string(&env.events(200).await).unwrap();
+    assert!(
+        !text.contains(bad_key) && !text.contains("presented-but-inv"),
+        "the presented key (or a prefix of it) was logged"
+    );
+}
+
+/// Security: authentication comes before body parsing. An unauthenticated
+/// caller sending a malformed body gets 401 (not a detailed 400), and the
+/// stream records an auth failure — not a `request_rejected` with parse
+/// details.
+#[tokio::test]
+async fn test_unauthenticated_bad_body_gets_401_and_no_parse_detail() {
+    let Some(env) = TestEnv::load() else { return };
+
+    let resp = env
+        .client
+        .post(format!("{}/v1/forward", env.fw_url))
+        .header("content-type", "application/json")
+        .body(r#"{"request": {"method": "GET", "url": "http://x", "url": "http://y"}}"#)
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status(), 401);
+    let rid = request_id(&resp);
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.to_lowercase().contains("duplicate") && !body.contains("JSON"),
+        "unauthenticated caller got parse detail: {body}"
     );
 
-    // Outcome should be success
+    let events = env.events_for(&rid).await;
+    assert!(events
+        .iter()
+        .any(|e| e["event"]["action"] == "agent_auth" && e["event"]["reason"] == "missing_key"));
+    assert!(
+        !events
+            .iter()
+            .any(|e| e["event"]["action"] == "request_rejected"),
+        "parse failure must not be recorded before authentication"
+    );
+
+    // Same for the admin routes.
+    let resp = env
+        .client
+        .post(format!("{}/v1/admin/keys", env.fw_url))
+        .header("content-type", "application/json")
+        .body("{ not json")
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status(), 401);
+
+    // Once authenticated, the same body is a 400 and is recorded.
+    let resp = env
+        .client
+        .post(format!("{}/v1/forward", env.fw_url))
+        .header("X-Agent-Key", &env.agent_key)
+        .header("content-type", "application/json")
+        .body(r#"{"request": {"method": "GET", "url": "http://x", "url": "http://y"}}"#)
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status(), 400);
+    let rid = request_id(&resp);
+    let client_error = resp.json::<Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let e = env.event_for(&rid, "request_rejected").await;
+    assert_eq!(e["event"]["reason"], "invalid_json");
+    assert_eq!(e["ferrowarden"]["details"]["endpoint"], "/v1/forward");
+    assert_eq!(e["ferrowarden"]["details"]["error"], client_error.as_str());
+    assert!(e["ferrowarden"]["key"]["id"].as_str().is_some());
+}
+
+/// Security: failed admin authentication is recorded on admin routes.
+#[tokio::test]
+async fn test_admin_auth_failures_are_recorded() {
+    let Some(env) = TestEnv::load() else { return };
+    let bad_key = "presented-but-invalid-admin-key-0123456789";
+
+    let missing = env
+        .client
+        .get(format!("{}/v1/admin/status", env.fw_url))
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(missing.status(), 401);
+    let invalid = env
+        .client
+        .get(format!("{}/v1/admin/keys", env.fw_url))
+        .header("X-Admin-Key", bad_key)
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(invalid.status(), 401);
+
+    let e = env.event_for(&request_id(&missing), "admin_auth").await;
+    assert_eq!(e["event"]["reason"], "missing_admin_key");
+    assert_eq!(e["event"]["outcome"], "failure");
+    assert_eq!(e["ferrowarden"]["details"]["endpoint"], "/v1/admin/status");
+
+    let e = env.event_for(&request_id(&invalid), "admin_auth").await;
+    assert_eq!(e["event"]["reason"], "invalid_admin_key");
+
+    let text = serde_json::to_string(&env.events(200).await).unwrap();
+    assert!(!text.contains(bad_key), "presented admin key was logged");
+    assert!(!text.contains(&env.admin_key), "admin key was logged");
+}
+
+/// Correctness: key creation and revocation are recorded, including a revoke
+/// of an unknown id — and never the token.
+#[tokio::test]
+async fn test_key_create_and_revoke_are_recorded() {
+    let Some(env) = TestEnv::load() else { return };
+
+    let created = env
+        .client
+        .post(format!("{}/v1/admin/keys", env.fw_url))
+        .header("X-Admin-Key", &env.admin_key)
+        .json(&json!({ "name": "events-test-key" }))
+        .send()
+        .await
+        .expect("create failed");
+    assert_eq!(created.status(), 201);
+    let create_rid = request_id(&created);
+    let body: Value = created.json().await.unwrap();
+    let key_id = body["id"].as_str().unwrap().to_string();
+    let token = body["token"].as_str().unwrap().to_string();
+
+    let e = env.event_for(&create_rid, "key_create").await;
+    assert_eq!(e["event"]["category"][0], "iam");
+    assert_eq!(e["event"]["type"][0], "creation");
+    assert_eq!(e["event"]["outcome"], "success");
+    assert_eq!(e["ferrowarden"]["details"]["key_id"], key_id.as_str());
+    assert_eq!(e["ferrowarden"]["details"]["key_name"], "events-test-key");
+
+    let revoked = env
+        .client
+        .delete(format!("{}/v1/admin/keys/{key_id}", env.fw_url))
+        .header("X-Admin-Key", &env.admin_key)
+        .send()
+        .await
+        .expect("revoke failed");
+    assert_eq!(revoked.status(), 200);
+    let e = env.event_for(&request_id(&revoked), "key_revoke").await;
+    assert_eq!(e["event"]["type"][0], "deletion");
+    assert_eq!(e["ferrowarden"]["details"]["key_id"], key_id.as_str());
+
+    let unknown = env
+        .client
+        .delete(format!("{}/v1/admin/keys/no-such-key", env.fw_url))
+        .header("X-Admin-Key", &env.admin_key)
+        .send()
+        .await
+        .expect("revoke failed");
+    let e = env.event_for(&request_id(&unknown), "key_revoke").await;
+    assert_eq!(e["event"]["outcome"], "failure");
+    assert_eq!(e["event"]["reason"], "key_not_found");
+
+    let listed = env
+        .client
+        .get(format!("{}/v1/admin/keys", env.fw_url))
+        .header("X-Admin-Key", &env.admin_key)
+        .send()
+        .await
+        .expect("list failed");
+    let e = env.event_for(&request_id(&listed), "key_list").await;
+    assert_eq!(e["event"]["outcome"], "success");
+
+    let text = serde_json::to_string(&env.events(200).await).unwrap();
+    assert!(!text.contains(&token), "the new key's token was logged");
+}
+
+/// Correctness: every response carries an `X-Request-Id` that is generated by
+/// Ferrowarden (an incoming one is ignored) and equals the event's request id.
+#[tokio::test]
+async fn test_request_id_header_matches_event_and_is_never_client_chosen() {
+    let Some(env) = TestEnv::load() else { return };
+
+    let health = env
+        .client
+        .get(format!("{}/health", env.fw_url))
+        .header("X-Request-Id", "chosen-by-the-client")
+        .send()
+        .await
+        .expect("health failed");
+    let rid = request_id(&health);
+    assert_ne!(rid, "chosen-by-the-client");
+    assert_eq!(rid.len(), 36, "UUID: {rid}");
+    // UUID version 7 (time-ordered).
+    assert_eq!(rid.as_bytes()[14], b'7', "{rid}");
+
+    let resp = env
+        .client
+        .get(format!("{}/v1/credentials?detail=true", env.fw_url))
+        .header("X-Agent-Key", &env.agent_key)
+        .header("X-Request-Id", "chosen-by-the-client")
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status(), 200);
+    let rid = request_id(&resp);
+    assert_ne!(rid, "chosen-by-the-client");
+    let listed: Vec<Value> = resp.json().await.unwrap();
+
+    // `credentials_list`: which key, plain or detail, and how many.
+    let e = env.event_for(&rid, "credentials_list").await;
+    assert_eq!(e["event"]["outcome"], "success");
+    assert_eq!(e["ferrowarden"]["request_id"], rid.as_str());
+    assert_eq!(e["ferrowarden"]["details"]["detail"], true);
     assert_eq!(
-        entry["outcome"].as_str(),
-        Some("success"),
-        "unexpected outcome in audit entry"
+        e["ferrowarden"]["details"]["count"].as_u64().unwrap() as usize,
+        listed.len()
     );
+    assert!(e["ferrowarden"]["key"]["id"].as_str().is_some());
+}
 
-    println!(
-        "Audit entry: {}",
-        serde_json::to_string_pretty(entry).unwrap()
-    );
+/// The admin audit endpoint's `limit` parameter is strict like the rest.
+#[tokio::test]
+async fn test_audit_limit_is_strict() {
+    let Some(env) = TestEnv::load() else { return };
+    assert_eq!(env.events(2).await.len(), 2);
+    for q in ["?limit=0", "?limit=abc", "?limit=1&limit=2", "?bogus=1"] {
+        let resp = env
+            .client
+            .get(format!("{}/v1/admin/audit{q}", env.fw_url))
+            .header("X-Admin-Key", &env.admin_key)
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status(), 400, "query {q}");
+    }
+}
+
+/// Security property (issue #22): no seeded secret value — password, note,
+/// custom field value or TOTP seed — and no agent or admin key appears
+/// anywhere in the event stream, whatever the request did with it.
+#[tokio::test]
+async fn test_no_secret_value_appears_in_any_event() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    // Exercise the paths that touch secrets: substitution, echo-back (scrubbed),
+    // blocks, bad bodies and failed auth.
+    for header in [
+        "Bearer {{vault:test_api_token}}",
+        "{{vault:test_login_full:totp}}",
+        "{{vault:test_login_full:field:api_key}}",
+        "{{vault:test_secure_note:notes}}",
+        "{{vault:test_reprompt}}",
+        "{{vault:test_unbound}}",
+    ] {
+        env.forward(
+            "POST",
+            "/api/echo",
+            json!({ "X": header }),
+            Some(json!({ "k": header })),
+        )
+        .await;
+    }
+    env.forward_url(
+        "GET",
+        "http://mock-api:7777/mock-api/?token={{vault:test_bearer}}",
+        json!({}),
+        None,
+    )
+    .await;
+    let _ = env
+        .client
+        .post(format!("{}/v1/forward", env.fw_url))
+        .header("X-Agent-Key", &env.agent_key)
+        .header("content-type", "application/json")
+        .body(r#"{"request": {"method": "GET", "url": "x", "url": "y"}}"#)
+        .send()
+        .await;
+    let _ = env
+        .client
+        .get(format!("{}/v1/credentials", env.fw_url))
+        .header("X-Agent-Key", "not-a-real-agent-key-0123456789abcdef")
+        .send()
+        .await;
+
+    let all = serde_json::to_string(&env.events(1000).await).unwrap();
+    assert!(all.contains("\"forward\""), "no forward events recorded");
+    let mut secrets = seeded_secrets();
+    secrets.push(env.agent_key.clone());
+    secrets.push(env.admin_key.clone());
+    assert!(secrets.len() >= 20, "seed secrets were not loaded");
+    for (i, secret) in secrets.iter().enumerate() {
+        assert!(
+            !all.contains(secret.as_str()),
+            "secret #{i} ({} chars) appears in the event stream (value not printed)",
+            secret.len()
+        );
+    }
 }
 
 /// Admin: the status endpoint reflects current operational state.

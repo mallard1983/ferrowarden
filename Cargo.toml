@@ -42,8 +42,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
 anyhow = "1"
 
-# UUID for agent key generation
-uuid = { version = "1", features = ["v4"] }
+# UUID: v4 for agent key ids, v7 (time-ordered) for per-request IDs
+uuid = { version = "1", features = ["v4", "v7"] }
 
 # Regex for response credential pattern scanning
 regex = "1"
@@ -67,6 +67,12 @@ base64 = "0.23"
 # Per-IP token bucket rate limiting. Keyed limiter maps source IP → token bucket.
 # Using 0.6 — verify compatibility before upgrading to 0.7+ (breaking API changes possible).
 governor = "0.10"
+
+# Syslog-over-TLS event sink: the same rustls (ring) stack that axum-server and
+# reqwest already use, with the webpki root store plus an optional operator CA.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
 
 [dev-dependencies]
 tempfile = "3"

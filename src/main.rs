@@ -1,7 +1,7 @@
 mod api;
-mod audit;
 mod config;
 mod error;
+mod events;
 mod keys;
 mod middleware;
 mod net;
@@ -10,11 +10,12 @@ mod state;
 mod vault;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use audit::AuditLog;
-use config::{Config, UnlockMode};
+use config::{split_list, Config, UnlockMode};
+use events::{Action, EventLog, SecurityEvent};
 use state::AppState;
 use vault::refresh::{spawn_refresher, unlock_from_file};
 
@@ -46,9 +47,11 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::load()?;
 
-    let audit = Arc::new(AuditLog::new(1000));
+    // Security events: ring buffer for /v1/admin/audit plus the configured
+    // sinks (stdout by default). Application logs stay on tracing.
+    let events = EventLog::start(&config.events)?;
 
-    let state = Arc::new(AppState::new_with_audit(config.clone(), audit));
+    let state = Arc::new(AppState::new(config.clone(), events.clone()));
 
     // Load persisted agent keys if a key file is configured
     if let Some(ref path) = config.keys_file {
@@ -69,6 +72,28 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // One startup event with the security-relevant settings (never secrets;
+    // the API prefix is reported only as set / not set).
+    events.emit(
+        SecurityEvent::new(Action::Startup)
+            .detail("version", env!("CARGO_PKG_VERSION"))
+            .detail("tls_enabled", config.tls_enabled)
+            .detail(
+                "unlock_mode",
+                match config.unlock_mode {
+                    UnlockMode::File => "file",
+                    UnlockMode::Manual => "manual",
+                },
+            )
+            .detail("enforce_credential_hosts", config.enforce_credential_hosts)
+            .detail("allow_private_targets", config.allow_private_targets)
+            .detail("allowed_targets", split_list(&config.allowed_targets).len())
+            .detail("trusted_proxies", split_list(&config.trusted_proxies).len())
+            .detail("api_prefix_set", !config.api_prefix.is_empty())
+            .detail("agent_key_count", state.agent_keys.read().await.len())
+            .detail("sinks", config.events.enabled_sinks()),
+    );
+
     // File mode: read and use the password before accepting any requests.
     // unlock_from_file also syncs bw serve and loads the credential cache.
     if config.unlock_mode == UnlockMode::File {
@@ -76,7 +101,11 @@ async fn main() -> anyhow::Result<()> {
             "File unlock mode: reading password from {:?}",
             config.unlock_file
         );
-        unlock_from_file(&state).await?;
+        if let Err(e) = unlock_from_file(&state, "file").await {
+            // The failure event is already queued; get it out before exiting.
+            events.flush().await;
+            return Err(e.into());
+        }
         tracing::info!("Vault unlocked via file mode");
     } else {
         tracing::info!("Manual unlock mode: POST /v1/unlock with admin key to unlock the vault");
@@ -93,15 +122,19 @@ async fn main() -> anyhow::Result<()> {
     if config.api_prefix.is_empty() {
         tracing::info!("API served at /v1/... (no api_prefix set)");
     } else {
-        // The prefix is logged deliberately: operators need it to configure
-        // agents and proxies, and it is obscurity rather than a secret key.
-        tracing::info!(api_prefix = %config.api_prefix, "API served under {}/v1/...", config.api_prefix);
+        // The prefix value is deliberately not logged (or put in any event):
+        // it is a secret-by-obscurity setting, and operators already have it
+        // in their own configuration.
+        tracing::info!("API served under the configured api_prefix");
     }
     if config.allow_private_targets {
         tracing::warn!("allow_private_targets = true: agents may reach private/internal addresses (bw serve is still blocked)");
     }
 
     let router = api::router(state);
+
+    // Set by the signal handler, read after the server stops.
+    let signal: Arc<OnceLock<&'static str>> = Arc::new(OnceLock::new());
 
     let addr: std::net::SocketAddr = config.bind_addr.parse()?;
 
@@ -118,7 +151,17 @@ async fn main() -> anyhow::Result<()> {
         let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
 
         tracing::info!("Listening on https://{} (TLS)", addr);
+        let handle = axum_server::Handle::new();
+        tokio::spawn({
+            let handle = handle.clone();
+            let signal = signal.clone();
+            async move {
+                let _ = signal.set(shutdown_signal().await);
+                handle.graceful_shutdown(Some(SHUTDOWN_GRACE));
+            }
+        });
         axum_server::bind_rustls(addr, tls_config)
+            .handle(handle)
             .serve(router.into_make_service_with_connect_info::<SocketAddr>())
             .await?;
     } else {
@@ -134,12 +177,58 @@ async fn main() -> anyhow::Result<()> {
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("Listening on http://{} (plaintext)", addr);
+        let signal = signal.clone();
         axum::serve(
             listener,
             router.into_make_service_with_connect_info::<SocketAddr>(),
         )
+        .with_graceful_shutdown(async move {
+            let _ = signal.set(shutdown_signal().await);
+        })
         .await?;
     }
 
+    // Graceful stop: tell the stream, then flush the sinks before exiting.
+    events.emit(
+        SecurityEvent::new(Action::Shutdown)
+            .detail("signal", signal.get().copied().unwrap_or("none")),
+    );
+    events.flush().await;
+    tracing::info!("Ferrowarden stopped");
+
     Ok(())
+}
+
+/// How long in-flight requests get to finish after a shutdown signal.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// Resolves when the process is asked to stop: Ctrl-C (SIGINT), or SIGTERM on
+/// Unix (what `docker stop` sends). Returns the signal's name.
+async fn shutdown_signal() -> &'static str {
+    let ctrl_c = async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => "SIGINT",
+            // Could not install the handler: never resolve rather than
+            // shutting down immediately.
+            Err(_) => std::future::pending().await,
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                sigterm.recv().await;
+                "SIGTERM"
+            }
+            Err(_) => std::future::pending().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<&'static str>();
+
+    tokio::select! {
+        name = ctrl_c => name,
+        name = terminate => name,
+    }
 }

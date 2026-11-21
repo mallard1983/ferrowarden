@@ -1,0 +1,16 @@
+<!--
+  Wazuh agent (or manager) ossec.conf snippet: read the Ferrowarden JSON-lines
+  event file. Paste inside <ossec_config> and restart the agent.
+
+  Ferrowarden must write the file sink (FERROWARDEN_EVENTS__FILE) to a path the
+  agent can read, e.g. a Docker volume or bind mount of /var/log/ferrowarden:
+    FERROWARDEN_EVENTS__FILE=/var/log/ferrowarden/events.jsonl
+
+  Ferrowarden rotates the file itself (events.jsonl.1, .2, ...); the agent
+  follows the new file by path, so no logrotate rule is needed.
+-->
+<localfile>
+  <log_format>json</log_format>
+  <location>/var/log/ferrowarden/events.jsonl</location>
+  <label key="source">ferrowarden</label>
+</localfile>

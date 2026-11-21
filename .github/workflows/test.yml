@@ -97,6 +97,11 @@ jobs:
           set -a; source .env.test; set +a
           cargo test --test integration -- --nocapture --test-threads=1
 
+      # Secret gate: no seeded secret value, agent key, admin key or master
+      # password may appear in the container logs or the security event file.
+      - name: Check logs and events for secret values
+        run: bash scripts/check-no-secrets.sh
+
       - name: Collect logs on failure
         if: failure()
         run: docker compose -f docker-compose.test.yml logs

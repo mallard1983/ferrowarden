@@ -1,0 +1,101 @@
+// Grafana Alloy: ship Ferrowarden security events (and only those) to Loki.
+//
+// Ferrowarden writes security events to stdout as one JSON object per line,
+// interleaved with ordinary application log lines (tracing JSON). Event lines
+// carry event.dataset == "ferrowarden.security"; application lines have no
+// "event" object. This pipeline keeps only event lines.
+//
+// Labels are kept deliberately small and low-cardinality: job, service,
+// action, outcome. Source IPs, request ids, key ids and reasons stay inside the
+// log line and are queried with `| json` (see queries.md). Never promote them
+// to labels: every distinct value would create a new stream.
+
+// 1. Discover containers through the Docker socket.
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// 2. Keep only the ferrowarden service of the Compose project. Change the
+//    regex if your container is named differently (for example match
+//    __meta_docker_container_name against "/ferrowarden").
+discovery.relabel "ferrowarden" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "ferrowarden"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+// 3. Read the container logs.
+loki.source.docker "ferrowarden" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.ferrowarden.output
+  forward_to = [loki.process.security_events.receiver]
+  labels     = {
+    job     = "ferrowarden",
+    service = "ferrowarden",
+  }
+}
+
+// 4. Keep security events, drop application log lines, add low-cardinality labels.
+loki.process "security_events" {
+  forward_to = [loki.write.default.receiver]
+
+  // Parse the line as JSON. Application lines parse too but have no event.dataset.
+  // Non-JSON lines (stderr text) simply extract nothing and are dropped below.
+  stage.json {
+    expressions = {
+      dataset = "event.dataset",
+      action  = "event.action",
+      outcome = "event.outcome",
+      ts      = "\"@timestamp\"",
+    }
+  }
+
+  // Temporarily label with the dataset so stage.match can select on it.
+  stage.labels {
+    values = {
+      dataset = "",
+    }
+  }
+
+  // Drop everything that is not a Ferrowarden security event.
+  stage.match {
+    selector = "{job=\"ferrowarden\", dataset!=\"ferrowarden.security\"}"
+    action   = "drop"
+    drop_counter_reason = "not_a_security_event"
+  }
+
+  // Use the event's own timestamp (millisecond UTC) as the log timestamp.
+  stage.timestamp {
+    source = "ts"
+    format = "RFC3339Nano"
+  }
+
+  // The permanent labels.
+  stage.labels {
+    values = {
+      action  = "",
+      outcome = "",
+    }
+  }
+
+  // The dataset label was only a filter helper.
+  stage.label_drop {
+    values = ["dataset"]
+  }
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

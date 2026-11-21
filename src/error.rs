@@ -88,11 +88,14 @@ pub enum FerroError {
     Internal(String),
 }
 
-// Map FerroError to HTTP responses. Credential values are never included in
-// error responses — only the error category and a safe message.
-impl IntoResponse for FerroError {
-    fn into_response(self) -> Response {
-        let (status, message) = match &self {
+impl FerroError {
+    /// The HTTP status code this error is returned with.
+    pub fn status_code(&self) -> StatusCode {
+        self.status_and_message().0
+    }
+
+    fn status_and_message(&self) -> (StatusCode, String) {
+        match self {
             FerroError::VaultLocked => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
             FerroError::UnlockFailed(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
             FerroError::CredentialNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
@@ -124,8 +127,15 @@ impl IntoResponse for FerroError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
             ),
-        };
+        }
+    }
+}
 
+// Map FerroError to HTTP responses. Credential values are never included in
+// error responses — only the error category and a safe message.
+impl IntoResponse for FerroError {
+    fn into_response(self) -> Response {
+        let (status, message) = self.status_and_message();
         (status, Json(json!({ "error": message }))).into_response()
     }
 }

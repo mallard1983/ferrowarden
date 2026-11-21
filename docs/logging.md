@@ -1,27 +1,56 @@
 # Logging
 
+Ferrowarden produces two kinds of JSON lines on stdout:
+
+- **Security events**: one structured line for everything security-relevant (every forward, failed authentication, key change, vault lock/unlock, startup and shutdown). They have a stable schema and are what you alert on. See [events.md](events.md).
+- **Application logs**: startup messages, warnings and errors, written through `tracing`. Their level is controlled by `FERROWARDEN_LOG_LEVEL` (below).
+
+Event lines are distinguished by `event.dataset == "ferrowarden.security"`.
+
 ## Log Format
 
-Ferrowarden emits structured JSON to stdout on every request:
+A security event (a blocked forward):
 
 ```json
 {
-  "timestamp": "2026-11-20T14:32:11.123Z",
-  "level": "INFO",
-  "fields": {
-    "message": "audit",
-    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-    "agent_name": "homelab-agent",
-    "method": "POST",
-    "target_url": "https://proxmox.lan:8006/api2/json/nodes",
-    "credential_names": ["proxmox_api_token"],
-    "outcome": "Success",
-    "response_status": 200
+  "@timestamp": "2026-11-21T16:09:27.906Z",
+  "message": "forward blocked: credential not bound to target host",
+  "event": {
+    "kind": "event",
+    "dataset": "ferrowarden.security",
+    "action": "forward",
+    "category": ["web"],
+    "type": ["access", "denied"],
+    "outcome": "failure",
+    "reason": "credential_host_not_allowed",
+    "duration": 98918
+  },
+  "source": { "ip": "172.18.0.1" },
+  "http": { "request": { "method": "GET" }, "response": { "status_code": 403 } },
+  "url": { "original": "http://mock-api:7777/api/unbound", "domain": "mock-api" },
+  "ferrowarden": {
+    "schema_version": 1,
+    "request_id": "01a1fede-aa62-717e-b0dd-10a8660ac84d",
+    "key": { "id": "a35c6bd3-1a1e-48ea-8e90-ebc0718399c4", "name": "monitoring-agent" },
+    "credentials": ["test_unbound"]
   }
 }
 ```
 
-Credential values are never logged. Only placeholder names (`credential_names`) appear in audit events.
+An application log line:
+
+```json
+{
+  "timestamp": "2026-11-21T16:08:26.961371Z",
+  "level": "INFO",
+  "fields": { "message": "Vault unlocked via file mode" },
+  "target": "ferrowarden"
+}
+```
+
+Events are recorded for failed requests as well as successful ones, including requests with a missing or invalid agent key. Credential values, tokens, the admin key and the API prefix are never logged; only placeholder names appear. The full schema, every action and the reason codes are in [events.md](events.md).
+
+Besides stdout, events can go to a rotating file and to syslog; see [Event sinks](events.md#sinks-and-configuration).
 
 ---
 
@@ -32,8 +61,8 @@ Set `FERROWARDEN_LOG_LEVEL` in `docker-compose.yml` or the host environment:
 | Level | What you see |
 |---|---|
 | `error` | Startup failures and fatal errors only |
-| `warn` | Errors plus warnings (TLS disabled, vault locked) |
-| `info` | **Default** — normal operation: requests, auth events, startup/shutdown |
+| `warn` | Errors plus warnings (TLS disabled, a failing event sink, failed credential refresh) |
+| `info` | **Default** — normal operation: startup/shutdown messages, vault unlock and refresh notes |
 | `debug` | Internal state transitions, bw serve calls, substitution details |
 | `trace` | Everything including HTTP internals — very verbose |
 
@@ -51,7 +80,7 @@ FERROWARDEN_LOG_LEVEL: "ferrowarden=debug,tower_http=warn"
 
 ### Why log level requires a restart
 
-Log level is read once at startup and cannot be changed at runtime. This is intentional.
+Log level is read once at startup and cannot be changed at runtime. This is intentional. The level applies to application logs only: **security events are always written**, whatever `FERROWARDEN_LOG_LEVEL` says, so lowering it cannot suppress the audit trail.
 
 Changing the log level requires a `docker compose restart ferrowarden`, which produces a container restart event visible in Docker logs and your monitoring system. An attacker who gains access to the running container cannot silently suppress or reduce logging without that restart event appearing. If you see an unexpected log level drop followed by suspicious activity, the restart timestamp bounds the window of reduced visibility.
 
@@ -116,29 +145,34 @@ logging:
 
 Replace `<loki-host>` with the IP or hostname of your Loki instance. If Loki runs in the same Compose stack, use the Docker service name.
 
-**Useful LogQL queries:**
+**Useful LogQL queries** (events are JSON lines; Loki's `json` parser flattens `event.dataset` to `event_dataset`):
 
 ```logql
-# All audit events
-{service="ferrowarden"} | json | message="audit"
+# All security events
+{service="ferrowarden"} | json | event_dataset="ferrowarden.security"
 
-# Failed requests only
-{service="ferrowarden"} | json | outcome!="Success"
+# Everything that failed
+{service="ferrowarden"} | json | event_dataset="ferrowarden.security" | event_outcome="failure"
 
-# Requests from a specific agent
-{service="ferrowarden"} | json | agent_name="homelab-agent"
+# Failed agent authentication
+{service="ferrowarden"} | json | event_action="agent_auth"
 
-# Requests using a specific credential
-{service="ferrowarden"} | json | line_format "{{.credential_names}}" |= "proxmox_api_token"
+# Blocked forwards, by reason
+{service="ferrowarden"} | json | event_action="forward" | event_reason="credential_host_not_allowed"
 
-# Rate-limited requests (429 responses)
-{service="ferrowarden"} | json | response_status=429
+# Requests by one agent key
+{service="ferrowarden"} | json | ferrowarden_key_name="homelab-agent"
 
-# Auth failures (unauthorized requests)
-{service="ferrowarden"} | json | outcome="Unauthorized"
+# Follow one request end to end
+{service="ferrowarden"} | json | ferrowarden_request_id="01a1fede-aa62-717e-b0dd-10a8660ac84d"
+
+# Rate limiting
+{service="ferrowarden"} | json | event_action="rate_limited"
 ```
 
 ### Option B: Promtail sidecar
+
+> Promtail has reached end of life upstream. For a new setup use Grafana Alloy with [`examples/siem/loki/alloy-config.alloy`](../examples/siem/loki/alloy-config.alloy), which also filters out application log lines. The Promtail example below is kept for existing installations.
 
 If you cannot install the Docker plugin (e.g., restricted host), run a [Promtail](https://grafana.com/docs/loki/latest/send-data/promtail/) container that reads Docker JSON log files and ships them to Loki.
 
@@ -146,7 +180,7 @@ Add to `docker-compose.yml`:
 
 ```yaml
 promtail:
-  image: grafana/promtail:latest
+  image: grafana/promtail:3.5.7
   volumes:
     # Read Docker container logs
     - /var/lib/docker/containers:/var/lib/docker/containers:ro
@@ -182,76 +216,25 @@ scrape_configs:
 
 ## Shipping to Wazuh
 
-[Wazuh](https://wazuh.com/) is a SIEM that can ingest Docker JSON logs for security monitoring, alerting, and compliance.
+[Wazuh](https://wazuh.com/) can ingest Ferrowarden's security events in two ways, both described in [events.md](events.md#sinks-and-configuration):
 
-### Reading Docker JSON log files
+- **File sink**: enable `events.file`, mount the directory on a volume, and point a Wazuh agent `localfile` entry (with `<log_format>json</log_format>`) at it. The file is rotated by Ferrowarden itself.
+- **Syslog sink**: set `events.syslog` to `udp://<wazuh-manager>:514` or `tcp://<wazuh-manager>:514` to send RFC 5424 messages to a manager whose `ossec.conf` has a `<remote>` block with `<connection>syslog</connection>`. Wazuh's syslog listener has no TLS, so for `tls://` send to an rsyslog or syslog-ng relay that forwards to the manager or a local agent.
 
-Install the Wazuh agent on the Docker host. Add a localfile block to `/var/ossec/etc/ossec.conf` (or the agent's config) for each container whose logs you want to monitor:
+Ready-made decoders, rules and an agent `localfile` snippet are in [`examples/siem/wazuh/`](../examples/siem/wazuh/), tested with `wazuh-logtest` and a live manager (4.14.1):
 
-```xml
-<ossec_config>
-  <localfile>
-    <!-- Read all Docker container logs -->
-    <log_format>json</log_format>
-    <location>/var/lib/docker/containers/*/*.log</location>
-  </localfile>
-</ossec_config>
-```
+- `ferrowarden_rules.xml` (ids 100200-100299, group `ferrowarden`): failed agent authentication (level 4) and five of them from one `source.ip` within two minutes (10); failed admin authentication (10) and three within five minutes (13); forwards blocked as `credential_host_not_allowed` or `target_blocked` (8, a possible prompt-injection or exfiltration attempt); rate limiting, vault lock and failed unlock, key creation and revocation, `events_dropped`, startup and shutdown.
+- `ferrowarden_decoders.xml`: the syslog route (RFC 5424 with APP-NAME `ferrowarden`, JSON as the message). The file route needs no decoder: Wazuh's built-in `json` decoder parses the lines.
+- `ossec-localfile.xml`: the agent `localfile` entry for the file sink.
 
-Wazuh parses the Docker JSON log envelope and indexes the inner `log` field. Add a custom decoder for Ferrowarden's structured JSON:
+## Loki and Wazuh examples
 
-```xml
-<!-- /var/ossec/etc/decoders/ferrowarden.xml -->
-<decoder name="ferrowarden">
-  <prematch>\"message\":\"audit\"</prematch>
-</decoder>
+[`examples/siem/`](../examples/siem/README.md) holds both integrations, each verified against a running instance:
 
-<decoder name="ferrowarden-fields">
-  <parent>ferrowarden</parent>
-  <json_fields>agent_name,method,target_url,credential_names,outcome,response_status</json_fields>
-</decoder>
-```
+- [`loki/`](../examples/siem/loki/): a Compose file (Loki and Grafana Alloy), the Alloy pipeline that keeps only `event.dataset = ferrowarden.security` lines and labels them `job`, `service`, `action` and `outcome`, LogQL queries ([`queries.md`](../examples/siem/loki/queries.md)) and Loki ruler alert rules.
+- [`wazuh/`](../examples/siem/wazuh/): the decoders, rules and `localfile` snippet above.
 
-Add custom rules to alert on suspicious patterns:
-
-```xml
-<!-- /var/ossec/etc/rules/ferrowarden_rules.xml -->
-<group name="ferrowarden">
-
-  <!-- Alert on repeated auth failures (possible brute force) -->
-  <rule id="100100" level="10" frequency="5" timeframe="60">
-    <decoded_as>ferrowarden-fields</decoded_as>
-    <field name="outcome">Unauthorized</field>
-    <description>Ferrowarden: repeated authentication failures from same source</description>
-    <same_field>agent_name</same_field>
-  </rule>
-
-  <!-- Alert on rate limit hits -->
-  <rule id="100101" level="7">
-    <decoded_as>ferrowarden-fields</decoded_as>
-    <field name="response_status">429</field>
-    <description>Ferrowarden: rate limit exceeded</description>
-  </rule>
-
-  <!-- Alert if vault is locked during a forwarding attempt -->
-  <rule id="100102" level="8">
-    <decoded_as>ferrowarden-fields</decoded_as>
-    <field name="outcome">VaultLocked</field>
-    <description>Ferrowarden: forward attempt while vault is locked</description>
-  </rule>
-
-</group>
-```
-
-Restart the Wazuh agent after adding decoders and rules:
-
-```sh
-systemctl restart wazuh-agent
-```
-
-### Wazuh Docker listener (alternative)
-
-If you prefer not to read raw log files, the [Wazuh Docker listener](https://documentation.wazuh.com/current/user-manual/reference/ossec-conf/wodle-docker.html) can subscribe to Docker events directly. Enable the `docker-listener` wodle in `ossec.conf`.
+Alloy keeps IPs, request ids and key names out of the labels; query them with `| json`. Promtail is end-of-life upstream: the Alloy configuration replaces the Promtail one in Option B for new setups.
 
 ---
 
@@ -263,4 +246,4 @@ If you prefer not to read raw log files, the [Wazuh Docker listener](https://doc
 | Loki | 30–90 days | Query with LogQL in Grafana |
 | Wazuh | 90–365 days | Required for compliance/incident response |
 
-Audit events (every proxy request) are the most important log entries. Treat them as security-relevant data with the same retention requirements as your firewall logs.
+Security events are the most important log entries. Treat them as security-relevant data with the same retention requirements as your firewall logs. The in-memory buffer behind `GET /v1/admin/audit` is lost on restart: rely on a sink for retention.

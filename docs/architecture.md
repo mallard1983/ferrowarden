@@ -62,7 +62,7 @@ Ferrowarden is the proxy. It manages:
 - **Forwarding**: Sends the substituted request to the target with a configurable timeout (default 30 seconds), no redirect following, no HTTP proxy, and a response size cap
 - **Scrubbing**: Removes every encoding of each substituted value from the response body, headers and errors, then runs regex patterns that redact bearer tokens, API key JSON fields, Proxmox tokens, basic auth in URLs, and PEM private key blocks
 - **Agent key persistence**: On create, appends a SHA-256 hash of the token to a JSON file (never the plaintext). On startup, re-loads those hashes so keys survive container restarts.
-- **Audit log**: Records every proxy request (credential names, outcome, response status) to a ring buffer and to structured log output
+- **Security event log**: Records every security-relevant action (forwards with credential names and outcome, failed authentication, key changes, vault lock/unlock, startup/shutdown) as structured events to stdout, an optional rotating file, optional syslog, and a ring buffer ([events.md](events.md))
 
 ---
 
@@ -101,7 +101,7 @@ Agent                    Ferrowarden               bw serve          Target Serv
   │                           │◄─────────────────────────────────────────── │
   │                           │  Response body         │                    │
   │                           │ 7. Scrub response      │                    │
-  │                           │ 8. Record audit entry  │                    │
+  │                           │ 8. Record security event  │                    │
   │◄──────────────────────────│                        │                    │
   │  {"status":200,           │                        │                    │
   │   "body":"...scrubbed..."}│                        │                    │
@@ -142,6 +142,6 @@ The tradeoff is longer build times and a steeper learning curve. For a credentia
 
 - **Not a secrets manager**: Vaultwarden handles storage. Ferrowarden only proxies.
 - **Not a firewall**: It does not enforce which target URLs the agent may call. That is the operator's responsibility (network policy, reverse proxy rules).
-- **Not a full audit trail**: The in-memory ring buffer (default 1000 entries) is lost on restart. Persist the structured log output (Loki, Elasticsearch, etc.) for a durable audit trail.
+- **Not a durable audit trail on its own**: The in-memory ring buffer (default 1000 events) is lost on restart. Enable a sink (stdout shipped to Loki, the file sink, or syslog) for a durable trail.
 - **Not a firewall for target URLs**: It does not enforce which URLs the agent may call. That is the operator's responsibility (network policy, firewall rules).
-- **Not a full audit trail on its own**: The in-memory ring buffer is lost on restart. Ship the structured JSON log output to Loki, Elasticsearch, or a log file for a durable audit trail.
+- **Not a durable audit trail on its own**: Ship the security events to Loki, Wazuh, a file or syslog for a durable trail.

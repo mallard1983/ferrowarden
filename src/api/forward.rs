@@ -9,8 +9,9 @@ use zeroize::Zeroizing;
 
 use crate::api::credentials::authenticate_agent;
 use crate::api::strict_json::StrictJson;
-use crate::audit::{build_entry, Outcome};
 use crate::error::{FerroError, FerroResult};
+use crate::events::{emit_rejected, Action, SecurityEvent};
+use crate::middleware::request_context::RequestContext;
 use crate::proxy::forward::{ProxyRequest, ZeroizingHeaders};
 use crate::proxy::placeholder::{self, Placeholder};
 use crate::proxy::{
@@ -36,12 +37,22 @@ pub struct ForwardPayload {
 /// credential values.
 pub async fn forward(
     State(state): State<Arc<AppState>>,
+    ctx: RequestContext,
     headers: HeaderMap,
-    StrictJson(payload): StrictJson<ForwardPayload>,
+    body: Result<StrictJson<ForwardPayload>, FerroError>,
 ) -> FerroResult<Json<crate::proxy::forward::ProxyResponse>> {
-    // Authenticate the agent first — before touching the vault or making any
-    // outbound connections
-    let agent = authenticate_agent(&state, &headers).await?;
+    const ENDPOINT: &str = "/v1/forward";
+    // Authenticate the agent first — before looking at the body (so a caller
+    // without a valid key learns nothing from parse errors), touching the
+    // vault or making any outbound connections.
+    let agent = authenticate_agent(&state, &ctx, &headers, ENDPOINT).await?;
+    let payload = match body {
+        Ok(StrictJson(payload)) => payload,
+        Err(e) => {
+            emit_rejected(&state.events, &ctx, Some(&agent), ENDPOINT, &e);
+            return Err(e);
+        }
+    };
     let req = payload.request;
 
     // Parse every placeholder (URL, header values, body) before anything
@@ -63,28 +74,25 @@ pub async fn forward(
         // retry once rather than failing until the next refresh. The retry
         // cannot duplicate an outbound call: VaultLocked only ever occurs
         // before anything is sent to the target.
-        state.set_locked().await;
+        state.set_locked("forward_vault_locked").await;
         if reunlock_if_possible(&state).await {
             result = run_forward(&state, &req, &names).await;
         }
     }
 
-    let (outcome, status) = match &result {
-        Ok(resp) => (Outcome::Success, Some(resp.status)),
-        Err(e) => (outcome_for(e), None),
-    };
-    state
-        .audit
-        .record(build_entry(
-            &agent.id,
-            &agent.name,
-            &req.method,
-            &req.url,
-            placeholder_names,
-            outcome,
-            status,
-        ))
-        .await;
+    // One event per forward, whatever happened. `url` is the agent's URL
+    // before substitution, so it holds placeholders, never values.
+    let event = SecurityEvent::new(Action::Forward)
+        .request(&ctx)
+        .key(&agent)
+        .method(&req.method)
+        .url(&req.url)
+        .credentials(&placeholder_names)
+        .duration(ctx.started.elapsed());
+    state.events.emit(match &result {
+        Ok(resp) => event.status(resp.status),
+        Err(e) => event.failed_with(e).status(e.status_code().as_u16()),
+    });
 
     result.map(Json)
 }
@@ -198,24 +206,4 @@ async fn run_forward(
     )
     .await
     // `values`, `subst_url`, headers and body are Zeroizing and wiped on drop.
-}
-
-fn outcome_for(error: &FerroError) -> Outcome {
-    match error {
-        FerroError::VaultLocked => Outcome::VaultLocked,
-        FerroError::UnknownPlaceholder(_)
-        | FerroError::MalformedPlaceholder(_)
-        | FerroError::CredentialNotFound(_)
-        | FerroError::AmbiguousCredential(_)
-        | FerroError::AmbiguousField { .. } => Outcome::UnknownCredential,
-        FerroError::CredentialHostNotAllowed { .. }
-        | FerroError::TargetBlocked(_)
-        | FerroError::RepromptRequired(_) => Outcome::Blocked,
-        FerroError::ForwardFailed(_)
-        | FerroError::InvalidTargetUrl(_)
-        | FerroError::InvalidRequest(_)
-        | FerroError::InvalidJson(_)
-        | FerroError::ResponseTooLarge(_) => Outcome::ForwardFailed,
-        _ => Outcome::InternalError,
-    }
 }

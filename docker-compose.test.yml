@@ -125,6 +125,11 @@ services:
       # Same for the admin endpoints (default burst 5): the key lifecycle,
       # status and audit tests call them back-to-back.
       FERROWARDEN_ADMIN_RATE_LIMIT_BURST: "1000"
+      # Also write security events to a file inside the container. The writable
+      # layer is used (not a bind mount) so this works on Linux CI runners whose
+      # UID differs; scripts/check-no-secrets.sh copies it out with
+      # `docker compose cp` and scans it for secret values.
+      FERROWARDEN_EVENTS__FILE: "/tmp/ferrowarden-events/events.jsonl"
     networks:
       - vault-internal
       - test-net

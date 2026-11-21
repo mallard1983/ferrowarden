@@ -133,6 +133,96 @@ pub struct Config {
     /// Burst size for the admin endpoints. Default 5.
     #[serde(default = "default_admin_rate_limit_burst")]
     pub admin_rate_limit_burst: u32,
+
+    /// Security event stream: sinks, queue and in-memory buffer. `[events]`
+    /// in the TOML file, `FERROWARDEN_EVENTS__*` in the environment.
+    #[serde(default)]
+    pub events: EventsConfig,
+}
+
+/// Settings of the security event stream (see docs/events.md).
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct EventsConfig {
+    /// Write events as JSON lines to stdout (alongside the application logs;
+    /// events carry `event.dataset = "ferrowarden.security"`). Default: true.
+    pub stdout: bool,
+    /// Events kept in memory for `GET /v1/admin/audit`. Default 1000.
+    pub buffer_size: usize,
+    /// Events that may wait for the sink writer. When full, new events are
+    /// dropped (and reported) instead of blocking requests. Default 10000.
+    pub queue_size: usize,
+    /// Path of a JSON-lines event file. Empty (default) disables it.
+    pub file: String,
+    /// Rotate the event file when it would exceed this many bytes. Default 50 MiB.
+    pub file_max_bytes: u64,
+    /// Rotated files to keep (`events.jsonl.1` ... `.N`). Default 10.
+    pub file_keep: u32,
+    /// Syslog destination: `udp://host:port`, `tcp://host:port` or
+    /// `tls://host:port`. Empty (default) disables it.
+    pub syslog: String,
+    /// Syslog facility name or number. Default `auth`.
+    pub syslog_facility: String,
+    /// Extra CA bundle (PEM) trusted for `tls://` syslog, besides the public
+    /// roots. Empty (default) means public roots only.
+    pub syslog_ca_file: String,
+}
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            stdout: true,
+            buffer_size: 1000,
+            queue_size: 10_000,
+            file: String::new(),
+            file_max_bytes: 50 * 1024 * 1024,
+            file_keep: 10,
+            syslog: String::new(),
+            syslog_facility: "auth".to_string(),
+            syslog_ca_file: String::new(),
+        }
+    }
+}
+
+impl EventsConfig {
+    /// Names of the enabled sinks, for the startup event.
+    pub fn enabled_sinks(&self) -> Vec<&'static str> {
+        let mut sinks = Vec::new();
+        if self.stdout {
+            sinks.push("stdout");
+        }
+        if !self.file.is_empty() {
+            sinks.push("file");
+        }
+        if !self.syslog.is_empty() {
+            sinks.push("syslog");
+        }
+        sinks
+    }
+
+    fn validate(&self) -> FerroResult<()> {
+        if self.buffer_size == 0 || self.queue_size == 0 {
+            return Err(FerroError::Config(
+                "events.buffer_size and events.queue_size must be greater than 0".to_string(),
+            ));
+        }
+        if !self.file.is_empty() && (self.file_max_bytes == 0 || self.file_keep == 0) {
+            return Err(FerroError::Config(
+                "events.file_max_bytes and events.file_keep must be greater than 0".to_string(),
+            ));
+        }
+        if !self.syslog.is_empty() {
+            crate::events::sinks::parse_syslog_url(&self.syslog).map_err(FerroError::Config)?;
+            crate::events::sinks::parse_facility(&self.syslog_facility)
+                .map_err(FerroError::Config)?;
+        }
+        if !self.syslog_ca_file.is_empty() && !self.syslog.starts_with("tls://") {
+            return Err(FerroError::Config(
+                "events.syslog_ca_file is only used with a tls:// syslog URL".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn default_bind_addr() -> String {
@@ -294,6 +384,8 @@ impl Config {
             }
         }
 
+        self.events.validate()?;
+
         if self.tls_enabled {
             if self.tls_cert_file.is_none() {
                 return Err(FerroError::Config(
@@ -338,7 +430,80 @@ mod tests {
             agent_rate_limit_burst: 20,
             admin_rate_limit_per_minute: 30,
             admin_rate_limit_burst: 5,
+            events: Default::default(),
         }
+    }
+
+    #[test]
+    fn events_defaults_match_the_documentation() {
+        let e = EventsConfig::default();
+        assert!(e.stdout);
+        assert_eq!(e.buffer_size, 1000);
+        assert_eq!(e.queue_size, 10_000);
+        assert!(e.file.is_empty() && e.syslog.is_empty() && e.syslog_ca_file.is_empty());
+        assert_eq!(e.file_max_bytes, 52_428_800);
+        assert_eq!(e.file_keep, 10);
+        assert_eq!(e.syslog_facility, "auth");
+        assert_eq!(e.enabled_sinks(), vec!["stdout"]);
+        assert!(base_config(UnlockMode::Manual).validate().is_ok());
+    }
+
+    #[test]
+    fn events_section_deserializes_partially() {
+        let cfg: Config = config::Config::builder()
+            .add_source(config::File::from_str(
+                "unlock_mode = \"manual\"
+[events]
+file = \"/tmp/e.jsonl\"
+file_keep = 3
+",
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert_eq!(cfg.events.file, "/tmp/e.jsonl");
+        assert_eq!(cfg.events.file_keep, 3);
+        assert!(cfg.events.stdout, "unspecified keys keep their defaults");
+        assert_eq!(cfg.events.buffer_size, 1000);
+    }
+
+    #[test]
+    fn invalid_events_settings_fail_validation() {
+        type Tweak = Box<dyn Fn(&mut EventsConfig)>;
+        let bad: Vec<Tweak> = vec![
+            Box::new(|e| e.buffer_size = 0),
+            Box::new(|e| e.queue_size = 0),
+            Box::new(|e| {
+                e.file = "/tmp/e.jsonl".into();
+                e.file_keep = 0;
+            }),
+            Box::new(|e| {
+                e.file = "/tmp/e.jsonl".into();
+                e.file_max_bytes = 0;
+            }),
+            Box::new(|e| e.syslog = "http://siem:514".into()),
+            Box::new(|e| e.syslog = "udp://siem".into()),
+            Box::new(|e| {
+                e.syslog = "udp://siem:514".into();
+                e.syslog_facility = "nope".into();
+            }),
+            Box::new(|e| {
+                e.syslog = "tcp://siem:514".into();
+                e.syslog_ca_file = "/ca.pem".into();
+            }),
+        ];
+        for (i, tweak) in bad.iter().enumerate() {
+            let mut cfg = base_config(UnlockMode::Manual);
+            tweak(&mut cfg.events);
+            assert!(cfg.validate().is_err(), "case {i} should fail");
+        }
+        let mut ok = base_config(UnlockMode::Manual);
+        ok.events.syslog = "tls://siem.example:6514".into();
+        ok.events.syslog_ca_file = "/ca.pem".into();
+        ok.events.file = "/tmp/e.jsonl".into();
+        assert!(ok.validate().is_ok());
     }
 
     #[test]
