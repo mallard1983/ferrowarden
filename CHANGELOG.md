@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
-## [0.1.0] — preview
+## [0.1.0] — 2026-11-21 (preview)
 
 First public release. Ferrowarden is a credential proxy for AI agents: credentials live in a self-hosted Vaultwarden password manager, agents call APIs through Ferrowarden with `{{vault:name}}` placeholders, and credential values never reach the agent.
 
