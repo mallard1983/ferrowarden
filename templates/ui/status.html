@@ -1,0 +1,32 @@
+{% extends "ui/base.html" %}
+{% block title %}Status{% endblock %}
+{% block content %}
+<h1>Status</h1>
+<p class="muted">Read-only overview. Signed in as {{ account_email }}.</p>
+<dl class="facts">
+<dt>Vault</dt>
+<dd>{% if vault_locked %}<span class="badge bad">Locked</span>{% else %}<span class="badge ok">Unlocked</span>{% endif %}</dd>
+<dt>Credentials</dt>
+<dd>{{ credential_count }}</dd>
+<dt>Last sync</dt>
+<dd>{{ last_sync }}</dd>
+<dt>Ferrowarden</dt>
+<dd>version {{ version }}</dd>
+<dt>This connection</dt>
+<dd>{% if https %}<span class="badge ok">HTTPS</span>{% else %}<span class="badge bad">Plain HTTP</span> (<code>ui.insecure_http</code> is on){% endif %}</dd>
+<dt>Agent API listener</dt>
+<dd>{% if api_tls %}TLS{% else %}Plain HTTP{% endif %}</dd>
+<dt>Agent keys</dt>
+<dd>{{ key_count }}</dd>
+<dt>Keys without a policy</dt>
+<dd>{% if keys_without_policy > 0 %}<span class="badge bad">{{ keys_without_policy }}</span> These keys are deny-all until a policy is set.{% else %}0{% endif %}</dd>
+<dt>Security events dropped</dt>
+<dd>{{ events_dropped }}</dd>
+<dt>Session expires</dt>
+<dd>{{ session_expires }}</dd>
+</dl>
+<form method="post" action="/ui/logout">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="secondary">Sign out</button>
+</form>
+{% endblock %}

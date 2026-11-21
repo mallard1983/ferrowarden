@@ -133,6 +133,7 @@ Behind a TLS reverse proxy such as Pangolin, see [docs/tls.md](docs/tls.md#pango
 | [Setup Guide](docs/setup.md) | Installation, Vaultwarden setup, first run |
 | [API Reference](docs/api-reference.md) | All endpoints, request/response shapes, error codes |
 | [Operations](docs/operations.md) | Unlock modes, key rotation, monitoring, troubleshooting |
+| [Admin Web UI](docs/admin-ui.md) | Optional operator UI: Vaultwarden sign-in with two-step login, sessions, HTTPS and reverse proxy, lockouts |
 | [Logging](docs/logging.md) | Log levels, Loki, Wazuh, retention |
 | [TLS](docs/tls.md) | Pangolin reverse proxy and self-signed CA setup |
 | [Agent Skill](docs/agent-skill.md) | Reference doc for agents using the proxy (non-skill format) |

@@ -1,0 +1,7 @@
+{% extends "ui/base.html" %}
+{% block title %}{{ heading }}{% endblock %}
+{% block content %}
+<h1>{{ heading }}</h1>
+<p>{{ message }}</p>
+{% if let Some(link) = link %}<p><a href="{{ link }}">{{ link_label }}</a></p>{% endif %}
+{% endblock %}

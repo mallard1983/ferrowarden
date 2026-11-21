@@ -38,6 +38,8 @@ struct Shared {
     capacity: usize,
     /// Events dropped because the sink queue was full, not yet reported.
     dropped: AtomicU64,
+    /// Events dropped since start (never reset); shown on the admin UI.
+    dropped_total: AtomicU64,
 }
 
 impl Shared {
@@ -70,6 +72,7 @@ impl EventLog {
                 buffer: Mutex::new(VecDeque::with_capacity(capacity.min(4096))),
                 capacity: capacity.max(1),
                 dropped: AtomicU64::new(0),
+                dropped_total: AtomicU64::new(0),
             }),
             tx: None,
         }
@@ -103,6 +106,7 @@ impl EventLog {
             // Queue full (or the writer is gone). Count it; the writer reports
             // the total when it has room. Say so on stderr right away, once
             // per overflow episode, so a flood cannot also flood stderr.
+            self.shared.dropped_total.fetch_add(1, Ordering::Relaxed);
             if self.shared.dropped.fetch_add(1, Ordering::Relaxed) == 0 {
                 let _ = writeln!(
                     std::io::stderr(),
@@ -132,6 +136,11 @@ impl EventLog {
             .take(limit)
             .cloned()
             .collect()
+    }
+
+    /// Events that could not be queued for the sinks since start.
+    pub fn dropped_total(&self) -> u64 {
+        self.shared.dropped_total.load(Ordering::Relaxed)
     }
 
     /// Ring buffer capacity (the largest useful `limit`).

@@ -2470,3 +2470,405 @@ async fn test_key_create_event_includes_the_policy() {
     );
     env.revoke_key(body["id"].as_str().unwrap()).await;
 }
+
+// ── Admin web UI (phase 1: sign-in and status) ────────────────────────────────
+//
+// The UI is a separate listener (`FERROWARDEN_UI__BIND=0.0.0.0:3001` in
+// docker-compose.test.yml, plain HTTP via `insecure_http` because this client
+// is plain HTTP). It signs in with the vault master password, which these
+// tests read from secrets/bw_master_password. The value is never printed, and
+// no assertion message contains it.
+//
+// Vaultwarden rate-limits logins (10 per minute per IP) and Ferrowarden locks
+// an IP after 5 failures, so the suite makes only one real wrong-password
+// attempt and a handful of correct sign-ins. Two-factor sign-in is covered by
+// the mock-based unit tests, not here.
+
+/// What a browser sends and keeps for the admin UI.
+struct UiBrowser {
+    client: Client,
+    base: String,
+    cookies: Vec<(String, String)>,
+}
+
+struct UiResp {
+    status: u16,
+    headers: reqwest::header::HeaderMap,
+    body: String,
+}
+
+impl UiResp {
+    fn header(&self, name: &str) -> &str {
+        self.headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+    }
+
+    fn request_id(&self) -> String {
+        self.header("x-request-id").to_string()
+    }
+
+    fn set_cookie(&self, name: &str) -> Option<String> {
+        self.headers
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find(|c| c.starts_with(&format!("{name}=")))
+            .map(str::to_string)
+    }
+
+    /// The CSRF token in the page's hidden field.
+    fn csrf(&self) -> String {
+        let marker = "name=\"csrf\" value=\"";
+        let start = self.body.find(marker).expect("page has a csrf field") + marker.len();
+        let end = self.body[start..].find('"').unwrap();
+        self.body[start..start + end].to_string()
+    }
+}
+
+/// The vault master password of the test stack. Never print it.
+fn master_password() -> String {
+    std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/secrets/bw_master_password"
+    ))
+    .expect("secrets/bw_master_password must exist (run scripts/dev-setup first)")
+    .trim_end_matches(['\r', '\n'])
+    .to_string()
+}
+
+fn ui_email() -> String {
+    env::var("FERROWARDEN_TEST_UI_EMAIL").unwrap_or_else(|_| "admin@ferrowarden.test".to_string())
+}
+
+impl TestEnv {
+    fn ui_url(&self) -> String {
+        env::var("FERROWARDEN_TEST_UI_URL").unwrap_or_else(|_| "http://localhost:3001".to_string())
+    }
+
+    fn ui_browser(&self) -> UiBrowser {
+        UiBrowser {
+            client: Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            base: self.ui_url(),
+            cookies: Vec::new(),
+        }
+    }
+}
+
+impl UiBrowser {
+    fn cookie(&self, name: &str) -> Option<&str> {
+        self.cookies
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    async fn send(
+        &mut self,
+        method: reqwest::Method,
+        path: &str,
+        headers: &[(&str, &str)],
+        form: Option<&[(&str, &str)]>,
+    ) -> UiResp {
+        let mut req = self.client.request(method, format!("{}{path}", self.base));
+        if !self.cookies.is_empty() {
+            let cookie = self
+                .cookies
+                .iter()
+                .map(|(n, v)| format!("{n}={v}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            req = req.header("cookie", cookie);
+        }
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        if let Some(form) = form {
+            req = req.form(form);
+        }
+        let resp = req.send().await.expect(
+            "the admin UI must be reachable (is the stack current? docker compose up -d --build)",
+        );
+        let status = resp.status().as_u16();
+        let headers = resp.headers().clone();
+        let body = resp.text().await.unwrap_or_default();
+
+        for value in headers.get_all("set-cookie") {
+            let c = value.to_str().unwrap();
+            let (pair, attrs) = c.split_once(';').unwrap_or((c, ""));
+            let (name, val) = pair.split_once('=').unwrap();
+            self.cookies.retain(|(n, _)| n != name);
+            if !attrs.contains("Max-Age=0") {
+                self.cookies.push((name.to_string(), val.to_string()));
+            }
+        }
+        UiResp {
+            status,
+            headers,
+            body,
+        }
+    }
+
+    async fn get(&mut self, path: &str) -> UiResp {
+        self.send(reqwest::Method::GET, path, &[], None).await
+    }
+
+    /// A form POST the way a browser sends it from the UI's own pages.
+    async fn post(&mut self, path: &str, form: &[(&str, &str)]) -> UiResp {
+        self.send(
+            reqwest::Method::POST,
+            path,
+            &[("sec-fetch-site", "same-origin")],
+            Some(form),
+        )
+        .await
+    }
+
+    async fn sign_in(&mut self, password: &str) -> UiResp {
+        let page = self.get("/ui/login").await;
+        assert_eq!(page.status, 200, "login page");
+        let csrf = page.csrf();
+        self.post("/ui/login", &[("csrf", &csrf), ("password", password)])
+            .await
+    }
+}
+
+fn assert_ui_security_headers(r: &UiResp) {
+    assert_eq!(
+        r.header("content-security-policy"),
+        "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; \
+frame-ancestors 'none'; base-uri 'none'"
+    );
+    assert_eq!(r.header("x-content-type-options"), "nosniff");
+    assert_eq!(r.header("referrer-policy"), "no-referrer");
+    assert_eq!(r.header("x-frame-options"), "DENY");
+    assert_eq!(r.header("cross-origin-opener-policy"), "same-origin");
+    assert_eq!(r.header("cross-origin-resource-policy"), "same-origin");
+    assert!(!r.header("permissions-policy").is_empty());
+    assert!(!r.header("x-request-id").is_empty());
+}
+
+/// Signing in with the real master password works end to end (Vaultwarden
+/// verifies it), the session cookie is hardened, and the status page shows the
+/// account and the same counts as the admin API.
+#[tokio::test]
+async fn test_ui_sign_in_shows_the_status_page() {
+    let Some(env) = TestEnv::load() else { return };
+    let pw = master_password();
+    let mut b = env.ui_browser();
+
+    let r = b.sign_in(&pw).await;
+    assert_eq!(r.status, 303, "sign-in with the real master password");
+    assert_eq!(r.header("location"), "/ui/");
+    let cookie = r.set_cookie("__Host-fw_session").expect("session cookie");
+    for attr in ["Path=/", "HttpOnly", "Secure", "SameSite=Strict"] {
+        assert!(cookie.contains(attr), "session cookie lacks {attr}");
+    }
+    assert!(!cookie.contains("Max-Age") && !cookie.contains("Domain"));
+
+    let status = b.get("/ui/").await;
+    assert_eq!(status.status, 200);
+    assert_ui_security_headers(&status);
+    assert!(status.body.contains(&ui_email()), "account email");
+    assert!(status.body.contains("Unlocked"));
+
+    // The same numbers as GET /v1/admin/status.
+    let api: Value = env
+        .client
+        .get(format!("{}/v1/admin/status", env.fw_url))
+        .header("X-Admin-Key", &env.admin_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(status.body.contains(&format!(
+        "<dt>Agent keys</dt>\n<dd>{}</dd>",
+        api["agent_key_count"]
+    )));
+    assert!(status.body.contains(&format!(
+        "<dt>Credentials</dt>\n<dd>{}</dd>",
+        api["credential_count"]
+    )));
+    assert!(status.body.contains("Keys without a policy"));
+    assert!(!status.body.contains(&pw), "the password is never rendered");
+
+    // The sign-in is an event with the request id of the POST.
+    let e = env.event_for(&r.request_id(), "ui_login").await;
+    assert_eq!(e["event"]["outcome"], "success");
+    assert_eq!(e["event"]["category"], json!(["authentication"]));
+
+    // Tidy up: sign out.
+    let csrf = status.csrf();
+    let out = b.post("/ui/logout", &[("csrf", &csrf)]).await;
+    assert_eq!(out.status, 303);
+}
+
+/// A wrong password is refused with a generic message and recorded. This is
+/// the suite's only real wrong-password attempt.
+#[tokio::test]
+async fn test_ui_wrong_password_fails_and_is_an_event() {
+    let Some(env) = TestEnv::load() else { return };
+    let mut b = env.ui_browser();
+    let r = b.sign_in("definitely-not-the-master-password-7e41").await;
+    assert_eq!(r.status, 401);
+    assert!(r.body.contains("Invalid password or code."));
+    assert!(b.cookie("__Host-fw_session").is_none());
+    assert_eq!(b.get("/ui/").await.status, 303, "still no access");
+
+    let e = env.event_for(&r.request_id(), "ui_login").await;
+    assert_eq!(e["event"]["outcome"], "failure");
+    assert_eq!(e["event"]["reason"], "invalid_credentials");
+    assert_eq!(e["http"]["response"]["status_code"], 401);
+    // Nothing from Vaultwarden is in the page.
+    assert!(!r.body.to_lowercase().contains("incorrect"));
+}
+
+/// A POST without a matching CSRF token, from another site, or with no
+/// origin proof at all is refused before anything reaches Vaultwarden.
+#[tokio::test]
+async fn test_ui_login_rejects_csrf_and_cross_site_posts() {
+    let Some(env) = TestEnv::load() else { return };
+    let mut b = env.ui_browser();
+    let page = b.get("/ui/login").await;
+    let csrf = page.csrf();
+    let pw = master_password();
+
+    // Missing and mismatched token (the cookie is there, the field is not right).
+    let r = b.post("/ui/login", &[("password", &pw)]).await;
+    assert_eq!(r.status, 403, "missing csrf");
+    let r = b
+        .post("/ui/login", &[("csrf", "not-the-token"), ("password", &pw)])
+        .await;
+    assert_eq!(r.status, 403, "mismatched csrf");
+    let e = env.event_for(&r.request_id(), "request_rejected").await;
+    assert_eq!(e["event"]["reason"], "invalid_request");
+
+    // The right token, but cross-site or without any origin proof.
+    let form = [("csrf", csrf.as_str()), ("password", pw.as_str())];
+    for headers in [
+        vec![("sec-fetch-site", "cross-site")],
+        vec![("sec-fetch-site", "same-site")],
+        vec![("origin", "https://evil.example")],
+        vec![],
+    ] {
+        let r = b
+            .send(reqwest::Method::POST, "/ui/login", &headers, Some(&form))
+            .await;
+        assert_eq!(r.status, 403, "{headers:?}");
+        assert!(!r.body.contains(&pw));
+    }
+    assert!(b.cookie("__Host-fw_session").is_none());
+}
+
+/// Logout needs the session's CSRF token and a same-origin proof, destroys
+/// the session on the server, and clears the cookie.
+#[tokio::test]
+async fn test_ui_logout_needs_csrf_and_ends_the_session() {
+    let Some(env) = TestEnv::load() else { return };
+    let mut b = env.ui_browser();
+    assert_eq!(b.sign_in(&master_password()).await.status, 303);
+    let csrf = b.get("/ui/").await.csrf();
+    let session = b.cookie("__Host-fw_session").unwrap().to_string();
+
+    assert_eq!(b.post("/ui/logout", &[]).await.status, 403, "no token");
+    assert_eq!(
+        b.post("/ui/logout", &[("csrf", "wrong")]).await.status,
+        403,
+        "wrong token"
+    );
+    let cross = b
+        .send(
+            reqwest::Method::POST,
+            "/ui/logout",
+            &[("sec-fetch-site", "cross-site")],
+            Some(&[("csrf", csrf.as_str())]),
+        )
+        .await;
+    assert_eq!(cross.status, 403, "cross-site");
+    assert_eq!(b.get("/ui/").await.status, 200, "still signed in");
+
+    let out = b.post("/ui/logout", &[("csrf", &csrf)]).await;
+    assert_eq!(out.status, 303);
+    assert!(b.cookie("__Host-fw_session").is_none(), "cookie cleared");
+    let e = env.event_for(&out.request_id(), "ui_logout").await;
+    assert_eq!(e["event"]["outcome"], "success");
+
+    // The old cookie is dead on the server.
+    let mut replay = env.ui_browser();
+    replay
+        .cookies
+        .push(("__Host-fw_session".to_string(), session));
+    let r = replay.get("/ui/").await;
+    assert_eq!(r.status, 303);
+    assert_eq!(r.header("location"), "/ui/login");
+}
+
+/// Hardening headers are on every UI response, pages are not cached, and the
+/// stylesheet is served with a content hash and a cache lifetime.
+#[tokio::test]
+async fn test_ui_security_headers() {
+    let Some(env) = TestEnv::load() else { return };
+    let mut b = env.ui_browser();
+    let login = b.get("/ui/login").await;
+    assert_eq!(login.status, 200);
+    assert_ui_security_headers(&login);
+    assert_eq!(login.header("cache-control"), "no-store");
+    assert!(login.body.contains("autocomplete=\"current-password\""));
+    assert!(!login.body.to_lowercase().contains("<script"));
+    // The cookie for the pre-session CSRF check is hardened too.
+    let c = login.set_cookie("__Host-fw_login").expect("login cookie");
+    for attr in ["Path=/", "HttpOnly", "Secure", "SameSite=Strict"] {
+        assert!(c.contains(attr), "{c}");
+    }
+
+    for path in ["/", "/ui/", "/ui/other", "/nope"] {
+        let r = b.get(path).await;
+        assert_ui_security_headers(&r);
+    }
+    assert_eq!(b.get("/ui/").await.header("location"), "/ui/login");
+
+    // The stylesheet link in the page points at a hashed, cacheable file.
+    let start = login.body.find("/ui/static/app-").expect("css link");
+    let end = login.body[start..].find('"').unwrap();
+    let css = b.get(&login.body[start..start + end]).await;
+    assert_eq!(css.status, 200);
+    assert_eq!(css.header("cache-control"), "public, max-age=86400");
+    assert_ui_security_headers(&css);
+}
+
+/// The UI and the agent/admin API are separate listeners: neither router
+/// answers on the other's port.
+#[tokio::test]
+async fn test_ui_and_api_are_separate_listeners() {
+    let Some(env) = TestEnv::load() else { return };
+    let r = env
+        .client
+        .get(format!("{}/ui/login", env.fw_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404, "the UI is not on the API port");
+
+    let mut b = env.ui_browser();
+    for (path, header, value) in [
+        ("/v1/credentials", "X-Agent-Key", env.agent_key.clone()),
+        ("/v1/admin/status", "X-Admin-Key", env.admin_key.clone()),
+        ("/health", "X-None", String::new()),
+    ] {
+        let r = b
+            .send(
+                reqwest::Method::GET,
+                path,
+                &[(header, value.as_str())],
+                None,
+            )
+            .await;
+        assert_eq!(r.status, 404, "{path} must not exist on the UI port");
+    }
+}

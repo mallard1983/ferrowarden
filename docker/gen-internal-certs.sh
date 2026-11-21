@@ -18,6 +18,12 @@
 #   vaultwarden.sans  The SAN list it was issued for (re-issued on change)
 #   vaultwarden.key   Server private key
 #
+# And, in $CA_PUBLIC_DIR (a second named volume, default /ca-public):
+#   ca.crt            A copy of the CA certificate and nothing else. Ferrowarden
+#                     mounts this volume read-only to trust Vaultwarden for the
+#                     admin UI sign-in, without ever seeing the CA private key
+#                     (which stays in the PKI volume).
+#
 # The same certificate serves the web vault published on the host. The agent-facing TLS
 # certificate for ferrowarden is separate (certs/server.crt, or a reverse
 # proxy such as Pangolin).
@@ -25,6 +31,7 @@
 set -e
 
 PKI_DIR="${PKI_DIR:-/pki}"
+CA_PUBLIC_DIR="${CA_PUBLIC_DIR:-/ca-public}"
 VW_HOSTNAME="${VW_HOSTNAME:-vaultwarden}"
 # Comma-separated extra names/IPs (e.g. "localhost,127.0.0.1,vault.lan") so a
 # browser can reach the web vault directly by those names.
@@ -92,4 +99,16 @@ fi
 # must be able to read it. Private keys stay owner-only.
 chmod 644 ca.crt vaultwarden.crt vaultwarden.sans
 chmod 600 ca.key vaultwarden.key
+
+# Publish the CA certificate (only) for containers that must trust it but must
+# not hold the CA key. Copied on every run, so it follows a regenerated CA, and
+# written via a temporary name so a reader never sees a half-written file.
+# World-readable: the consumers run as non-root users (ferrowarden is UID 999).
+mkdir -p "$CA_PUBLIC_DIR"
+cp ca.crt "$CA_PUBLIC_DIR/ca.crt.new"
+chmod 644 "$CA_PUBLIC_DIR/ca.crt.new"
+mv -f "$CA_PUBLIC_DIR/ca.crt.new" "$CA_PUBLIC_DIR/ca.crt"
+chmod 755 "$CA_PUBLIC_DIR"
+echo "[certs] CA certificate published to ${CA_PUBLIC_DIR}/ca.crt"
+
 echo "[certs] Done"

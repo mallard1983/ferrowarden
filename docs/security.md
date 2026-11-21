@@ -216,6 +216,28 @@ Every address a target resolves to is checked inside Ferrowarden's DNS resolver,
 
 Forwarded responses are read in chunks and rejected with `502` once they exceed `max_response_bytes` (default 10 MiB), so a hostile or broken target cannot exhaust Ferrowarden's memory.
 
+### 16. The Admin Web UI
+
+The optional [admin web UI](admin-ui.md) (`ui.bind`) accepts the **vault master password**, which decrypts the whole vault, so it is held to a stricter standard than the rest of Ferrowarden. It is off by default.
+
+**Threat model.** The assets are the master password and the operator's UI session. The attackers are: a network attacker (sniffing or injecting), a malicious web page the operator visits (CSRF), a script that guesses passwords or codes, a compromised or hostile Vaultwarden, a compromised **agent** (which can reach the API port), and an attacker who reads Ferrowarden's memory or logs after the fact.
+
+| Risk | Control |
+|---|---|
+| The password crossing the network in clear text | The sign-in form is **only served over HTTPS** (its own TLS, or a trusted proxy's `X-Forwarded-Proto`). Otherwise the page explains why and no form is rendered. `insecure_http` is an explicit, warned-about opt-out |
+| An agent reaching the sign-in page | The UI is a **separate listener**; the API router is not mounted on it and the UI is not mounted on the API port. An agent on `:3000` cannot reach `:3001`, and the UI port should not be exposed to agent networks |
+| The password being stored or replayed | Ferrowarden never stores it. It derives the Bitwarden login hash in a blocking thread (all intermediates `Zeroizing`), wipes the password, and lets **Vaultwarden itself verify** the hash. On success Vaultwarden's response (tokens, encrypted vault keys) is **dropped unread**: no Vaultwarden credential is ever kept. A session only proves that a login succeeded |
+| A hostile Vaultwarden burning CPU/RAM | KDF parameters from the server are **bounded** before use (PBKDF2 5 000 to 2 000 000; Argon2id 16 to 1024 MiB, 2 to 10 iterations, 1 to 16 lanes) |
+| A fake Vaultwarden capturing the password | Verified HTTPS to `ui.vaultwarden_url`, trusting the stack's CA via a **public-only** copy (`internal-ca-public`). The **CA private key is never mounted into the Ferrowarden container**: with it an attacker could mint a certificate for `vaultwarden`. Certificate verification is never disabled |
+| Password guessing, and exhausting Vaultwarden's login budget (every attempt comes from one IP) | Per-IP (5 per 15 min) and global (10 per 15 min) lockouts, checked **before** any key derivation or upstream call. The error text is generic |
+| CSRF | Every POST needs a CSRF token (constant-time compare) **and** a same-origin proof (`Sec-Fetch-Site`, else `Origin`; neither is refused). Cookies are `__Host-` `HttpOnly` `Secure` `SameSite=Strict` |
+| Session theft | 32-byte random ids; only the SHA-256 is stored; idle (15 min) and absolute (8 h) limits; at most 8 sessions; rotation on every sign-in; server-side logout |
+| XSS, clickjacking, leakage | No scripts at all (`default-src 'none'`), auto-escaping templates, `frame-ancestors 'none'`, `no-store`, `no-referrer`, HSTS |
+| Secrets in logs and events | The password, hash, codes, tokens, cookies and Vaultwarden's error text are never logged or put in an event (Vaultwarden's message goes to the **debug** log only: a TOTP failure message contains the server time and IP). Tests check responses, events and log output against fake tokens |
+| Two-step bypass | WebAuthn, Duo and recovery codes are not accepted: a recovery login deletes the account's two-step providers. A pending sign-in lives 3 minutes, is bound to the client IP and allows 3 wrong codes |
+
+**Residual risk.** (1) Anyone who can read Ferrowarden's process memory can read a password in flight, or the login hash of a pending two-step sign-in; the buffers Ferrowarden owns are wiped, but the HTTP stack's internal buffers and swap are outside its control. (2) The UI trusts `trusted_proxies` for the client IP and `X-Forwarded-Proto`: list only proxies you control. (3) Ten failed guesses lock the password form for everyone for 15 minutes: an attacker who can reach the UI can keep the operator out (never in). (4) The master password is still the single factor unless the account has two-step login: enable it in the web vault. Keep the UI behind your reverse proxy's authentication where you can.
+
 ---
 
 ## Security Event Log
@@ -225,6 +247,7 @@ Every security-relevant action produces one structured event with a stable schem
 - every forwarded request (agent key id and name, method, target URL as the agent sent it, credential names, outcome, a reason code when it failed, the HTTP status, duration);
 - failed agent and admin authentication (missing or invalid key), with source IP and request ID;
 - credential listings, key creation and revocation, vault unlock/lock/sync, startup (security-relevant settings) and shutdown;
+- admin UI sign-ins (success, failure with a fixed reason, lockouts, the first step of a two-step login), sign-outs and session expiry;
 - rate limiting (aggregated: at most one event per client IP per minute), and requests rejected for an invalid body or query.
 
 Events carry the client IP and a request ID that is also returned in the `X-Request-Id` response header. Authentication is checked **before** a request body is parsed, so an unauthenticated caller learns nothing from parse errors.
@@ -248,6 +271,7 @@ Before going to production:
 - [ ] Every vault item agents use has URIs for exactly the hosts it belongs to, and `enforce_credential_hosts` is `true`
 - [ ] `allowed_targets` lists only the internal hosts/ranges agents need; `allow_private_targets` is `false`
 - [ ] If a reverse proxy fronts Ferrowarden, `trusted_proxies` is set to its address (and nothing else)
+- [ ] The admin UI is disabled (`ui.bind` empty) unless you use it; if enabled, it is served over HTTPS (never `ui.insecure_http`), its port is not reachable from agent networks, and the Vaultwarden account has two-step login. `ferrowarden` mounts `internal-ca-public`, never `internal-pki` (see [admin-ui.md](admin-ui.md))
 - [ ] TLS is configured — either Ferrowarden's built-in TLS or a TLS-terminating proxy (Pangolin, Caddy, Nginx). See [docs/tls.md](tls.md) for both options. If TLS is disabled, Ferrowarden and the agent must run on the same host with no network hop.
 - [ ] `tls_cert_file` and `tls_key_file` point to valid, non-expired certificates
 - [ ] All secret files are `chmod 600` and owned by the deployment user

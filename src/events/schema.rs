@@ -64,6 +64,10 @@ pub enum Action {
     Startup,
     Shutdown,
     EventsDropped,
+    UiLogin,
+    UiLogout,
+    UiSessionExpired,
+    UiTwoFactorEmailSent,
 }
 
 impl Action {
@@ -88,6 +92,10 @@ impl Action {
             Action::Startup => "startup",
             Action::Shutdown => "shutdown",
             Action::EventsDropped => "events_dropped",
+            Action::UiLogin => "ui_login",
+            Action::UiLogout => "ui_logout",
+            Action::UiSessionExpired => "ui_session_expired",
+            Action::UiTwoFactorEmailSent => "ui_two_factor_email_sent",
         }
     }
 
@@ -99,7 +107,13 @@ impl Action {
             | Action::RequestRejected
             | Action::AuditRead
             | Action::StatusRead => "web",
-            Action::AgentAuth | Action::AdminAuth | Action::VaultUnlock => "authentication",
+            Action::AgentAuth
+            | Action::AdminAuth
+            | Action::VaultUnlock
+            | Action::UiLogin
+            | Action::UiLogout
+            | Action::UiSessionExpired
+            | Action::UiTwoFactorEmailSent => "authentication",
             Action::RateLimited => "network",
             Action::KeyCreate
             | Action::KeyRevoke
@@ -143,6 +157,10 @@ impl Action {
             Action::Startup => "startup",
             Action::Shutdown => "shutdown",
             Action::EventsDropped => "event delivery",
+            Action::UiLogin => "UI sign-in",
+            Action::UiLogout => "UI sign-out",
+            Action::UiSessionExpired => "UI session",
+            Action::UiTwoFactorEmailSent => "UI email code",
         }
     }
 
@@ -168,6 +186,10 @@ impl Action {
             Action::Startup => "ferrowarden started",
             Action::Shutdown => "ferrowarden shutting down",
             Action::EventsDropped => "security events were dropped",
+            Action::UiLogin => "UI sign-in succeeded",
+            Action::UiLogout => "UI signed out",
+            Action::UiSessionExpired => "UI session expired",
+            Action::UiTwoFactorEmailSent => "UI email code requested",
         }
     }
 }
@@ -210,6 +232,12 @@ pub enum Reason {
     UnlockFailed,
     SyncFailed,
     InternalError,
+    InvalidCredentials,
+    TwoFactorRequired,
+    TwoFactorFailed,
+    LoginLockedOut,
+    UpstreamRateLimited,
+    InsecureTransport,
 }
 
 impl Reason {
@@ -231,6 +259,10 @@ impl Reason {
                 | Reason::CredentialOutOfScope
                 | Reason::MethodNotAllowed
                 | Reason::RepromptRequired
+                | Reason::InvalidCredentials
+                | Reason::TwoFactorFailed
+                | Reason::LoginLockedOut
+                | Reason::InsecureTransport
         )
     }
 
@@ -261,6 +293,12 @@ impl Reason {
             Reason::UnlockFailed => "vault unlock failed",
             Reason::SyncFailed => "credential sync failed",
             Reason::InternalError => "internal error",
+            Reason::InvalidCredentials => "invalid password or code",
+            Reason::TwoFactorRequired => "password accepted, second factor required",
+            Reason::TwoFactorFailed => "second factor code rejected",
+            Reason::LoginLockedOut => "too many failed attempts",
+            Reason::UpstreamRateLimited => "Vaultwarden rate limit reached",
+            Reason::InsecureTransport => "the connection is not HTTPS",
         }
     }
 }
@@ -455,6 +493,15 @@ impl SecurityEvent {
             | Action::StatusRead => vec!["access"],
             Action::KeyPolicyChange => vec!["change"],
             Action::AgentAuth | Action::AdminAuth | Action::VaultUnlock => vec!["start"],
+            Action::UiLogin => {
+                if denied {
+                    vec!["start", "denied"]
+                } else {
+                    vec!["start"]
+                }
+            }
+            Action::UiLogout | Action::UiSessionExpired => vec!["end"],
+            Action::UiTwoFactorEmailSent => vec!["info"],
             Action::RateLimited | Action::RequestRejected => vec!["denied"],
             Action::KeyCreate => vec!["creation"],
             Action::KeyRevoke => vec!["deletion"],
@@ -475,6 +522,10 @@ impl SecurityEvent {
                 reason.description()
             ),
             (Outcome::Failure, None) => format!("{} failed", action.label()),
+            // Step one of two (password accepted, second factor pending).
+            (Outcome::Unknown, Some(reason)) => {
+                format!("{} incomplete: {}", action.label(), reason.description())
+            }
             _ => action.ok_message().to_string(),
         };
     }
@@ -742,6 +793,10 @@ mod tests {
             Action::Startup,
             Action::Shutdown,
             Action::EventsDropped,
+            Action::UiLogin,
+            Action::UiLogout,
+            Action::UiSessionExpired,
+            Action::UiTwoFactorEmailSent,
         ] {
             assert_eq!(serde_json::to_value(a).unwrap(), a.as_str());
         }
@@ -852,9 +907,70 @@ mod tests {
             (Reason::UnlockFailed, "unlock_failed"),
             (Reason::SyncFailed, "sync_failed"),
             (Reason::InternalError, "internal_error"),
+            (Reason::InvalidCredentials, "invalid_credentials"),
+            (Reason::TwoFactorRequired, "two_factor_required"),
+            (Reason::TwoFactorFailed, "two_factor_failed"),
+            (Reason::LoginLockedOut, "login_locked_out"),
+            (Reason::UpstreamRateLimited, "upstream_rate_limited"),
+            (Reason::InsecureTransport, "insecure_transport"),
         ];
         for (reason, code) in all {
             assert_eq!(serde_json::to_value(reason).unwrap(), code);
+        }
+    }
+
+    #[test]
+    fn ui_events_have_the_documented_shape() {
+        let c = ctx();
+        let ok = to_json(
+            &SecurityEvent::new(Action::UiLogin)
+                .request(&c)
+                .detail("provider", "email"),
+        );
+        assert_eq!(ok["event"]["action"], "ui_login");
+        assert_eq!(ok["event"]["category"], json!(["authentication"]));
+        assert_eq!(ok["event"]["type"], json!(["start"]));
+        assert_eq!(ok["event"]["outcome"], "success");
+        assert_eq!(ok["message"], "UI sign-in succeeded");
+
+        let bad = to_json(
+            &SecurityEvent::new(Action::UiLogin)
+                .outcome(Outcome::Failure)
+                .reason(Reason::InvalidCredentials),
+        );
+        assert_eq!(bad["event"]["type"], json!(["start", "denied"]));
+        assert_eq!(
+            bad["message"],
+            "UI sign-in blocked: invalid password or code"
+        );
+
+        let step1 = to_json(
+            &SecurityEvent::new(Action::UiLogin)
+                .outcome(Outcome::Unknown)
+                .reason(Reason::TwoFactorRequired),
+        );
+        assert_eq!(step1["event"]["outcome"], "unknown");
+        assert_eq!(step1["event"]["type"], json!(["start"]));
+        assert_eq!(
+            step1["message"],
+            "UI sign-in incomplete: password accepted, second factor required"
+        );
+
+        let outage = to_json(
+            &SecurityEvent::new(Action::UiLogin)
+                .outcome(Outcome::Failure)
+                .reason(Reason::UpstreamError),
+        );
+        assert_eq!(outage["event"]["type"], json!(["start"]));
+
+        for (a, ty) in [
+            (Action::UiLogout, "end"),
+            (Action::UiSessionExpired, "end"),
+            (Action::UiTwoFactorEmailSent, "info"),
+        ] {
+            let v = to_json(&SecurityEvent::new(a));
+            assert_eq!(v["event"]["category"], json!(["authentication"]));
+            assert_eq!(v["event"]["type"], json!([ty]));
         }
     }
 

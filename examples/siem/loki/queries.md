@@ -95,6 +95,31 @@ Rejected requests (malformed bodies from an authenticated agent):
 {job="ferrowarden", action="request_rejected"} | json reason="event.reason", error="ferrowarden.details.error"
 ```
 
+## Admin web UI sign-ins
+
+Every sign-in to the [admin UI](../../../docs/admin-ui.md) is a `ui_login` event. Failures by reason and source IP (wrong passwords, wrong codes, lockouts, plain-HTTP refusals):
+
+```logql
+sum by (reason, source_ip) (
+  count_over_time({job="ferrowarden", action="ui_login", outcome="failure"}
+    | json reason="event.reason", source_ip="source.ip" [1h])
+)
+```
+
+All UI sign-ins, successes and the first step of two-step logins (`outcome="unknown"`) included, with the second factor used:
+
+```logql
+{job="ferrowarden", action="ui_login"}
+  | json outcome="event.outcome", reason="event.reason", ip="source.ip", provider="ferrowarden.details.provider"
+  | line_format "{{.outcome}} {{.reason}} {{.provider}} from {{.ip}}"
+```
+
+Lockouts (someone guessing the master password; `scope` says whether the per-IP or the global limit applied):
+
+```logql
+{job="ferrowarden", action="ui_login"} | json reason="event.reason", scope="ferrowarden.details.scope", ip="source.ip" | reason="login_locked_out"
+```
+
 ## Rate limiting
 
 Rate limiting is aggregated: at most one `rate_limited` event per IP and limiter per minute, with `details.suppressed` counting the swallowed 429s.

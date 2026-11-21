@@ -138,6 +138,114 @@ pub struct Config {
     /// in the TOML file, `FERROWARDEN_EVENTS__*` in the environment.
     #[serde(default)]
     pub events: EventsConfig,
+
+    /// Admin web UI: its own listener, Vaultwarden sign-in. `[ui]` in the
+    /// TOML file, `FERROWARDEN_UI__*` in the environment. Disabled unless
+    /// `ui.bind` is set (see docs/admin-ui.md).
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+/// Settings of the admin web UI.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct UiConfig {
+    /// Address of the UI listener, e.g. `0.0.0.0:3001`. Empty (default)
+    /// disables the UI. It is a separate server: the agent and admin API
+    /// router is never reachable on this port, and the UI is not reachable on
+    /// the API port.
+    pub bind: String,
+    /// Vaultwarden base URL used to verify the master password at sign-in.
+    /// Must be `https://` (plain `http://` is accepted for loopback hosts
+    /// only, for tests).
+    pub vaultwarden_url: String,
+    /// PEM file with an extra CA certificate to trust for `vaultwarden_url`,
+    /// on top of the public roots. Never replaces certificate verification.
+    pub vaultwarden_ca_file: String,
+    /// Serve the sign-in form over plain HTTP too. Off by default: without
+    /// TLS (here or at a trusted reverse proxy) the master password would
+    /// cross the network in clear text.
+    pub insecure_http: bool,
+    /// A session ends after this many minutes without a request. Default 15.
+    pub session_idle_minutes: u64,
+    /// A session ends this many hours after sign-in, whatever its activity.
+    /// Default 8.
+    pub session_max_hours: u64,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            bind: String::new(),
+            vaultwarden_url: "https://vaultwarden".to_string(),
+            vaultwarden_ca_file: String::new(),
+            insecure_http: false,
+            session_idle_minutes: 15,
+            session_max_hours: 8,
+        }
+    }
+}
+
+impl UiConfig {
+    pub fn enabled(&self) -> bool {
+        !self.bind.trim().is_empty()
+    }
+
+    fn validate(&self) -> FerroResult<()> {
+        if !self.enabled() {
+            return Ok(());
+        }
+        self.bind
+            .trim()
+            .parse::<std::net::SocketAddr>()
+            .map_err(|e| {
+                FerroError::Config(format!(
+                    "ui.bind {:?} is not an address:port ({e})",
+                    self.bind
+                ))
+            })?;
+        if self.session_idle_minutes == 0 || self.session_max_hours == 0 {
+            return Err(FerroError::Config(
+                "ui.session_idle_minutes and ui.session_max_hours must be greater than 0"
+                    .to_string(),
+            ));
+        }
+        // Bounded so the arithmetic on them cannot overflow.
+        if self.session_idle_minutes > 7 * 24 * 60 || self.session_max_hours > 30 * 24 {
+            return Err(FerroError::Config(
+                "ui.session_idle_minutes (max 10080) or ui.session_max_hours (max 720) is too large"
+                    .to_string(),
+            ));
+        }
+        let url = reqwest::Url::parse(&self.vaultwarden_url).map_err(|e| {
+            FerroError::Config(format!(
+                "ui.vaultwarden_url {:?} is not a URL ({e})",
+                self.vaultwarden_url
+            ))
+        })?;
+        let loopback = url.host_str().is_some_and(|h| {
+            h == "localhost"
+                || h.trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        match url.scheme() {
+            "https" => {}
+            "http" if loopback => {}
+            _ => {
+                return Err(FerroError::Config(
+                    "ui.vaultwarden_url must be an https:// URL (http:// only for localhost)"
+                        .to_string(),
+                ))
+            }
+        }
+        if url.host_str().is_none() || url.query().is_some() || url.fragment().is_some() {
+            return Err(FerroError::Config(
+                "ui.vaultwarden_url must be a plain base URL (no query or fragment)".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Settings of the security event stream (see docs/events.md).
@@ -385,6 +493,7 @@ impl Config {
         }
 
         self.events.validate()?;
+        self.ui.validate()?;
 
         if self.tls_enabled {
             if self.tls_cert_file.is_none() {
@@ -431,6 +540,7 @@ mod tests {
             admin_rate_limit_per_minute: 30,
             admin_rate_limit_burst: 5,
             events: Default::default(),
+            ui: Default::default(),
         }
     }
 
@@ -609,6 +719,59 @@ file_keep = 3
     fn tls_disabled_no_files_passes() {
         let cfg = base_config(UnlockMode::Manual);
         assert!(!cfg.tls_enabled);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn ui_is_disabled_by_default_with_the_documented_defaults() {
+        let ui = UiConfig::default();
+        assert!(!ui.enabled());
+        assert_eq!(ui.bind, "");
+        assert_eq!(ui.vaultwarden_url, "https://vaultwarden");
+        assert_eq!(ui.vaultwarden_ca_file, "");
+        assert!(!ui.insecure_http);
+        assert_eq!(ui.session_idle_minutes, 15);
+        assert_eq!(ui.session_max_hours, 8);
+        assert!(base_config(UnlockMode::Manual).validate().is_ok());
+    }
+
+    #[test]
+    fn ui_section_deserializes_partially() {
+        let ui: UiConfig = serde_json::from_str(r#"{"bind":"0.0.0.0:3001"}"#).unwrap();
+        assert!(ui.enabled());
+        assert_eq!(ui.session_idle_minutes, 15);
+    }
+
+    #[test]
+    fn invalid_ui_settings_fail_validation() {
+        let with = |f: &dyn Fn(&mut UiConfig)| {
+            let mut cfg = base_config(UnlockMode::Manual);
+            cfg.ui.bind = "0.0.0.0:3001".to_string();
+            f(&mut cfg.ui);
+            cfg.validate()
+        };
+        assert!(with(&|_| {}).is_ok());
+        assert!(with(&|u| u.bind = "not an address".into()).is_err());
+        assert!(with(&|u| u.session_idle_minutes = 0).is_err());
+        assert!(with(&|u| u.session_max_hours = 0).is_err());
+        assert!(with(&|u| u.session_idle_minutes = u64::MAX).is_err());
+        assert!(with(&|u| u.session_max_hours = u64::MAX).is_err());
+        // HTTPS only, except loopback (tests).
+        assert!(with(&|u| u.vaultwarden_url = "http://vaultwarden".into()).is_err());
+        assert!(with(&|u| u.vaultwarden_url = "http://10.0.0.5".into()).is_err());
+        assert!(with(&|u| u.vaultwarden_url = "http://127.0.0.1:8080".into()).is_ok());
+        assert!(with(&|u| u.vaultwarden_url = "http://localhost:8080".into()).is_ok());
+        assert!(with(&|u| u.vaultwarden_url = "https://vault.example.com".into()).is_ok());
+        assert!(with(&|u| u.vaultwarden_url = "ftp://vault".into()).is_err());
+        assert!(with(&|u| u.vaultwarden_url = "https://vault/?x=1".into()).is_err());
+        assert!(with(&|u| u.vaultwarden_url = "not a url".into()).is_err());
+    }
+
+    #[test]
+    fn a_disabled_ui_ignores_the_rest_of_its_section() {
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.ui.vaultwarden_url = "garbage".into();
+        cfg.ui.session_idle_minutes = 0;
         assert!(cfg.validate().is_ok());
     }
 }

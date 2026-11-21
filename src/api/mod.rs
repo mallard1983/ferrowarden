@@ -142,6 +142,7 @@ mod tests {
             admin_rate_limit_per_minute: 30,
             admin_rate_limit_burst: admin_burst,
             events: Default::default(),
+            ui: Default::default(),
         };
         let state = Arc::new(AppState::new(cfg, Arc::new(EventLog::buffer_only(100))));
         (router(state.clone()), state)
