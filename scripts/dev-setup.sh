@@ -25,6 +25,9 @@
 #   rm -f secrets/bw_client_id secrets/bw_client_secret secrets/test_agent_key
 #   ./scripts/dev-setup.sh
 
+# Windows users: run scripts\dev-setup.ps1 instead (PowerShell 7+).
+# This script requires bash and openssl or python3.
+
 set -e
 
 COMPOSE="docker compose -f docker-compose.test.yml"
@@ -54,6 +57,7 @@ if ! command -v openssl > /dev/null 2>&1 && ! command -v python3 > /dev/null 2>&
 fi
 
 mkdir -p "$SECRETS_DIR"
+mkdir -p ./certs
 
 # ── Generate secrets (if not already present) ────────────────────────────────
 
@@ -86,6 +90,33 @@ else
 fi
 
 chmod 600 "$SECRETS_DIR"/* 2>/dev/null || true
+
+# ── Generate self-signed TLS certificate (if not already present) ────────────
+
+echo ""
+echo "[1b/7] Generating TLS certificate..."
+
+if [ ! -f ./certs/server.crt ] || [ ! -f ./certs/server.key ]; then
+    if command -v openssl > /dev/null 2>&1; then
+        MSYS_NO_PATHCONV=1 openssl req -x509 -newkey ed25519 \
+            -keyout ./certs/server.key \
+            -out ./certs/server.crt \
+            -days 365 -nodes \
+            -subj "/CN=ferrowarden-test" \
+            > /dev/null 2>&1
+        chmod 400 ./certs/server.key
+        echo "  Generated: certs/server.crt + certs/server.key (self-signed, 1 year)"
+        echo "  NOTE: This is a dev-only certificate. Import certs/server.crt into"
+        echo "        your test HTTP client to skip certificate verification, or use"
+        echo "        FERROWARDEN_TLS_ACCEPT_INVALID_CERTS=1 in test environments."
+    else
+        echo "  WARNING: openssl not found — skipping TLS cert generation."
+        echo "  To use TLS, generate certs/server.crt and certs/server.key manually."
+        echo "  See certs/README.md for instructions."
+    fi
+else
+    echo "  Skipping: certs/server.crt and certs/server.key already exist"
+fi
 
 # ── Start Vaultwarden (signups enabled for initial account creation) ──────────
 

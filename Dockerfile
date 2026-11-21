@@ -5,7 +5,7 @@
 # the compiler, cargo, and all build tooling are absent at runtime.
 
 # ── Build stage ──────────────────────────────────────────────────────────────
-FROM rust:1.82-slim AS builder
+FROM rust:slim AS builder
 
 WORKDIR /build
 
@@ -34,7 +34,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Run as a non-root user. The process has no need for elevated privileges.
-RUN useradd --system --no-create-home --shell /bin/false ferrowarden
+# Create /data for the agent key file and own it before switching users —
+# Docker named volumes copy the image directory's ownership on first creation,
+# so this ensures the ferrowarden user can write to the volume mount.
+RUN useradd --system --no-create-home --shell /bin/false ferrowarden \
+    && mkdir /data \
+    && chown ferrowarden:ferrowarden /data
 USER ferrowarden
 
 WORKDIR /app

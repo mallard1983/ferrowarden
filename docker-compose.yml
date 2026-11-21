@@ -48,12 +48,14 @@ services:
   # bw serve handles the decryption locally — no raw credential values ever
   # leave the host in encrypted or unencrypted form over the network.
   bw-serve:
-    image: bitwarden/cli:latest
+    build:
+      context: ./docker
+      dockerfile: bw-cli.Dockerfile
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     volumes:
       - ./docker/bw-entrypoint.sh:/entrypoint.sh:ro
-      - bw-data:/home/user/.config/Bitwarden CLI
+      - bw-data:/home/node/.config/Bitwarden CLI
     secrets:
       - bw_client_id
       - bw_client_secret
@@ -81,6 +83,12 @@ services:
     secrets:
       - ferrowarden_admin_key
       - bw_master_password
+    volumes:
+      # Mount your TLS certificate and key.
+      # Generate or obtain certs/server.crt and certs/server.key before starting.
+      # See certs/README.md for instructions.
+      - ./certs/server.crt:/run/certs/server.crt:ro
+      - ./certs/server.key:/run/certs/server.key:ro
     environment:
       FERROWARDEN_UNLOCK_MODE: "file"
       FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
@@ -90,13 +98,16 @@ services:
       # by the FERROWARDEN_ADMIN_KEY env var. See Dockerfile for how to
       # read Docker secrets into env vars at startup.
       FERROWARDEN_ADMIN_KEY_FILE: "/run/secrets/ferrowarden_admin_key"
+      # TLS is enabled by default. See certs/README.md to generate or install certs.
+      FERROWARDEN_TLS_ENABLED: "true"
+      FERROWARDEN_TLS_CERT_FILE: "/run/certs/server.crt"
+      FERROWARDEN_TLS_KEY_FILE: "/run/certs/server.key"
     networks:
       - vault-internal
       - agent-facing
     ports:
-      # Expose only to localhost. The agent connects here.
-      # Change to 0.0.0.0:3000 only if the agent runs on a different host,
-      # and place a TLS-terminating reverse proxy in front.
+      # Expose only to localhost. The agent connects here via HTTPS.
+      # Change to 0.0.0.0:3000 only if the agent runs on a different host.
       - "127.0.0.1:3000:3000"
     depends_on:
       - bw-serve
@@ -114,7 +125,9 @@ services:
   #   docker compose --profile seed up --wait vault-seeder && docker compose up -d
   vault-seeder:
     profiles: ["seed"]
-    image: bitwarden/cli:latest
+    build:
+      context: ./docker
+      dockerfile: bw-cli.Dockerfile
     entrypoint: ["/bin/sh", "/seed-entrypoint.sh"]
     volumes:
       - ./docker/seed-entrypoint.sh:/seed-entrypoint.sh:ro

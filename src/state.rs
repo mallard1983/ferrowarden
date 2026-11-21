@@ -1,19 +1,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use zeroize::Zeroizing;
 
 use crate::audit::AuditLog;
 use crate::config::Config;
+use crate::keys::hash_token;
 
 /// A single agent API key entry.
+/// The token itself is never stored here — only metadata. The HashMap is
+/// keyed by `sha256(token)`, so authentication hashes the incoming token
+/// and does an O(1) lookup.
 #[derive(Debug, Clone)]
 pub struct AgentKey {
     pub id: String,
     pub name: String,
-    /// The bearer token the agent presents. Stored as a Zeroizing string so it
-    /// is wiped from memory if the entry is dropped (e.g. on key revocation).
-    pub token: Zeroizing<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -34,8 +34,9 @@ pub struct AppState {
     /// Current vault lock state. Handlers check this before any vault call.
     pub lock_state: Arc<RwLock<LockState>>,
 
-    /// Active agent API keys keyed by token string for O(1) auth lookup.
-    /// Token strings are Zeroizing so revoked keys are wiped from memory.
+    /// Active agent API keys, keyed by sha256(token) for O(1) auth lookup.
+    /// Token plaintext is never stored — authentication hashes the incoming
+    /// token and looks it up here.
     pub agent_keys: Arc<RwLock<HashMap<String, AgentKey>>>,
 
     /// Credential name cache — item names from bw serve GET /list/object/items.
@@ -67,17 +68,17 @@ impl AppState {
         *self.lock_state.write().await = LockState::Unlocked;
     }
 
+    #[allow(dead_code)]
     pub async fn set_locked(&self) {
         *self.lock_state.write().await = LockState::Locked;
     }
 
     /// Validate a bearer token and return the matching key entry if found.
-    /// Uses a constant-time comparison to prevent timing attacks.
+    /// Hashes the token before lookup — never does a plaintext comparison.
     pub async fn authenticate(&self, token: &str) -> Option<AgentKey> {
+        let hash = hash_token(token);
         let keys = self.agent_keys.read().await;
-        keys.values()
-            .find(|k| constant_time_eq(k.token.as_str(), token))
-            .cloned()
+        keys.get(&hash).cloned()
     }
 
     /// Validate the admin key. Uses constant-time comparison.
@@ -99,6 +100,10 @@ mod tests {
             unlock_mode: UnlockMode::Manual,
             unlock_file: None,
             admin_key: "a".repeat(32),
+            keys_file: None,
+            tls_enabled: false,
+            tls_cert_file: None,
+            tls_key_file: None,
         }
     }
 
@@ -158,10 +163,10 @@ mod tests {
         let key = AgentKey {
             id: "test-id".to_string(),
             name: "test-agent".to_string(),
-            token: Zeroizing::new("secret_token_value_xyz".to_string()),
             created_at: chrono::Utc::now(),
         };
-        state.agent_keys.write().await.insert(key.token.clone().to_string(), key);
+        // Insert keyed by hash — matches how the admin create_key handler works
+        state.agent_keys.write().await.insert(hash_token("secret_token_value_xyz"), key);
 
         let found = state.authenticate("secret_token_value_xyz").await;
         assert!(found.is_some());
@@ -174,10 +179,9 @@ mod tests {
         let key = AgentKey {
             id: "test-id".to_string(),
             name: "test-agent".to_string(),
-            token: Zeroizing::new("correct_token".to_string()),
             created_at: chrono::Utc::now(),
         };
-        state.agent_keys.write().await.insert(key.token.clone().to_string(), key);
+        state.agent_keys.write().await.insert(hash_token("correct_token"), key);
 
         assert!(state.authenticate("wrong_token").await.is_none());
     }

@@ -12,8 +12,47 @@ This guide walks through a complete Ferrowarden deployment using Docker Compose.
 ## Prerequisites
 
 - Docker and Docker Compose v2
-- `openssl` (for generating the admin key)
+- `openssl` (for generating the admin key and TLS certificate)
 - A host where the agent will also run, or network access from the agent host to port 3000
+
+### Windows development
+
+If building Ferrowarden from source on Windows, the MSVC Rust toolchain is required. The `ring` crate (pulled in by TLS support) requires a C compiler that the GNU toolchain does not provide without MinGW. With the MSVC toolchain and Visual Studio Build Tools installed, the build works out of the box.
+
+```powershell
+rustup default stable-x86_64-pc-windows-msvc
+cargo build
+```
+
+For the automated test environment setup, use the PowerShell script instead of the shell script:
+
+```powershell
+.\scripts\dev-setup.ps1
+```
+
+Both scripts perform identical steps. Use `dev-setup.sh` on Linux/Mac and `dev-setup.ps1` on Windows.
+
+---
+
+## Step 0: Generate TLS Certificate
+
+Ferrowarden requires TLS by default. Generate a certificate before starting the stack. For production, use a certificate from a trusted CA. For development, a self-signed certificate works fine.
+
+```sh
+mkdir -p certs
+
+# Self-signed certificate (development only)
+openssl req -x509 -newkey ed25519 \
+    -keyout certs/server.key \
+    -out certs/server.crt \
+    -days 365 -nodes \
+    -subj "/CN=ferrowarden"
+chmod 400 certs/server.key
+```
+
+The `certs/` directory is in `.gitignore`. Never commit certificate files.
+
+If you are running ferrowarden on the same host as the agent (no network hop), you can disable TLS entirely by setting `FERROWARDEN_TLS_ENABLED=false` in your environment. Ferrowarden will log a prominent warning, and you will not need certificate files. See [Security: Native TLS](security.md#10-native-tls-transport-security) for when this is acceptable.
 
 ---
 
@@ -92,7 +131,7 @@ Ferrowarden's log should show:
 {"level":"INFO","message":"Ferrowarden starting"}
 {"level":"INFO","message":"File unlock mode: reading password from ..."}
 {"level":"INFO","message":"Vault unlocked via file mode"}
-{"level":"INFO","message":"Listening on 0.0.0.0:3000"}
+{"level":"INFO","message":"Listening on https://0.0.0.0:3000 (TLS)"}
 ```
 
 If you see `VaultLocked` or connection errors, see [Troubleshooting](operations.md#troubleshooting).
@@ -106,10 +145,11 @@ The admin key (from `secrets/ferrowarden_admin_key`) is for operator use only. C
 ```sh
 ADMIN_KEY="$(cat secrets/ferrowarden_admin_key)"
 
-curl -s -X POST http://localhost:3000/v1/admin/keys \
+curl -s -X POST https://localhost:3000/v1/admin/keys \
   -H "X-Admin-Key: $ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "homelab-agent"}'
+  -d '{"name": "homelab-agent"}' \
+  --cacert certs/server.crt    # omit if using a trusted CA cert
 ```
 
 Response:
@@ -133,8 +173,9 @@ List available credentials (what the agent sees):
 ```sh
 AGENT_TOKEN="the-token-from-step-4"
 
-curl -s http://localhost:3000/v1/credentials \
-  -H "X-Agent-Key: $AGENT_TOKEN"
+curl -s https://localhost:3000/v1/credentials \
+  -H "X-Agent-Key: $AGENT_TOKEN" \
+  --cacert certs/server.crt    # omit if using a trusted CA cert
 ```
 
 Response:
@@ -145,8 +186,9 @@ Response:
 Make a test proxy request:
 
 ```sh
-curl -s -X POST http://localhost:3000/v1/forward \
+curl -s -X POST https://localhost:3000/v1/forward \
   -H "X-Agent-Key: $AGENT_TOKEN" \
+  --cacert certs/server.crt \
   -H "Content-Type: application/json" \
   -d '{
     "request": {
@@ -176,6 +218,10 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `unlock_mode` | `FERROWARDEN_UNLOCK_MODE` | *(required)* |
 | `unlock_file` | `FERROWARDEN_UNLOCK_FILE` | *(required in file mode)* |
 | *(env only)* | `FERROWARDEN_ADMIN_KEY` | *(required)* |
+| `keys_file` | `FERROWARDEN_KEYS_FILE` | *(optional — enables key persistence)* |
+| `tls_enabled` | `FERROWARDEN_TLS_ENABLED` | `true` |
+| `tls_cert_file` | `FERROWARDEN_TLS_CERT_FILE` | *(required when tls_enabled)* |
+| `tls_key_file` | `FERROWARDEN_TLS_KEY_FILE` | *(required when tls_enabled)* |
 
 ---
 

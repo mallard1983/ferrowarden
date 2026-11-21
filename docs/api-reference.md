@@ -167,13 +167,13 @@ List all active agent keys. Token values are never included.
 
 ---
 
-### `DELETE /v1/admin/keys/:id`
+### `DELETE /v1/admin/keys/{id}`
 
-Revoke an agent key. The token is immediately removed from memory (zeroed).
+Revoke an agent key. The token is immediately removed from in-memory state and, if key persistence is configured, removed from the key store file on disk.
 
 **Response `200 OK`**
 ```json
-{ "message": "Key revoked" }
+{ "status": "revoked", "id": "550e8400-e29b-41d4-a716-446655440000" }
 ```
 
 **Errors**

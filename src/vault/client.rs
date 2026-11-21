@@ -129,6 +129,7 @@ impl VaultClient {
     }
 
     /// Check whether bw serve is reachable and the vault is unlocked.
+    #[allow(dead_code)]
     pub async fn status(&self) -> FerroResult<bool> {
         let url = format!("{}/status", self.base_url);
 

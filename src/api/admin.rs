@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use chrono::Utc;
@@ -8,9 +8,9 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 use crate::error::{FerroError, FerroResult};
+use crate::keys::{hash_token, load, save, StoredKey};
 use crate::state::{AgentKey, AppState};
 
 #[derive(Deserialize)]
@@ -23,7 +23,7 @@ pub struct CreateKeyRequest {
 pub struct CreateKeyResponse {
     pub id: String,
     pub name: String,
-    /// The token value — shown only once at creation, never again.
+    /// The token value — shown only once at creation, never stored in plaintext.
     pub token: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -35,44 +35,51 @@ pub struct KeySummary {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Serialize)]
-pub struct AuditResponse {
-    pub entries: Vec<crate::audit::AuditEntry>,
-}
-
 /// POST /v1/admin/keys
 ///
-/// Create a new agent API key. Returns the token once — it is not stored in
-/// plaintext and cannot be retrieved again. Admin auth required.
+/// Create a new agent API key. Returns the token once — only its SHA-256 hash
+/// is stored (in memory and optionally on disk). Admin auth required.
 pub async fn create_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<CreateKeyRequest>,
-) -> FerroResult<Json<CreateKeyResponse>> {
+) -> FerroResult<(StatusCode, Json<CreateKeyResponse>)> {
     authenticate_admin(&state, &headers)?;
 
     let id = Uuid::new_v4().to_string();
     let token = generate_token();
+    let token_hash = hash_token(&token);
     let now = Utc::now();
 
     let key = AgentKey {
         id: id.clone(),
         name: req.name.clone(),
-        token: Zeroizing::new(token.clone()),
         created_at: now,
     };
 
-    state.agent_keys.write().await.insert(token.clone(), key);
+    // Insert into in-memory map keyed by hash — plaintext never stored
+    state.agent_keys.write().await.insert(token_hash.clone(), key);
+
+    // Persist to key file if configured
+    if let Some(ref path) = state.config.keys_file {
+        let mut stored = load(path).map_err(|e| {
+            FerroError::Internal(format!("Failed to read key file: {e}"))
+        })?;
+        stored.push(StoredKey { id: id.clone(), name: req.name.clone(), token_hash, created_at: now });
+        save(path, &stored).map_err(|e| {
+            FerroError::Internal(format!("Failed to write key file: {e}"))
+        })?;
+    }
 
     tracing::info!(agent_id = %id, agent_name = %req.name, "Agent key created");
 
-    Ok(Json(CreateKeyResponse {
+    Ok((StatusCode::CREATED, Json(CreateKeyResponse {
         id,
         name: req.name,
         // Return the raw token once — the caller must store it
         token,
         created_at: now,
-    }))
+    })))
 }
 
 /// GET /v1/admin/keys
@@ -98,10 +105,10 @@ pub async fn list_keys(
     Ok(Json(summaries))
 }
 
-/// DELETE /v1/admin/keys/:id
+/// DELETE /v1/admin/keys/{id}
 ///
-/// Revoke an agent key by id. The Zeroizing token is wiped from memory on
-/// removal from the HashMap. Admin auth required.
+/// Revoke an agent key by id. Removes from in-memory map and rewrites the
+/// key file without the revoked entry. Admin auth required.
 pub async fn revoke_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -111,15 +118,26 @@ pub async fn revoke_key(
 
     let mut keys = state.agent_keys.write().await;
 
-    // Find the key by id (the HashMap is keyed by token for O(1) auth lookup)
-    let token = keys
+    // Find the hash (map key) for this id — the map is keyed by token hash
+    let hash = keys
         .iter()
         .find(|(_, k)| k.id == id)
-        .map(|(t, _)| t.clone())
+        .map(|(h, _)| h.clone())
         .ok_or(FerroError::AgentKeyNotFound)?;
 
-    // Removing from the HashMap drops the AgentKey — Zeroizing token is wiped
-    keys.remove(&token);
+    keys.remove(&hash);
+    drop(keys);
+
+    // Rewrite the key file without the revoked entry
+    if let Some(ref path) = state.config.keys_file {
+        let stored = load(path).map_err(|e| {
+            FerroError::Internal(format!("Failed to read key file: {e}"))
+        })?;
+        let remaining: Vec<_> = stored.into_iter().filter(|k| k.id != id).collect();
+        save(path, &remaining).map_err(|e| {
+            FerroError::Internal(format!("Failed to write key file: {e}"))
+        })?;
+    }
 
     tracing::info!(agent_id = %id, "Agent key revoked");
 
@@ -132,11 +150,11 @@ pub async fn revoke_key(
 pub async fn get_audit(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> FerroResult<Json<AuditResponse>> {
+) -> FerroResult<Json<Vec<crate::audit::AuditEntry>>> {
     authenticate_admin(&state, &headers)?;
 
     let entries = state.audit.recent(100).await;
-    Ok(Json(AuditResponse { entries }))
+    Ok(Json(entries))
 }
 
 /// GET /v1/admin/status
@@ -153,7 +171,7 @@ pub async fn get_status(
     let key_count = state.agent_keys.read().await.len();
 
     Ok(Json(serde_json::json!({
-        "vault_locked": locked,
+        "locked": locked,
         "credential_count": credential_count,
         "agent_key_count": key_count,
     })))
@@ -161,9 +179,8 @@ pub async fn get_status(
 
 fn authenticate_admin(state: &Arc<AppState>, headers: &HeaderMap) -> FerroResult<()> {
     let token = headers
-        .get("authorization")
+        .get("x-admin-key")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or(FerroError::Unauthorized)?;
 
     if !state.authenticate_admin(token) {

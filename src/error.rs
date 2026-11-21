@@ -68,7 +68,7 @@ impl IntoResponse for FerroError {
             FerroError::AgentKeyNotFound => (StatusCode::UNAUTHORIZED, self.to_string()),
             FerroError::ForwardFailed(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             FerroError::InvalidTargetUrl(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            FerroError::UnknownPlaceholder(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            FerroError::UnknownPlaceholder(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             FerroError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             FerroError::UnlockEndpointDisabled => (StatusCode::NOT_FOUND, self.to_string()),
             FerroError::Internal(_) => (

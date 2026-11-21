@@ -13,8 +13,13 @@ tokio = { version = "1", features = ["full"] }
 # HTTP server
 axum = { version = "0.8", features = ["json"] }
 
+# TLS support via rustls (ring backend for easier cross-platform builds)
+axum-server = { version = "0.9", features = ["tls-rustls-ring"] }
+
 # HTTP client (for forwarding requests and bw serve calls)
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# rustls-tls: use rustls instead of native-tls/openssl — avoids OpenSSL build
+# deps in Docker and aligns with the axum-server TLS backend choice.
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -45,6 +50,9 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Secure random number generation (for key generation)
 rand = "0.9"
+
+# SHA-256 for token hashing in the key store (tokens are stored as hashes, never plaintext)
+sha2 = "0.10"
 
 # URL encoding for vault item name lookups
 urlencoding = "2"

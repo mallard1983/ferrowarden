@@ -15,6 +15,7 @@ pub enum Outcome {
     /// The forwarded request failed at the network level.
     ForwardFailed,
     /// The agent presented an invalid or missing API key.
+    #[allow(dead_code)]
     Unauthorized,
     /// An internal error occurred.
     InternalError,

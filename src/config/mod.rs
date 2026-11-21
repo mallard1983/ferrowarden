@@ -40,6 +40,27 @@ pub struct Config {
     /// Never set this in a config file checked into version control.
     #[serde(skip)]
     pub admin_key: String,
+
+    /// Path to the agent key store file.
+    /// When set, agent keys survive container restarts. The file stores only
+    /// SHA-256 hashes — plaintext tokens are never written to disk.
+    /// Omit to use in-memory-only storage (keys lost on restart).
+    pub keys_file: Option<PathBuf>,
+
+    /// Whether to enable TLS. Defaults to true.
+    /// Set to false ONLY when ferrowarden runs on the same host as the agent
+    /// (e.g. both in the same Docker network on the same machine). Any other
+    /// plaintext deployment exposes credentials to network interception.
+    #[serde(default = "default_tls_enabled")]
+    pub tls_enabled: bool,
+
+    /// Path to the TLS certificate file (PEM format).
+    /// Required when tls_enabled = true.
+    pub tls_cert_file: Option<PathBuf>,
+
+    /// Path to the TLS private key file (PEM format).
+    /// Required when tls_enabled = true.
+    pub tls_key_file: Option<PathBuf>,
 }
 
 fn default_bind_addr() -> String {
@@ -48,6 +69,10 @@ fn default_bind_addr() -> String {
 
 fn default_bw_serve_url() -> String {
     "http://127.0.0.1:8087".to_string()
+}
+
+fn default_tls_enabled() -> bool {
+    true
 }
 
 impl Config {
@@ -63,7 +88,8 @@ impl Config {
             // FERROWARDEN_BIND_ADDR, FERROWARDEN_UNLOCK_MODE, etc.
             .add_source(
                 config::Environment::with_prefix("FERROWARDEN")
-                    .separator("_")
+                    .prefix_separator("_")  // single _ between prefix and key (FERROWARDEN_FIELD)
+                    .separator("__")        // double __ for nested keys (FERROWARDEN_SECTION__KEY)
                     .ignore_empty(true),
             )
             .build()
@@ -95,6 +121,19 @@ impl Config {
             ));
         }
 
+        if self.tls_enabled {
+            if self.tls_cert_file.is_none() {
+                return Err(FerroError::Config(
+                    "tls_enabled = true requires tls_cert_file to be set".to_string(),
+                ));
+            }
+            if self.tls_key_file.is_none() {
+                return Err(FerroError::Config(
+                    "tls_enabled = true requires tls_key_file to be set".to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -110,6 +149,10 @@ mod tests {
             unlock_mode: mode,
             unlock_file: None,
             admin_key: "a".repeat(32),
+            keys_file: None,
+            tls_enabled: false,
+            tls_cert_file: None,
+            tls_key_file: None,
         }
     }
 
@@ -144,6 +187,40 @@ mod tests {
     fn exactly_32_char_admin_key_passes() {
         let cfg = base_config(UnlockMode::Manual);
         assert_eq!(cfg.admin_key.len(), 32);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn tls_enabled_without_cert_fails() {
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.tls_enabled = true;
+        cfg.tls_key_file = Some(PathBuf::from("/certs/server.key"));
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("tls_cert_file"));
+    }
+
+    #[test]
+    fn tls_enabled_without_key_fails() {
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.tls_enabled = true;
+        cfg.tls_cert_file = Some(PathBuf::from("/certs/server.crt"));
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("tls_key_file"));
+    }
+
+    #[test]
+    fn tls_enabled_with_both_files_passes() {
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.tls_enabled = true;
+        cfg.tls_cert_file = Some(PathBuf::from("/certs/server.crt"));
+        cfg.tls_key_file = Some(PathBuf::from("/certs/server.key"));
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn tls_disabled_no_files_passes() {
+        let cfg = base_config(UnlockMode::Manual);
+        assert!(!cfg.tls_enabled);
         assert!(cfg.validate().is_ok());
     }
 }

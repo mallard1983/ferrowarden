@@ -36,12 +36,17 @@ services:
 
   # ── bw serve ────────────────────────────────────────────────────────────────
   bw-serve:
-    image: bitwarden/cli:latest
+    build:
+      context: ./docker
+      dockerfile: bw-cli.Dockerfile
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     volumes:
       - ./docker/bw-entrypoint.sh:/entrypoint.sh:ro
-      - bw-test-data:/home/user/.config/Bitwarden CLI
+      # Note: bw-test-data volume removed — the node user cannot write to a
+      # Docker named volume (initially root-owned). bw re-logs in on each
+      # container start using the API key secrets, which is fast enough for
+      # a test stack.
     secrets:
       - bw_client_id
       - bw_client_secret
@@ -61,12 +66,21 @@ services:
     secrets:
       - ferrowarden_admin_key
       - bw_master_password
+    volumes:
+      - ferrowarden-keys:/data
     environment:
       FERROWARDEN_UNLOCK_MODE: "file"
       FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
       FERROWARDEN_BW_SERVE_URL: "http://bw-serve:8087"
       FERROWARDEN_BIND_ADDR: "0.0.0.0:3000"
       FERROWARDEN_ADMIN_KEY_FILE: "/run/secrets/ferrowarden_admin_key"
+      # Agent key persistence — keys survive container restarts.
+      # Only SHA-256 hashes are written; plaintext tokens are never stored.
+      FERROWARDEN_KEYS_FILE: "/data/agent_keys.json"
+      # TLS is disabled in the test stack. All services share a Docker-internal
+      # network on the same host — there is no network hop to protect.
+      # Production deployments must use tls_enabled = true.
+      FERROWARDEN_TLS_ENABLED: "false"
     networks:
       - vault-internal
       - test-net
@@ -111,7 +125,9 @@ services:
   # Run manually: docker compose -f docker-compose.test.yml run --rm vault-setup
   vault-setup:
     profiles: ["setup"]
-    image: bitwarden/cli:latest
+    build:
+      context: ./docker
+      dockerfile: bw-cli.Dockerfile
     entrypoint: ["/bin/sh", "/setup-entrypoint.sh"]
     volumes:
       - ./docker/setup-entrypoint.sh:/setup-entrypoint.sh:ro
@@ -134,17 +150,18 @@ services:
   # Run manually: docker compose -f docker-compose.test.yml run --rm vault-seeder
   vault-seeder:
     profiles: ["setup"]
-    image: bitwarden/cli:latest
+    build:
+      context: ./docker
+      dockerfile: bw-cli.Dockerfile
     entrypoint: ["/bin/sh", "/seed-entrypoint.sh"]
     volumes:
       - ./docker/seed-entrypoint.sh:/seed-entrypoint.sh:ro
       - ./tests/seed/credentials.json:/seed/credentials.json:ro
     secrets:
-      - bw_client_id
-      - bw_client_secret
       - bw_master_password
     environment:
       BW_SERVER_URL: "http://vaultwarden:80"
+      SETUP_EMAIL: "${SETUP_EMAIL:-admin@ferrowarden.test}"
     networks:
       - vault-internal
     depends_on:
@@ -161,7 +178,7 @@ networks:
 
 volumes:
   vaultwarden-test-data:
-  bw-test-data:
+  ferrowarden-keys:
 
 secrets:
   bw_client_id:

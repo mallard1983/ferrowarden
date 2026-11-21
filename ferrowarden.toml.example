@@ -48,3 +48,32 @@ unlock_mode = "file"
 # The file must contain only the master password. A single trailing newline
 # is tolerated and stripped; all other content is treated as part of the password.
 unlock_file = "/run/secrets/bw_master_password"
+
+
+# ── TLS ──────────────────────────────────────────────────────────────────────
+#
+# TLS is ENABLED by default. You must supply a certificate and key before
+# starting ferrowarden, or it will refuse to start.
+#
+# See certs/README.md for instructions on generating certificates.
+
+# Whether to enable TLS. Default: true.
+#
+# Set to false ONLY when both conditions are met:
+#   1. ferrowarden and the agent run on the same host (no network hop).
+#   2. You fully accept that credential values will be transmitted as
+#      plaintext and are comfortable with the risk.
+#
+# When false, ferrowarden will log a prominent multi-line warning at startup.
+# This is intentional — plaintext HTTP is a security downgrade that should
+# never happen silently.
+tls_enabled = true
+
+# Path to the TLS certificate (PEM format). Required when tls_enabled = true.
+# Docker: mount the cert as a bind volume or Docker secret.
+tls_cert_file = "/run/secrets/server.crt"
+
+# Path to the TLS private key (PEM format). Required when tls_enabled = true.
+# The key must correspond to the certificate above.
+# File permissions: chmod 400, owned by the ferrowarden process user.
+tls_key_file = "/run/secrets/server.key"

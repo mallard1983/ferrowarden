@@ -132,7 +132,7 @@ curl -X DELETE "http://localhost:3000/v1/admin/keys/$KEY_ID" \
   -H "X-Admin-Key: $ADMIN_KEY"
 ```
 
-Revocation is immediate. The token is removed from memory (zeroed) and any subsequent request using it will receive `401 Unauthorized`.
+Revocation is immediate. The token is removed from in-memory state and, if `FERROWARDEN_KEYS_FILE` is configured, removed from the key store file. Any subsequent request using the revoked token will receive `401 Unauthorized`. The key will not be re-loaded on the next container restart.
 
 **Rotate keys when:**
 - You suspect the token was exposed (logs, error messages, screen sharing)

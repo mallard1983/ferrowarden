@@ -20,7 +20,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Admin endpoints
         .route("/v1/admin/keys", post(admin::create_key))
         .route("/v1/admin/keys", get(admin::list_keys))
-        .route("/v1/admin/keys/:id", delete(admin::revoke_key))
+        .route("/v1/admin/keys/{id}", delete(admin::revoke_key))
         .route("/v1/admin/audit", get(admin::get_audit))
         .route("/v1/admin/status", get(admin::get_status))
         .with_state(state)

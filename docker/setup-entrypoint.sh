@@ -7,7 +7,7 @@
 #
 # Flow:
 #   1. Wait for Vaultwarden to be ready
-#   2. Register a new account (uses bw CLI — handles all client-side crypto)
+#   2. Register a new account (bw-register.js — Node.js built-in crypto)
 #   3. Obtain an access token (pure HTTP + PBKDF2 via Python stdlib)
 #   4. Create an API key for bw serve / the seeder
 #   5. Write client_id and client_secret to /secrets/
@@ -39,22 +39,17 @@ until wget -q --spider "$BW_SERVER_URL" 2>/dev/null; do
 done
 echo "[setup] Vaultwarden is ready."
 
-# ── 2. Register account via bw CLI ───────────────────────────────────────────
-# The bw CLI handles all Bitwarden client-side crypto for registration:
-# PBKDF2 key derivation, symmetric key generation, RSA key pair generation,
-# and encryption of the symmetric key with the master key.
-# We pipe the password twice (master + confirm) and an empty hint.
-
-bw config server "$BW_SERVER_URL"
+# ── 2. Register account via bw-register.js ───────────────────────────────────
+# The bw CLI does not have a `register` command. bw-register.js performs the
+# equivalent client-side crypto (PBKDF2 key derivation, symmetric key
+# generation, RSA-2048 key pair, AES-256-CBC encryption) and calls
+# POST /api/accounts/register directly. Uses only Node.js built-in modules.
 
 echo "[setup] Registering account: $EMAIL"
-if printf '%s\n%s\n\n' "$MASTER_PASSWORD" "$MASTER_PASSWORD" \
-        | bw register --email "$EMAIL" --name "FerrowardenAdmin" 2>&1; then
-    echo "[setup] Account registered."
+if node /home/node/bw-register.js; then
+    echo "[setup] Account registration step complete."
 else
-    # Exit code 1 from bw register usually means "already registered".
-    # Check by trying to log in — if it works, the account exists and we continue.
-    echo "[setup] Register returned non-zero — checking if account already exists..."
+    echo "[setup] bw-register.js returned non-zero — will attempt to continue." >&2
 fi
 
 # ── 3. Derive master password hash (pure Python stdlib, no extra packages) ───
@@ -111,6 +106,14 @@ echo "[setup] Access token obtained."
 # The API key (client_id + client_secret) is used by bw serve and the seeder
 # for non-interactive login. Creating it requires authenticating with the
 # master password hash — not just the access token — to confirm operator intent.
+#
+# API response format changed in Vaultwarden 2026.x:
+#   Old: {"clientId": "user.<uuid>", "clientSecret": "..."}
+#   New: {"apiKey": "<secret>", "object": "apiKey"}
+#
+# In the new format, clientId is derived as "user.<sub>" where <sub> is the
+# user UUID from the JWT access token. We decode it without verification using
+# Python's stdlib (base64 + json) since we obtained the token ourselves.
 
 echo "[setup] Creating API key..."
 APIKEY_RESPONSE=$(curl -sf -X POST "$BW_SERVER_URL/api/accounts/api-key" \
@@ -119,15 +122,24 @@ APIKEY_RESPONSE=$(curl -sf -X POST "$BW_SERVER_URL/api/accounts/api-key" \
     -d "{\"masterPasswordHash\": \"$MASTER_HASH\"}")
 
 CLIENT_ID=$(python3 -c "
-import sys, json
+import sys, json, base64
 data = json.loads('$APIKEY_RESPONSE')
-print(data.get('clientId', ''))
+# New format returns apiKey only; clientId is derived from the JWT sub claim
+if 'clientId' in data:
+    print(data['clientId'])
+elif 'apiKey' in data:
+    # Decode JWT to get user UUID (no verification needed — we issued this request)
+    payload = '$ACCESS_TOKEN'.split('.')[1]
+    payload += '=' * (-len(payload) % 4)
+    sub = json.loads(base64.b64decode(payload))['sub']
+    print('user.' + sub)
 " 2>/dev/null)
 
 CLIENT_SECRET=$(python3 -c "
 import sys, json
 data = json.loads('$APIKEY_RESPONSE')
-print(data.get('clientSecret', ''))
+# New format uses 'apiKey'; old format uses 'clientSecret'
+print(data.get('clientSecret') or data.get('apiKey', ''))
 " 2>/dev/null)
 
 if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then

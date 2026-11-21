@@ -1,24 +1,18 @@
 use axum::{extract::State, http::HeaderMap, Json};
-use serde::Serialize;
 use std::sync::Arc;
 
 use crate::error::{FerroError, FerroResult};
 use crate::state::AppState;
 
-#[derive(Serialize)]
-pub struct CredentialsResponse {
-    pub credentials: Vec<String>,
-}
-
 /// GET /v1/credentials
 ///
 /// Returns the list of credential names available in the vault.
 /// Names only — values are never returned through this endpoint.
-/// Requires a valid agent bearer token.
+/// Requires a valid agent key in the X-Agent-Key header.
 pub async fn list_credentials(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> FerroResult<Json<CredentialsResponse>> {
+) -> FerroResult<Json<Vec<String>>> {
     authenticate_agent(&state, &headers).await?;
 
     if state.is_locked().await {
@@ -27,18 +21,17 @@ pub async fn list_credentials(
 
     let names = state.credential_names.read().await.clone();
 
-    Ok(Json(CredentialsResponse { credentials: names }))
+    Ok(Json(names))
 }
 
-/// Extract and validate the bearer token from the Authorization header.
+/// Extract and validate the agent key from the X-Agent-Key header.
 pub async fn authenticate_agent(
     state: &Arc<AppState>,
     headers: &HeaderMap,
 ) -> FerroResult<crate::state::AgentKey> {
     let token = headers
-        .get("authorization")
+        .get("x-agent-key")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or(FerroError::Unauthorized)?;
 
     state

@@ -26,7 +26,7 @@ This document describes what Ferrowarden protects against, what security propert
 | The model provider | Logs prompt content including credentials | Values never enter the agent conversation |
 | Target services | Return credential-shaped content in responses | Scrubber removes common patterns before returning response to agent |
 | An attacker who compromises the agent process | Reads credential values from agent memory or conversation | Same as AI agent above |
-| A network observer between agent and Ferrowarden | Reads credentials in transit | Mitigated by running Ferrowarden on the same host, or by TLS termination before Ferrowarden |
+| A network observer between agent and Ferrowarden | Reads credentials in transit | Native TLS (rustls) is enabled by default; TLS can be disabled only when both agent and Ferrowarden run on the same host |
 
 ### Out of Scope
 
@@ -111,7 +111,36 @@ Ferrowarden uses `x-fw-*` headers for internal communication (agent key, admin k
 
 **Why this matters:** Without this, an agent could craft a request where `x-fw-agent-key` appears as a forwarded header, potentially misleading a target service or leaking the key value. All `x-fw-*` headers are dropped unconditionally.
 
-### 10. Hop-by-Hop Header Stripping
+### 10. Native TLS (Transport Security)
+
+Ferrowarden serves HTTPS by default using rustls (a pure-Rust TLS implementation). The certificate and key are configured by the operator.
+
+**Why native TLS instead of a reverse proxy?**  Anyone who wants this level of infrastructure security is already managing their own certificate chain. A built-in TLS layer avoids the operational dependency on a correctly-configured reverse proxy and removes one failure mode (proxy misconfigured without TLS, Ferrowarden exposed unencrypted).
+
+**TLS can be disabled** by setting `tls_enabled = false`. This is only acceptable when both conditions hold:
+
+1. The agent process and Ferrowarden run on the same physical or virtual host.
+2. No network hop exists between them (same Docker network, loopback, or Unix socket equivalent).
+
+When TLS is disabled, Ferrowarden logs a prominent multi-line warning at startup. This is intentional — the operator must be aware they are accepting plaintext HTTP.
+
+**Certificate management is the operator's responsibility.** Ferrowarden does not auto-rotate or provision certificates. Restart ferrowarden after replacing a cert to pick up the new one.
+
+**Crypto backend:** We use `axum-server` with the `tls-rustls-ring` feature (ring crypto provider). This is preferred over the `aws-lc-rs` backend for easier cross-platform builds, particularly on Windows development environments with MinGW toolchains.
+
+### 11. Agent Key Persistence: SHA-256 Hashing, Never Plaintext
+
+When `FERROWARDEN_KEYS_FILE` is configured, agent keys survive container restarts. Only the SHA-256 hash of each token is written to disk — the plaintext token is never stored.
+
+**Why SHA-256 for tokens and not bcrypt/argon2?**  Bcrypt and argon2 exist to protect low-entropy secrets (passwords) against offline brute-force. Agent tokens are 48 random alphanumeric characters (~286 bits of entropy). SHA-256 preimage attacks against 286-bit secrets are computationally infeasible. The deliberate slowness of bcrypt/argon2 would add latency to every authentication request with no security benefit against an attacker who would need to try 2^286 values regardless of hash speed.
+
+**What is stored:** A JSON array of `{ id, name, token_hash, created_at }` entries. The `token_hash` is the hex-encoded SHA-256 of the plaintext token. The plaintext is gone after the create response — it is not stored anywhere, including memory.
+
+**Atomic writes:** The key file is written via a rename (write to `.tmp`, then `rename`). A crash or power loss during a write cannot produce a corrupt key file — the rename is atomic at the OS level. The old file remains until the rename succeeds.
+
+**Key revocation** removes the entry from the file. Revoked keys are not reloaded on restart.
+
+### 12. Hop-by-Hop Header Stripping
 
 The following headers are removed from forwarded responses: `transfer-encoding`, `connection`, `keep-alive`, `proxy-authenticate`, `proxy-authorization`, `te`, `trailer`, `upgrade`.
 
@@ -145,7 +174,8 @@ Before going to production:
 - [ ] Vaultwarden's `SIGNUPS_ALLOWED` is set to `false`
 - [ ] Vaultwarden is not exposed on a public port
 - [ ] `bw serve` port (8087) is not reachable from outside Docker (`internal: true` network)
-- [ ] Ferrowarden is bound to `127.0.0.1` or behind a TLS reverse proxy if agents connect from another host
+- [ ] TLS is enabled (`tls_enabled = true`, which is the default); if disabled, Ferrowarden and the agent must run on the same host with no network hop
+- [ ] `tls_cert_file` and `tls_key_file` point to valid, non-expired certificates
 - [ ] All secret files are `chmod 600` and owned by the deployment user
 - [ ] `FERROWARDEN_ADMIN_KEY` is at least 32 random characters
 - [ ] `ferrowarden.toml` (if used) is in `.gitignore` and not committed

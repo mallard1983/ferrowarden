@@ -1,40 +1,39 @@
 #!/bin/sh
 # seed-entrypoint.sh
 #
-# Seed test credentials into Vaultwarden using the Bitwarden CLI.
+# One-shot credential seeder. Seeds test credentials into Vaultwarden.
 # Idempotent: credentials that already exist by name are skipped.
 #
-# Runs as a one-shot Docker Compose service. Exits 0 on success.
-# Exits non-zero if Vaultwarden is unreachable or login fails.
+# Uses bw-seed.js (Node.js, built-in modules only) for direct Vaultwarden API
+# calls. The Bitwarden CLI 2023.12.1 is incompatible with Vaultwarden 2026.x
+# for item creation (missing 'encryptedFor' field); the Node.js script bypasses
+# the CLI and handles the cipher crypto and API calls directly.
 #
 # Requires:
-#   /run/secrets/bw_client_id       — Vaultwarden API client ID
-#   /run/secrets/bw_client_secret   — Vaultwarden API client secret
-#   /run/secrets/bw_master_password — Vault master password (for unlock)
+#   /run/secrets/bw_master_password — Vault master password
 #   /seed/credentials.json          — Credential definitions to seed
+#
+# Environment:
+#   BW_SERVER_URL  — Vaultwarden base URL (e.g. http://vaultwarden:80)
+#   SETUP_EMAIL    — Vault account email (default: admin@ferrowarden.test)
 
 set -e
 
 CREDENTIALS_FILE="${CREDENTIALS_FILE:-/seed/credentials.json}"
 MAX_WAIT="${VAULTWARDEN_WAIT_SECONDS:-60}"
+SETUP_EMAIL="${SETUP_EMAIL:-admin@ferrowarden.test}"
 
 # ── Validate inputs ───────────────────────────────────────────────────────────
 
-for f in /run/secrets/bw_client_id /run/secrets/bw_client_secret /run/secrets/bw_master_password; do
-    if [ ! -f "$f" ]; then
-        echo "ERROR: required secret not found: $f" >&2
-        exit 1
-    fi
-done
+if [ ! -f /run/secrets/bw_master_password ]; then
+    echo "ERROR: required secret not found: /run/secrets/bw_master_password" >&2
+    exit 1
+fi
 
 if [ ! -f "$CREDENTIALS_FILE" ]; then
     echo "ERROR: credentials file not found: $CREDENTIALS_FILE" >&2
     exit 1
 fi
-
-BW_CLIENTID="$(cat /run/secrets/bw_client_id)"
-BW_CLIENTSECRET="$(cat /run/secrets/bw_client_secret)"
-export BW_CLIENTID BW_CLIENTSECRET
 
 # ── Wait for Vaultwarden ──────────────────────────────────────────────────────
 
@@ -50,112 +49,12 @@ until wget -q --spider "$BW_SERVER_URL" 2>/dev/null; do
 done
 echo "Vaultwarden is ready."
 
-# ── Configure and log in ──────────────────────────────────────────────────────
+# ── Seed credentials via bw-seed.js ──────────────────────────────────────────
+# bw-seed.js derives the master key from the password, authenticates,
+# decrypts the vault key, and creates each credential as an encrypted cipher.
 
-bw config server "$BW_SERVER_URL"
-
-# Login creates a local encrypted copy of the vault. Subsequent runs will
-# see "already logged in" — that is fine; we proceed to unlock.
-bw login --apikey 2>&1 | grep -v "clientSecret" || true
-
-# Unlock to get a session token. The session token authorises item operations.
-SESSION="$(bw unlock --passwordenv BW_MASTER_PASSWORD --raw)"
-export BW_SESSION="$SESSION"
-export BW_MASTER_PASSWORD
-BW_MASTER_PASSWORD="$(cat /run/secrets/bw_master_password)"
-
-# bw needs BW_MASTER_PASSWORD as an env var for --passwordenv
-# Re-export after the unlock call that consumed it
-unset BW_MASTER_PASSWORD
-
-# ── Sync vault to pick up any existing items ──────────────────────────────────
-
-bw sync --session "$SESSION" > /dev/null
-
-# ── Seed credentials ──────────────────────────────────────────────────────────
+SETUP_MASTER_PASSWORD="$(cat /run/secrets/bw_master_password)"
+export SETUP_MASTER_PASSWORD SETUP_EMAIL BW_SERVER_URL CREDENTIALS_FILE
 
 echo "Seeding credentials from $CREDENTIALS_FILE ..."
-
-# Parse credentials.json and iterate. We use awk to extract name/value pairs
-# without requiring jq (which may not be in the base image).
-# Format expected: array of {"name":"...","value":"...","note":"..."} objects.
-# We use python3 which is available in the bitwarden/cli image.
-
-python3 - "$CREDENTIALS_FILE" "$SESSION" <<'PYEOF'
-import json
-import subprocess
-import sys
-import os
-
-credentials_file = sys.argv[1]
-session = sys.argv[2]
-
-with open(credentials_file) as f:
-    credentials = json.load(f)
-
-# Get list of existing item names (to skip duplicates)
-result = subprocess.run(
-    ["bw", "list", "items", "--session", session],
-    capture_output=True, text=True
-)
-try:
-    existing_items = json.loads(result.stdout)
-    existing_names = {item["name"] for item in existing_items}
-except (json.JSONDecodeError, KeyError):
-    existing_names = set()
-
-created = 0
-skipped = 0
-
-for cred in credentials:
-    name = cred["name"]
-    value = cred["value"]
-    note = cred.get("note", "")
-
-    if name in existing_names:
-        print(f"  skip (exists): {name}")
-        skipped += 1
-        continue
-
-    # Build a Bitwarden Login item. Type 1 = Login.
-    # bw serve GET /object/password/:name returns item.login.password.
-    item = {
-        "type": 1,
-        "name": name,
-        "notes": note,
-        "login": {
-            "username": None,
-            "password": value,
-            "uris": []
-        }
-    }
-
-    # bw create item requires the JSON to be base64-encoded
-    encoded = subprocess.run(
-        ["bw", "encode"],
-        input=json.dumps(item),
-        capture_output=True, text=True
-    ).stdout.strip()
-
-    create_result = subprocess.run(
-        ["bw", "create", "item", encoded, "--session", session],
-        capture_output=True, text=True
-    )
-
-    if create_result.returncode == 0:
-        print(f"  created: {name}")
-        created += 1
-    else:
-        print(f"  ERROR creating {name}: {create_result.stderr}", file=sys.stderr)
-        sys.exit(1)
-
-print(f"\nDone. Created: {created}, Skipped (already existed): {skipped}")
-PYEOF
-
-# ── Lock the vault ────────────────────────────────────────────────────────────
-# Leave bw serve in its pre-startup locked state. Ferrowarden will unlock it
-# via its configured unlock mode when it starts.
-
-bw lock --session "$SESSION" > /dev/null || true
-
-echo "Seed complete."
+exec node /home/node/bw-seed.js

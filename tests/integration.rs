@@ -21,8 +21,8 @@
 //! # On subsequent runs:
 //! docker compose -f docker-compose.test.yml up -d
 //!
-//! # Run tests:
-//! source .env.test && cargo test --test integration -- --nocapture
+//! # Run tests (--test-threads=1 required: tests share the mock API state):
+//! source .env.test && cargo test --test integration -- --nocapture --test-threads=1
 //! ```
 //!
 //! # Environment Variables
