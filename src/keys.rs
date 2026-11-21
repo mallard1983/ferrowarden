@@ -32,6 +32,7 @@ use std::path::Path;
 
 /// One entry in the on-disk key file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StoredKey {
     pub id: String,
     pub name: String,
@@ -64,8 +65,11 @@ pub fn load(path: &Path) -> io::Result<Vec<StoredKey>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let raw = std::fs::read_to_string(path)?;
-    serde_json::from_str(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    let raw = std::fs::read(path)?;
+    // Same strictness as request bodies: duplicate keys and unknown fields make
+    // the file ambiguous, so startup fails closed instead of guessing.
+    crate::api::strict_json::parse_strict(&raw)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("key file: {e}")))
 }
 
 /// Write all keys to disk atomically.
@@ -212,5 +216,48 @@ mod tests {
             loaded.is_empty(),
             "overwrite should replace previous contents"
         );
+    }
+
+    fn write_raw(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("keys.json");
+        std::fs::write(&path, contents).unwrap();
+        (dir, path)
+    }
+
+    const ONE: &str =
+        r#"{"id":"i","name":"n","token_hash":"h","created_at":"2024-01-01T00:00:00Z"}"#;
+
+    #[test]
+    fn load_accepts_valid_key_file() {
+        let (_d, p) = write_raw(&format!("[{ONE}]"));
+        let keys = load(&p).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].id, "i");
+    }
+
+    #[test]
+    fn load_rejects_duplicate_keys_in_an_entry() {
+        let (_d, p) = write_raw(
+            r#"[{"id":"i","id":"j","name":"n","token_hash":"h","created_at":"2024-01-01T00:00:00Z"}]"#,
+        );
+        let e = load(&p).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert!(e.to_string().contains("duplicate key"), "{e}");
+    }
+
+    #[test]
+    fn load_rejects_unknown_fields() {
+        let (_d, p) = write_raw(&format!("[{}]", ONE.replace('}', r#","role":"admin"}"#)));
+        let e = load(&p).unwrap_err();
+        assert!(e.to_string().contains("unknown field `role`"), "{e}");
+    }
+
+    #[test]
+    fn load_rejects_malformed_and_trailing_data() {
+        let (_d, p) = write_raw("[");
+        assert!(load(&p).is_err());
+        let (_d, p) = write_raw(&format!("[{ONE}] []"));
+        assert!(load(&p).is_err());
     }
 }

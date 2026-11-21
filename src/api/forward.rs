@@ -8,6 +8,7 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 use crate::api::credentials::authenticate_agent;
+use crate::api::strict_json::StrictJson;
 use crate::audit::{build_entry, Outcome};
 use crate::error::{FerroError, FerroResult};
 use crate::proxy::forward::{ProxyRequest, ZeroizingHeaders};
@@ -21,6 +22,7 @@ use crate::vault::refresh::reunlock_if_possible;
 use crate::vault::VaultClient;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ForwardPayload {
     pub request: ProxyRequest,
 }
@@ -35,7 +37,7 @@ pub struct ForwardPayload {
 pub async fn forward(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(payload): Json<ForwardPayload>,
+    StrictJson(payload): StrictJson<ForwardPayload>,
 ) -> FerroResult<Json<crate::proxy::forward::ProxyResponse>> {
     // Authenticate the agent first — before touching the vault or making any
     // outbound connections
@@ -44,7 +46,7 @@ pub async fn forward(
 
     // Parse every placeholder (URL, header values, body) before anything
     // else. A malformed one is rejected here rather than forwarded literally.
-    let collected = collect_placeholders(&req);
+    let collected = req.validate().and_then(|()| collect_placeholders(&req));
     let names = collected.as_ref().cloned().unwrap_or_default();
     // Audit labels: the canonical placeholder text, e.g. `grafana_token` or
     // `'Proxmox (prod)':username` — never values.
@@ -211,6 +213,8 @@ fn outcome_for(error: &FerroError) -> Outcome {
         | FerroError::RepromptRequired(_) => Outcome::Blocked,
         FerroError::ForwardFailed(_)
         | FerroError::InvalidTargetUrl(_)
+        | FerroError::InvalidRequest(_)
+        | FerroError::InvalidJson(_)
         | FerroError::ResponseTooLarge(_) => Outcome::ForwardFailed,
         _ => Outcome::InternalError,
     }

@@ -80,6 +80,9 @@ pub enum FerroError {
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
+    #[error("Invalid JSON: {0}")]
+    InvalidJson(String),
+
     // Internal errors
     #[error("Internal error: {0}")]
     Internal(String),
@@ -116,6 +119,7 @@ impl IntoResponse for FerroError {
             FerroError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             FerroError::UnlockEndpointDisabled => (StatusCode::NOT_FOUND, self.to_string()),
             FerroError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            FerroError::InvalidJson(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             FerroError::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),

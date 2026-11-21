@@ -4,6 +4,7 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 use crate::api::admin::authenticate_admin;
+use crate::api::strict_json::StrictJson;
 use crate::config::UnlockMode;
 use crate::error::{FerroError, FerroResult};
 use crate::state::AppState;
@@ -11,6 +12,7 @@ use crate::vault::refresh::refresh_credentials;
 use crate::vault::unlock_vault;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnlockPayload {
     /// The vault master password. Consumed and zeroed immediately after use.
     pub password: String,
@@ -24,7 +26,7 @@ pub struct UnlockPayload {
 pub async fn unlock(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(payload): Json<UnlockPayload>,
+    StrictJson(payload): StrictJson<UnlockPayload>,
 ) -> FerroResult<Json<serde_json::Value>> {
     // Wrap the password in Zeroizing immediately so it's wiped even if we
     // return early due to an error
