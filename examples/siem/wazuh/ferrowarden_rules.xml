@@ -81,6 +81,19 @@
     <group>exfiltration,</group>
   </rule>
 
+  <!-- Policy violations: the agent key asked for a credential or method outside its scope. Possible probing or a steered agent. -->
+  <rule id="100231" level="8">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^forward$</field>
+    <field name="event.outcome">^failure$</field>
+    <field name="event.reason" type="pcre2">^(credential_out_of_scope|method_not_allowed)$</field>
+    <description>Ferrowarden: key $(ferrowarden.key.name) violated its policy ($(event.reason)) from $(source.ip): possible probing or prompt injection.</description>
+    <mitre>
+      <id>T1087</id>
+    </mitre>
+    <group>policy_violation,</group>
+  </rule>
+
   <!-- Rate limiting (already aggregated by Ferrowarden: at most one event per IP and limiter per minute) -->
   <rule id="100240" level="6">
     <if_sid>100200,100201</if_sid>
@@ -121,6 +134,17 @@
     <field name="event.action">^key_revoke$</field>
     <field name="event.outcome">^success$</field>
     <description>Ferrowarden: agent key revoked ($(ferrowarden.details.key_name)) from $(source.ip).</description>
+    <group>audit,</group>
+  </rule>
+
+  <rule id="100262" level="5">
+    <if_sid>100200,100201</if_sid>
+    <field name="event.action">^key_policy_change$</field>
+    <field name="event.outcome">^success$</field>
+    <description>Ferrowarden: policy of agent key $(ferrowarden.details.key_name) changed from $(source.ip).</description>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
     <group>audit,</group>
   </rule>
 

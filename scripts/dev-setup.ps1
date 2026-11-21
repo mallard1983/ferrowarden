@@ -217,7 +217,7 @@ try {
     $resp = Invoke-RestMethod "$ferroUrl/v1/admin/keys" `
         -Method POST `
         -Headers @{ 'X-Admin-Key' = $adminKey; 'Content-Type' = 'application/json' } `
-        -Body '{"name":"integration-test-agent"}' `
+        -Body '{"name":"integration-test-agent","credentials":["*"],"methods":["*"]}' `
         -ErrorAction Stop
     $agentKeyVal = $resp.token
     Write-Secret $agentKeyFile $agentKeyVal

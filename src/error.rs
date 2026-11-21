@@ -43,6 +43,14 @@ pub enum FerroError {
     #[error("Agent key not found")]
     AgentKeyNotFound,
 
+    // Per-key policy. The credential message is the same whether or not the
+    // credential exists, so it cannot be used to probe the vault.
+    #[error("Credential {0} is not available to this agent key")]
+    CredentialOutOfScope(String),
+
+    #[error("Method {0} is not allowed for this agent key")]
+    MethodNotAllowed(String),
+
     // Proxy errors
     #[error("Forward request failed: {0}")]
     ForwardFailed(String),
@@ -111,7 +119,10 @@ impl FerroError {
             FerroError::TargetBlocked(_) => (StatusCode::FORBIDDEN, self.to_string()),
             FerroError::ResponseTooLarge(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             FerroError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
-            FerroError::AgentKeyNotFound => (StatusCode::UNAUTHORIZED, self.to_string()),
+            FerroError::AgentKeyNotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            FerroError::CredentialOutOfScope(_) | FerroError::MethodNotAllowed(_) => {
+                (StatusCode::FORBIDDEN, self.to_string())
+            }
             FerroError::ForwardFailed(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             FerroError::InvalidTargetUrl(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             FerroError::UnknownPlaceholder(_) | FerroError::MalformedPlaceholder(_) => {

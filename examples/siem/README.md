@@ -93,11 +93,13 @@ All rules carry group `ferrowarden` and use ids 100200 to 100299. Fields appear 
 | 100220 | 10 | `admin_auth` failure |
 | 100221 | 13 | 3 `admin_auth` failures from the same `source.ip` within 300 s |
 | 100230 | 8 | `forward` failed with `credential_host_not_allowed` or `target_blocked` |
+| 100231 | 8 | `forward` failed with `credential_out_of_scope` or `method_not_allowed` (the key left its policy: possible probing or prompt injection) |
 | 100240 | 6 | `rate_limited` |
 | 100250 | 8 | `vault_lock` |
 | 100251 | 9 | `vault_unlock` failure |
 | 100260 | 5 | `key_create` |
 | 100261 | 5 | `key_revoke` (success) |
+| 100262 | 5 | `key_policy_change` (success) |
 | 100270 | 10 | `events_dropped` |
 | 100280 / 100281 | 3 | `startup` / `shutdown` |
 

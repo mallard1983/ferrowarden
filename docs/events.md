@@ -85,15 +85,17 @@ Every response, including `/health`, 404s and 429s, carries an `X-Request-Id` he
 | `admin_auth` | authentication / start | **Failures only**, on any admin route including `/v1/unlock`. Reason `missing_admin_key` or `invalid_admin_key`. Details: `endpoint` |
 | `rate_limited` | network / denied | A request was answered `429`. **Aggregated**, see below. Details: `limiter` (`agent` or `admin`), `suppressed` |
 | `request_rejected` | web / denied | An authenticated request had an invalid body or query. Reason `invalid_json` or `invalid_request`. Details: `endpoint`, `error` (the sanitized message the client received) |
-| `key_create` | iam / creation | Admin created an agent key. Details: `key_id`, `key_name` |
-| `key_revoke` | iam / deletion | Admin revoked a key. Details: `key_id`, `key_name`; an unknown id is a failure with reason `key_not_found` |
+| `key_create` | iam / creation | Admin created an agent key. Details: `key_id`, `key_name`, `credentials` and `methods` (the key's policy; `["*"]` = everything) |
+| `key_policy_change` | iam / change | Admin changed a key's policy with `PATCH`. Details: `key_id`, `key_name`, `before` and `after` (each `{ "credentials": [...], "methods": [...] }`). Failures (unknown id `key_not_found`, invalid body) carry the reason and `key_id` |
+| `policy_preview` | iam / access | Admin previewed a draft policy (`POST /v1/admin/keys/{id}/preview`); nothing is changed. Details: `key_id`, `key_name`, `request_checked` (bool) |
+| `key_revoke` | iam / deletion | Admin revoked a key. Details: `key_id`, `key_name`; an unknown id is a `404` failure with reason `key_not_found` |
 | `key_list` | iam / access | Admin listed keys. Details: `count` |
 | `audit_read` | web / access | Admin read `/v1/admin/audit`. Details: `limit`, `count` |
 | `status_read` | web / access | Admin read `/v1/admin/status` |
 | `vault_unlock` | authentication / start | Details: `mode` = `manual` (`POST /v1/unlock`), `file` (startup) or `reunlock` (automatic, after bw serve restarted). Failure reason `unlock_failed` |
 | `vault_lock` | configuration / change | The vault went from unlocked to locked. Details: `cause` (`bw_serve_locked`, `forward_vault_locked`). Emitted on the transition only |
 | `vault_sync` | configuration / info | Credential refresh. Always on failure (reason `sync_failed`, details `stage`); on success **only when the credential count changed** (details `credential_count`, `previous`) |
-| `startup` | configuration / start | Once at start. Details: `version`, `tls_enabled`, `unlock_mode`, `enforce_credential_hosts`, `allow_private_targets`, `allowed_targets` (count), `trusted_proxies` (count), `api_prefix_set` (bool; **the prefix itself is never logged**), `agent_key_count`, `sinks` |
+| `startup` | configuration / start | Once at start. Details: `version`, `tls_enabled`, `unlock_mode`, `enforce_credential_hosts`, `allow_private_targets`, `allowed_targets` (count), `trusted_proxies` (count), `api_prefix_set` (bool; **the prefix itself is never logged**), `agent_key_count`, `keys_without_policy` (keys from 0.1.0 that are deny-all until patched), `sinks` |
 | `shutdown` | configuration / end | On SIGTERM or Ctrl-C. Details: `signal`. Sinks are flushed before the process exits |
 | `events_dropped` | configuration / info | The sink queue overflowed and events were not delivered to the sinks. Details: `dropped`. `event.outcome` is `unknown` |
 
@@ -146,7 +148,7 @@ The startup event (shown formatted):
       "version": "0.1.0", "tls_enabled": false, "unlock_mode": "file",
       "enforce_credential_hosts": true, "allow_private_targets": false,
       "allowed_targets": 1, "trusted_proxies": 0, "api_prefix_set": false,
-      "agent_key_count": 3, "sinks": ["stdout", "file"]
+      "agent_key_count": 3, "keys_without_policy": 0, "sinks": ["stdout", "file"]
     }
   }
 }
@@ -170,6 +172,8 @@ The startup event (shown formatted):
 | `target_blocked` | 403 | The outbound target policy refused the destination |
 | `invalid_target_url` | 400 | URL cannot be parsed, or a placeholder tried to change scheme, host or port |
 | `credential_host_not_allowed` | 403 | A credential is not bound to the target host |
+| `credential_out_of_scope` | 403 | A placeholder names a credential the agent key's policy does not allow. Identical whether or not the credential exists. `ferrowarden.credentials` lists the placeholders the agent sent |
+| `method_not_allowed` | 403 | The request method is not in the agent key's `methods` |
 | `reprompt_required` | 403 | The vault item has master password re-prompt enabled |
 | `unknown_credential` | 422 / 404 | A placeholder names a credential or field that does not exist |
 | `ambiguous_credential` | 409 | More than one vault item has that name |
@@ -178,7 +182,7 @@ The startup event (shown formatted):
 | `vault_locked` | 503 | The vault is locked |
 | `upstream_error` | 502 | The target (or bw serve) could not be reached or failed |
 | `response_too_large` | 502 | The target's response exceeded `max_response_bytes` |
-| `key_not_found` | 401 | Revoke of an unknown key id |
+| `key_not_found` | 404 | Revoke, policy change or preview of an unknown key id |
 | `unlock_failed` | varies | Vault unlock failed |
 | `sync_failed` | n/a | Credential refresh failed |
 | `internal_error` | 500 | Unexpected internal error |

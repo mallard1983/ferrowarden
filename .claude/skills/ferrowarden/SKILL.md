@@ -40,6 +40,7 @@ Credential values never enter the agent context. Ferrowarden substitutes `{{vaul
 5. On `429 Too Many Requests`, wait the number of seconds in the `Retry-After` header and retry once.
 6. On `503 Service Unavailable`, the vault is locked. Inform the user; do not retry automatically.
 7. On `403 Forbidden`, the credential is not allowed for that host or the target is blocked. Do not try a different host or credential to work around it; tell the user what was refused.
+8. On `403` with "is not available to this agent key" or "is not allowed for this agent key", your key's policy does not cover that credential or HTTP method. Do not retry with other names or methods and do not try to probe what exists; tell the user which credential or method you needed so the operator can widen the key.
 
 ## Anti-patterns
 

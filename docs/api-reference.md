@@ -35,6 +35,8 @@ List the credentials available in the vault — Login and Secure note items. Thi
 **Query parameters**
 - `detail=true` — return objects with ready-made placeholders instead of plain names
 
+Only credentials the agent key's [policy](#key-policy) allows are listed; the rest are not mentioned at all. A key with `credentials: []` gets `[]`.
+
 **Response `200 OK`**
 ```json
 ["Proxmox (prod)", "grafana_service_account", "nas_key"]
@@ -105,7 +107,7 @@ The agent sends the request it wants to make, with `{{vault:name}}` placeholders
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `request.method` | string | yes | HTTP method (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`) |
+| `request.method` | string | yes | One of `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS` (case-insensitive, normalised to upper case). Any other method, including `TRACE` and `CONNECT`, is a `400` for every key. |
 | `request.url` | string | yes | Target URL. Must be `http://` or `https://`. |
 | `request.headers` | object | no | Headers to send. `x-fw-*` headers are stripped. |
 | `request.body` | any JSON | no | Request body. A JSON **string** is sent as raw text (e.g. form data). An object, array, number or boolean is serialized and sent as JSON, with `Content-Type: application/json` added if you did not set one. `null` sends no body. |
@@ -114,7 +116,10 @@ Placeholders (`{{vault:name}}`) may appear in the URL's path, query or user info
 
 In a JSON body, values are substituted into the parsed structure, so a credential containing `"` or `\` is escaped correctly.
 
-**Checks before anything is sent** (failures return an error and nothing is forwarded):
+**Checks before anything is sent** (failures return an error and nothing is forwarded), in this order:
+- The request is well formed: strict JSON, no duplicate headers, a method from the list above, every placeholder parses (`400` / `422`).
+- **The key's method policy** allows the method (`403`, reason `method_not_allowed`).
+- **The key's credential scope** covers every placeholder's credential name (`403`, reason `credential_out_of_scope`). This runs before the vault, the target or DNS is touched, and **before the unknown-credential check**: an out-of-scope name returns the same `403`, with the same message format and the same security event, whether or not a credential of that name exists, so an agent cannot use it to discover what is in the vault. The message is `Credential <name> is not available to this agent key`, where `<name>` is the placeholder the agent sent.
 - Every placeholder names exactly one vault login item (`422` unknown, `409` ambiguous).
 - Each credential is bound to the target: the target's host (and scheme/port, if the item's URI states them) matches one of the URIs on the vault item (`403`). See [Security Model §13](security.md#13-credential-host-binding).
 - The target is allowed by the outbound policy: never bw serve; private/internal addresses only if listed in `allowed_targets` (`403`). See [Security Model §14](security.md#14-outbound-target-policy-ssrf-protection).
@@ -139,9 +144,11 @@ Every credential value used in the request is redacted (`[REDACTED]`) wherever i
 **Errors**
 | Status | Condition |
 |---|---|
-| `400 Bad Request` | Malformed request JSON; duplicate or unknown JSON fields; header names that differ only by case; unparseable URL; scheme not http/https; invalid HTTP method; placeholder in the URL host/port |
+| `400 Bad Request` | Malformed request JSON; duplicate or unknown JSON fields; header names that differ only by case; unparseable URL; scheme not http/https; a method outside the list above; placeholder in the URL host/port |
 | `401 Unauthorized` | Missing or invalid agent key |
 | `403 Forbidden` | Credential not bound to the target host, or target refused by the outbound policy (bw serve, private/internal address not in `allowed_targets`) |
+| `403 Forbidden` (method) | `Method <M> is not allowed for this agent key` (the key's `methods` list does not include it) |
+| `403 Forbidden` (scope) | `Credential <name> is not available to this agent key` (no `credentials` pattern matches it; same response whether or not it exists) |
 | `403 Forbidden` (re-prompt) | The item has master password re-prompt enabled |
 | `409 Conflict` | Placeholder name matches more than one vault item, or a field name appears more than once on the item |
 | `422 Unprocessable Entity` | Malformed placeholder, unknown credential, or a value/field the item does not have |
@@ -186,14 +193,50 @@ On success Ferrowarden also syncs bw serve with Vaultwarden and reloads the cred
 
 ---
 
+### Key policy
+
+Every agent key carries a policy, set when the key is created and changed with `PATCH`:
+
+| Field | Meaning |
+|---|---|
+| `credentials` | List of patterns matched against the credential (item) name: the name in the placeholder after unquoting, e.g. `Proxmox (prod)` for `{{vault:'Proxmox (prod)'}}`. |
+| `methods` | List of allowed HTTP methods: `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`. Case-insensitive on input, returned upper case. |
+
+**Both fields are required when creating a key. There is no default access.**
+
+| Value | Meaning |
+|---|---|
+| `["*"]` | Everything (every credential, or all seven methods). This is how you spell "unrestricted". |
+| `["uptime_*", "grafana_token"]` | Only what matches. |
+| `[]` | Nothing. The key cannot use any credential (or any method). |
+| `null` | **Rejected** with `400` naming the field, in request bodies and in the key file. Leaving a field out is not the same as `null`: see PATCH below. |
+
+**Patterns.** `*` is the only wildcard and matches any run of characters, including none, spaces, quotes and colons. A pattern must match the whole name (`uptime_*` does not match `not_uptime_x`), and matching is case-sensitive, like placeholders. There is no escaping: `?`, `[`, `.` and the rest are literal, and a literal `*` in a credential name is simply matched by the wildcard. Each pattern is 1-256 characters without control characters; at most 256 patterns per key. `*` combined with other methods (`["*", "GET"]`) is rejected as ambiguous.
+
+**What a policy does not restrict.** `credentials: []` stops every placeholder, but a `/v1/forward` request with **no placeholders** is still allowed if its method is (it uses no credential). Use `methods: []` as well if the key should not forward at all.
+
+**Keys created with 0.1.0** have no policy in their key file. They load as **deny-all** (`credentials: []`, `methods: []`) and are shown with `"policy_set": false`, in the startup event (`keys_without_policy`) and in a startup warning. They are usable again once both fields are set with `PATCH`; to restore the old behaviour send `{"credentials": ["*"], "methods": ["*"]}`.
+
+---
+
 ### `POST /v1/admin/keys`
 
-Create a new agent API key.
+Create a new agent API key with an explicit policy.
 
 **Request Body**
 ```json
-{ "name": "homelab-agent" }
+{
+  "name": "homelab-agent",
+  "credentials": ["uptime_kuma_*", "grafana_token"],
+  "methods": ["GET", "HEAD"]
+}
 ```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | 1-128 characters |
+| `credentials` | array of strings | yes | Credential name patterns. `["*"]` = all, `[]` = none |
+| `methods` | array of strings | yes | Allowed methods. `["*"]` = all, `[]` = none |
 
 **Response `201 Created`**
 ```json
@@ -201,17 +244,25 @@ Create a new agent API key.
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "name": "homelab-agent",
   "token": "AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890",
-  "created_at": "2026-11-20T12:00:00Z"
+  "created_at": "2026-11-20T12:00:00Z",
+  "credentials": ["uptime_kuma_*", "grafana_token"],
+  "methods": ["GET", "HEAD"],
+  "policy_set": true
 }
 ```
 
-The `token` is shown exactly once. It cannot be retrieved after this response.
+The `token` is shown exactly once. It cannot be retrieved after this response. Policies are always returned as arrays (never `null`); an unrestricted field is `["*"]`.
+
+**Errors**
+| Status | Condition |
+|---|---|
+| `400 Bad Request` | Malformed JSON, duplicate or unknown fields, a missing `credentials` or `methods` (`missing field `credentials``), a `null` or non-array policy field, an invalid pattern or method, or a `name` outside 1-128 characters |
 
 ---
 
 ### `GET /v1/admin/keys`
 
-List all active agent keys. Token values are never included.
+List all active agent keys with their policies. Token values are never included.
 
 **Response `200 OK`**
 ```json
@@ -219,10 +270,95 @@ List all active agent keys. Token values are never included.
   {
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "name": "homelab-agent",
-    "created_at": "2026-11-20T12:00:00Z"
+    "created_at": "2026-11-20T12:00:00Z",
+    "credentials": ["uptime_kuma_*", "grafana_token"],
+    "methods": ["GET", "HEAD"],
+    "policy_set": true
   }
 ]
 ```
+
+`policy_set` is `false` for a key created with 0.1.0 that has no policy yet (it is deny-all, `[]` / `[]`, until patched).
+
+---
+
+### `PATCH /v1/admin/keys/{id}`
+
+Change a key's policy. The new policy applies to the very next request made with that key's token. The token stays the same.
+
+**Request Body**: any of `credentials` and `methods`.
+```json
+{ "credentials": ["uptime_kuma_*", "lab_*"] }
+```
+
+- A field that is **left out is unchanged**; a field that is **present replaces** the old value.
+- `null` is rejected with `400`, naming the field.
+- An empty object `{}` is rejected with `400` (`nothing to change`).
+- To lift a restriction, send `["*"]`.
+- On a key without a policy (`policy_set: false`), a field you leave out stays deny-all (`[]`). Send both fields to make it usable.
+
+**Response `200 OK`**: the updated key, as in the listing.
+
+**Errors**
+| Status | Condition |
+|---|---|
+| `400 Bad Request` | Malformed JSON, duplicate or unknown fields, `null`, `{}`, an invalid pattern or method |
+| `404 Not Found` | No key with that ID exists |
+
+The change is written to the key file (when persistence is configured) before it takes effect, and recorded as a `key_policy_change` event with the policy before and after.
+
+---
+
+### `POST /v1/admin/keys/{id}/preview`
+
+Show what a draft policy would allow for an existing key, **without saving anything, reading any credential value or sending anything**. Use it to check a change before you `PATCH` it.
+
+**Request Body** (every field optional)
+```json
+{
+  "credentials": ["uptime_kuma_*"],
+  "methods": ["GET"],
+  "request": {
+    "method": "GET",
+    "url": "https://uptime.lan/api/x?k={{vault:uptime_kuma_api}}",
+    "headers": { "Authorization": "Bearer {{vault:uptime_kuma_api:field:token}}" },
+    "body": null
+  }
+}
+```
+
+`credentials` and `methods` are the draft policy; a field left out means the key's saved value, and `null` is rejected. `request` has exactly the shape of `/v1/forward`'s `request` (same strictness) and asks "would this request be allowed under the draft?".
+
+**Response `200 OK`**
+```json
+{
+  "key": { "id": "550e8400-...", "name": "homelab-agent", "policy_set": true },
+  "saved_policy": { "credentials": ["*"], "methods": ["*"] },
+  "draft_policy": { "credentials": ["uptime_kuma_*"], "methods": ["GET"] },
+  "credentials": [ { "name": "uptime_kuma_api", "type": "login", "placeholder": "{{vault:uptime_kuma_api}}", "bound_to": ["https://uptime.lan"] } ],
+  "gained": [],
+  "lost": ["grafana_token", "proxmox_api_token"],
+  "request_check": {
+    "allowed": false,
+    "status": 403,
+    "reason": "credential_out_of_scope",
+    "message": "Credential nas_key is not available to this agent key",
+    "note": "The target host is checked ..."
+  }
+}
+```
+
+- `credentials`: what the key would reach under the draft, in the same format as `GET /v1/credentials?detail=true`. Names, ready-made placeholders and bound hosts only; never values.
+- `gained` / `lost`: credential names reachable under the draft but not the saved policy, and the reverse.
+- `request_check` (only when `request` is given): runs every check `/v1/forward` would run, in the same order and with the same status codes, reasons and messages: request validation, placeholder parsing, method policy, credential scope, the outbound target policy, then unknown / ambiguous / re-prompt / missing value or field / host binding. It never fetches a value or connects. `allowed: true` carries no reason. **The target check is by name and IP literal only**: the private-address check on a resolved DNS name happens only when a request is really forwarded.
+- With the vault locked, the answer comes from the cached credential list; with no cache it is `503`.
+
+**Errors**
+| Status | Condition |
+|---|---|
+| `400 Bad Request` | Malformed JSON, duplicate or unknown fields, `null` values, an invalid pattern or method |
+| `404 Not Found` | No key with that ID exists |
+| `503 Service Unavailable` | Vault locked and no credential list cached |
 
 ---
 
@@ -239,8 +375,6 @@ Revoke an agent key. The token is immediately removed from in-memory state and, 
 | Status | Condition |
 |---|---|
 | `404 Not Found` | No key with that ID exists |
-
-(`POST /v1/admin/keys` also returns `400` for malformed JSON, duplicate or unknown fields, or a `name` outside 1-128 characters.)
 
 ---
 

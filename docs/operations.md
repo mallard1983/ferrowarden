@@ -110,9 +110,11 @@ Replace `<ferrowarden-host>` in the examples below with the hostname or IP of th
 curl -X POST https://<ferrowarden-host>:3000/v1/admin/keys \
   -H "X-Admin-Key: $ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "descriptive-agent-name"}' \
+  -d '{"name": "descriptive-agent-name", "credentials": ["uptime_kuma_*"], "methods": ["GET"]}' \
   --cacert certs/server.crt
 ```
+
+`credentials` and `methods` are **required**: a key has no access until you say what it may use. `["*"]` allows everything, `[]` nothing; `null` is rejected. See [Key policy](api-reference.md#key-policy) for the pattern rules. Prefer the narrowest policy the agent needs (see [Staged rollout with scoped keys](#staged-rollout-with-scoped-keys)).
 
 Name keys descriptively. The name appears in audit log entries — if something unexpected happens, the name is how you identify which agent was responsible.
 
@@ -126,7 +128,69 @@ curl https://<ferrowarden-host>:3000/v1/admin/keys \
   --cacert certs/server.crt
 ```
 
-Token values are never returned. Only the ID, name, and creation time.
+Token values are never returned: only the ID, name, creation time and policy (`credentials`, `methods`, and `policy_set`).
+
+### Changing a Key's Policy
+
+```sh
+curl -X PATCH "https://<ferrowarden-host>:3000/v1/admin/keys/$KEY_ID" \
+  -H "X-Admin-Key: $ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"credentials": ["uptime_kuma_*", "lab_*"]}' \
+  --cacert certs/server.crt
+```
+
+A field you leave out is unchanged; a field you send replaces the old value (`null` and `{}` are rejected). The change takes effect for the very next request with that key's token, and is recorded as a `key_policy_change` event with the policy before and after.
+
+### Keys created with 0.1.0
+
+Keys written by 0.1.0 have no policy. They keep working as keys (the token is valid) but are **deny-all**: they list no credentials and cannot forward any placeholder or method, until you set one. They show `"policy_set": false` in the key listing, the startup event carries `keys_without_policy`, and a warning is logged at startup. To restore the previous behaviour for a key:
+
+```sh
+curl -X PATCH "https://<ferrowarden-host>:3000/v1/admin/keys/$KEY_ID" \
+  -H "X-Admin-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{"credentials": ["*"], "methods": ["*"]}' --cacert certs/server.crt
+```
+
+Better: narrow it. Set **both** fields: on a key without a policy, a field you do not send stays deny-all. Once patched the key is saved with an explicit policy and `policy_set` becomes `true`.
+
+### Staged Rollout with Scoped Keys
+
+Give every agent its own key and only the access it needs, then widen on demand. The preview endpoint shows the effect of a policy before you save it, without touching the vault values or the network.
+
+**A read-only monitoring key.**
+
+```sh
+curl -X POST https://<ferrowarden-host>:3000/v1/admin/keys \
+  -H "X-Admin-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{"name": "monitoring-agent", "credentials": ["uptime_kuma_*", "grafana_token"], "methods": ["GET", "HEAD"]}' \
+  --cacert certs/server.crt
+```
+
+The agent sees only those credentials in `GET /v1/credentials`, and a `POST` or a placeholder for anything else is refused with `403` before the vault or the target is touched.
+
+**A lab-only key.** Name your lab credentials with a common prefix and scope by it:
+
+```sh
+-d '{"name": "lab-agent", "credentials": ["lab_*"], "methods": ["*"]}'
+```
+
+A credential added to the vault later as `lab_new_switch` is reachable automatically; `prod_db` never is.
+
+**Check with preview before saving.** Say the lab key should also read `grafana_token`:
+
+```sh
+curl -X POST "https://<ferrowarden-host>:3000/v1/admin/keys/$KEY_ID/preview" \
+  -H "X-Admin-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{"credentials": ["lab_*", "grafana_token"],
+       "request": {"method": "GET", "url": "https://grafana.lan/api/health",
+                   "headers": {"Authorization": "Bearer {{vault:grafana_token}}"}}}' \
+  --cacert certs/server.crt
+```
+
+The response lists what the key would reach (`credentials`), what the draft adds and removes against the saved policy (`gained`, `lost`) and whether that request would be allowed (`request_check`, with the same status and reason a real forward would give). Nothing is saved: run the `PATCH` when you are happy.
+
+**Watch for probing.** A scoped key that keeps asking for credentials outside its scope, or for methods it may not use, produces `forward` failures with reason `credential_out_of_scope` or `method_not_allowed` (the SIEM examples alert on both). That is either a misconfigured agent or an agent being steered; the response is the same whether or not the credential exists, so nothing is revealed to it.
 
 ### Revoking Keys
 
@@ -138,7 +202,7 @@ curl -X DELETE "https://<ferrowarden-host>:3000/v1/admin/keys/$KEY_ID" \
   --cacert certs/server.crt
 ```
 
-Revocation is immediate. The token is removed from in-memory state and, if `FERROWARDEN_KEYS_FILE` is configured, removed from the key store file. Any subsequent request using the revoked token will receive `401 Unauthorized`. The key will not be re-loaded on the next container restart.
+Revocation is immediate. The token is removed from in-memory state and, if `FERROWARDEN_KEYS_FILE` is configured, removed from the key store file. Any subsequent request using the revoked token will receive `401 Unauthorized`. Revoking an id that does not exist returns `404 Not Found`. The key will not be re-loaded on the next container restart.
 
 **Rotate keys when:**
 - You suspect the token was exposed (logs, error messages, screen sharing)

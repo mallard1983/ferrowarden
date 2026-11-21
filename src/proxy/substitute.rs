@@ -80,6 +80,7 @@ fn normalize_host(h: &str) -> String {
 }
 
 /// What to fetch for a validated placeholder, and whether to scrub it.
+#[derive(Debug)]
 enum Fetch {
     Builtin(&'static str),
     Field(String),
@@ -122,19 +123,35 @@ fn plan(p: &Placeholder, entry: &CredentialEntry) -> FerroResult<(Fetch, bool)> 
     }
 }
 
-/// Validate and fetch every placeholder for a request to `target`.
+/// The outcome of the check phase: every placeholder validated, and what to
+/// fetch for each. Holds no values.
+#[derive(Debug)]
+pub struct CredentialPlan {
+    items: Vec<PlannedItem>,
+}
+
+#[derive(Debug)]
+struct PlannedItem {
+    placeholder: Placeholder,
+    id: String,
+    fetch: Fetch,
+    scrub: bool,
+}
+
+/// Check phase: validate every placeholder for a request to `target` against
+/// the cached item metadata. Pure: no vault access and no I/O, so `/v1/forward`
+/// and the policy preview run exactly the same checks.
 ///
-/// Fails before fetching any value if an item is unknown or ambiguous, has
-/// master password re-prompt enabled, lacks the selected value or field, or
-/// (when `enforce_hosts` is set) is not bound to the target host.
-pub async fn resolve_credentials(
+/// Fails if an item is unknown or ambiguous, has master password re-prompt
+/// enabled, lacks the selected value or field, or (when `enforce_hosts` is
+/// set) is not bound to the target host.
+pub fn check_credentials(
     placeholders: &BTreeSet<Placeholder>,
     credentials: &CredentialMap,
     target: &Url,
     enforce_hosts: bool,
-    vault: &VaultClient,
-) -> FerroResult<ResolvedValues> {
-    let mut planned = Vec::with_capacity(placeholders.len());
+) -> FerroResult<CredentialPlan> {
+    let mut items = Vec::with_capacity(placeholders.len());
     for p in placeholders {
         let entries = credentials
             .get(&p.item)
@@ -157,19 +174,50 @@ pub async fn resolve_credentials(
                 }
             })?;
         }
-        planned.push((p.clone(), entry.id.clone(), fetch, scrub));
+        items.push(PlannedItem {
+            placeholder: p.clone(),
+            id: entry.id.clone(),
+            fetch,
+            scrub,
+        });
     }
+    Ok(CredentialPlan { items })
+}
 
+/// Fetch phase: get the values a validated plan calls for from the vault.
+pub async fn fetch_credentials(
+    plan: &CredentialPlan,
+    vault: &VaultClient,
+) -> FerroResult<ResolvedValues> {
     let mut values = ResolvedValues::new();
-    for (p, id, fetch, scrub) in planned {
-        let label = p.label();
-        let value = match fetch {
-            Fetch::Builtin(object) => vault.get_value(object, &id, &label).await?,
-            Fetch::Field(name) => vault.get_field(&id, &name, &label).await?,
+    for item in &plan.items {
+        let label = item.placeholder.label();
+        let value = match &item.fetch {
+            Fetch::Builtin(object) => vault.get_value(object, &item.id, &label).await?,
+            Fetch::Field(name) => vault.get_field(&item.id, name, &label).await?,
         };
-        values.insert(p, Resolved { value, scrub });
+        values.insert(
+            item.placeholder.clone(),
+            Resolved {
+                value,
+                scrub: item.scrub,
+            },
+        );
     }
     Ok(values)
+}
+
+/// Check then fetch. Fails before fetching any value if any check fails.
+#[cfg(test)]
+pub async fn resolve_credentials(
+    placeholders: &BTreeSet<Placeholder>,
+    credentials: &CredentialMap,
+    target: &Url,
+    enforce_hosts: bool,
+    vault: &VaultClient,
+) -> FerroResult<ResolvedValues> {
+    let plan = check_credentials(placeholders, credentials, target, enforce_hosts)?;
+    fetch_credentials(&plan, vault).await
 }
 
 /// Replace every placeholder in `input` with its resolved value. Placeholders
@@ -489,5 +537,64 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, FerroError::VaultUnavailable));
+    }
+
+    #[test]
+    fn check_phase_needs_no_vault_and_matches_resolve_errors() {
+        let mut creds = CredentialMap::new();
+        creds.insert(
+            "ok".into(),
+            vec![CredentialEntry::login("1", &["https://b.example"])],
+        );
+        creds.insert(
+            "dup".into(),
+            vec![
+                CredentialEntry::login("2", &[]),
+                CredentialEntry::login("3", &[]),
+            ],
+        );
+        let mut rp = CredentialEntry::login("4", &["https://b.example"]);
+        rp.reprompt = true;
+        creds.insert("guarded".into(), vec![rp]);
+        let target = url("https://b.example/");
+        let check = |p: Placeholder| {
+            check_credentials(&BTreeSet::from([p]), &creds, &target, true).map(|_| ())
+        };
+
+        assert!(check(ph("ok", Selector::Password)).is_ok());
+        assert!(matches!(
+            check(ph("missing", Selector::Password)),
+            Err(FerroError::UnknownPlaceholder(_))
+        ));
+        assert!(matches!(
+            check(ph("ok", Selector::Username)),
+            Err(FerroError::UnknownPlaceholder(_))
+        ));
+        assert!(matches!(
+            check(ph("dup", Selector::Password)),
+            Err(FerroError::AmbiguousCredential(_))
+        ));
+        assert!(matches!(
+            check(ph("guarded", Selector::Password)),
+            Err(FerroError::RepromptRequired(_))
+        ));
+        let other = url("https://evil.example/");
+        assert!(matches!(
+            check_credentials(
+                &BTreeSet::from([ph("ok", Selector::Password)]),
+                &creds,
+                &other,
+                true
+            ),
+            Err(FerroError::CredentialHostNotAllowed { .. })
+        ));
+        // Binding enforcement off: the check passes.
+        assert!(check_credentials(
+            &BTreeSet::from([ph("ok", Selector::Password)]),
+            &creds,
+            &other,
+            false
+        )
+        .is_ok());
     }
 }

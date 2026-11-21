@@ -212,7 +212,7 @@ ADMIN_KEY="$(cat secrets/ferrowarden_admin_key)"
 curl -s -X POST https://localhost:3000/v1/admin/keys \
   -H "X-Admin-Key: $ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "homelab-agent"}' \
+  -d '{"name": "homelab-agent", "credentials": ["*"], "methods": ["*"]}' \
   --cacert certs/server.crt    # omit if the certificate is from a trusted CA
 ```
 
@@ -222,11 +222,16 @@ Response:
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "name": "homelab-agent",
   "token": "AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890",
-  "created_at": "2026-11-20T12:00:00Z"
+  "created_at": "2026-11-20T12:00:00Z",
+  "credentials": ["*"],
+  "methods": ["*"],
+  "policy_set": true
 }
 ```
 
-**The token is shown exactly once.** Copy it and store it in your agent's configuration as an environment variable. It cannot be retrieved again — if it is lost, revoke it and create a new one.
+`credentials` and `methods` are **required**: a key has no access until you say what it may use. `["*"]` allows everything (fine for a first test); `[]` allows nothing. For real agents, scope each key to the credentials it needs, for example `"credentials": ["uptime_kuma_*"], "methods": ["GET"]`. See [Staged rollout with scoped keys](operations.md#staged-rollout-with-scoped-keys).
+
+**The token is shown exactly once. Copy it and store it in your agent's configuration as an environment variable. It cannot be retrieved again — if it is lost, revoke it and create a new one.
 
 ---
 

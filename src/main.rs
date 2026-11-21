@@ -5,6 +5,7 @@ mod events;
 mod keys;
 mod middleware;
 mod net;
+mod policy;
 mod proxy;
 mod state;
 mod vault;
@@ -18,6 +19,33 @@ use config::{split_list, Config, UnlockMode};
 use events::{Action, EventLog, SecurityEvent};
 use state::AppState;
 use vault::refresh::{spawn_refresher, unlock_from_file};
+
+/// The one `startup` event: security-relevant settings, never secrets.
+/// `keys_without_policy` counts 0.1.0 key entries that run deny-all.
+fn startup_event(
+    config: &Config,
+    agent_key_count: usize,
+    keys_without_policy: usize,
+) -> SecurityEvent {
+    SecurityEvent::new(Action::Startup)
+        .detail("version", env!("CARGO_PKG_VERSION"))
+        .detail("tls_enabled", config.tls_enabled)
+        .detail(
+            "unlock_mode",
+            match config.unlock_mode {
+                UnlockMode::File => "file",
+                UnlockMode::Manual => "manual",
+            },
+        )
+        .detail("keys_without_policy", keys_without_policy)
+        .detail("enforce_credential_hosts", config.enforce_credential_hosts)
+        .detail("allow_private_targets", config.allow_private_targets)
+        .detail("allowed_targets", split_list(&config.allowed_targets).len())
+        .detail("trusted_proxies", split_list(&config.trusted_proxies).len())
+        .detail("api_prefix_set", !config.api_prefix.is_empty())
+        .detail("agent_key_count", agent_key_count)
+        .detail("sinks", config.events.enabled_sinks())
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -53,46 +81,29 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState::new(config.clone(), events.clone()));
 
-    // Load persisted agent keys if a key file is configured
+    // Load persisted agent keys if a key file is configured. Keys written by
+    // 0.1.0 carry no policy and load as deny-all; they are counted so the
+    // operator can see them (startup event, warning, `policy_set: false`).
+    let mut keys_without_policy: usize = 0;
     if let Some(ref path) = config.keys_file {
-        let stored = keys::load(path)?;
-        if !stored.is_empty() {
-            let mut map = state.agent_keys.write().await;
-            for k in stored {
-                map.insert(
-                    k.token_hash,
-                    crate::state::AgentKey {
-                        id: k.id,
-                        name: k.name,
-                        created_at: k.created_at,
-                    },
-                );
-            }
-            tracing::info!("Loaded {} agent key(s) from {:?}", map.len(), path);
-        }
+        keys_without_policy = state.load_keys(path).await?;
+    }
+    if keys_without_policy > 0 {
+        tracing::warn!(
+            keys_without_policy,
+            "agent keys without a policy are deny-all: they can neither list nor use credentials. \
+             Set a policy with PATCH /v1/admin/keys/{{id}} and a body of \
+             {{\"credentials\": [...], \"methods\": [...]}} (use [\"*\"] to allow everything)."
+        );
     }
 
     // One startup event with the security-relevant settings (never secrets;
     // the API prefix is reported only as set / not set).
-    events.emit(
-        SecurityEvent::new(Action::Startup)
-            .detail("version", env!("CARGO_PKG_VERSION"))
-            .detail("tls_enabled", config.tls_enabled)
-            .detail(
-                "unlock_mode",
-                match config.unlock_mode {
-                    UnlockMode::File => "file",
-                    UnlockMode::Manual => "manual",
-                },
-            )
-            .detail("enforce_credential_hosts", config.enforce_credential_hosts)
-            .detail("allow_private_targets", config.allow_private_targets)
-            .detail("allowed_targets", split_list(&config.allowed_targets).len())
-            .detail("trusted_proxies", split_list(&config.trusted_proxies).len())
-            .detail("api_prefix_set", !config.api_prefix.is_empty())
-            .detail("agent_key_count", state.agent_keys.read().await.len())
-            .detail("sinks", config.events.enabled_sinks()),
-    );
+    events.emit(startup_event(
+        &config,
+        state.agent_keys.read().await.len(),
+        keys_without_policy,
+    ));
 
     // File mode: read and use the password before accepting any requests.
     // unlock_from_file also syncs bw serve and loads the credential cache.

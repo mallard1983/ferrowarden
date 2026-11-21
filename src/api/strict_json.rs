@@ -114,12 +114,13 @@ fn describe(e: &serde_json::Error) -> String {
         Category::Io => return "request body could not be read".to_string(),
         Category::Syntax | Category::Eof => format!("malformed JSON: {msg} ({at})"),
         Category::Data => {
-            const SAFE: [&str; 5] = [
+            const SAFE: [&str; 6] = [
                 "duplicate key ",
                 "nesting deeper than ",
                 "unknown field `",
                 "missing field `",
                 "duplicate field `",
+                "policy field `",
             ];
             if SAFE.iter().any(|p| msg.starts_with(p)) {
                 format!("{msg} ({at})")
@@ -482,7 +483,15 @@ mod tests {
             .err()
             .unwrap();
         assert!(m.contains("unknown field `role`"), "{m}");
-        assert!(parse_strict::<CreateKeyRequest>(br#"{"name":"a"}"#).is_ok());
+        assert!(parse_strict::<CreateKeyRequest>(
+            br#"{"name":"a","credentials":["*"],"methods":["*"]}"#
+        )
+        .is_ok());
+        // The policy is mandatory.
+        let m = parse_strict::<CreateKeyRequest>(br#"{"name":"a"}"#)
+            .err()
+            .unwrap();
+        assert!(m.contains("missing field `credentials`"), "{m}");
         let m = parse_strict::<UnlockPayload>(br#"{"password":"p","remember":true}"#)
             .err()
             .unwrap();

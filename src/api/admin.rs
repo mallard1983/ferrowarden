@@ -9,11 +9,15 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::api::credentials::visible_details;
+use crate::api::forward::check_only;
 use crate::api::strict_json::StrictJson;
 use crate::error::{FerroError, FerroResult};
 use crate::events::{emit_rejected, truncate, Action, Reason, SecurityEvent};
 use crate::keys::{hash_token, load, save, StoredKey};
 use crate::middleware::request_context::RequestContext;
+use crate::policy::{self, KeyPolicy, Patch};
+use crate::proxy::forward::ProxyRequest;
 use crate::state::{AgentKey, AppState};
 
 #[derive(Deserialize)]
@@ -21,6 +25,39 @@ use crate::state::{AgentKey, AppState};
 pub struct CreateKeyRequest {
     /// Human-readable name for this agent (e.g. "homelab-claude")
     pub name: String,
+    /// Credential name patterns (`*` wildcard). Required: `["*"]` for every
+    /// credential, `[]` for none. `null` is rejected.
+    #[serde(deserialize_with = "policy::required_credentials")]
+    pub credentials: Vec<String>,
+    /// Allowed HTTP methods. Required: `["*"]` for all, `[]` for none.
+    #[serde(deserialize_with = "policy::required_methods")]
+    pub methods: Vec<String>,
+}
+
+/// `PATCH /v1/admin/keys/{id}`: a field that is left out is unchanged, one that
+/// is present replaces the old value, `null` is rejected.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PatchKeyRequest {
+    #[serde(default, deserialize_with = "policy::patch_credentials")]
+    pub credentials: Patch<Vec<String>>,
+    #[serde(default, deserialize_with = "policy::patch_methods")]
+    pub methods: Patch<Vec<String>>,
+}
+
+/// `POST /v1/admin/keys/{id}/preview`
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewRequest {
+    /// Draft credential patterns; absent = the saved value.
+    #[serde(default, deserialize_with = "policy::patch_credentials")]
+    pub credentials: Patch<Vec<String>>,
+    /// Draft methods; absent = the saved value.
+    #[serde(default, deserialize_with = "policy::patch_methods")]
+    pub methods: Patch<Vec<String>>,
+    /// A request to check against the draft policy (same shape as `/v1/forward`).
+    #[serde(default, deserialize_with = "policy::some_not_null")]
+    pub request: Option<ProxyRequest>,
 }
 
 #[derive(Serialize)]
@@ -30,6 +67,9 @@ pub struct CreateKeyResponse {
     /// The token value — shown only once at creation, never stored in plaintext.
     pub token: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub credentials: Vec<String>,
+    pub methods: Vec<String>,
+    pub policy_set: bool,
 }
 
 #[derive(Serialize)]
@@ -37,6 +77,26 @@ pub struct KeySummary {
     pub id: String,
     pub name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Credential patterns the key may use (`["*"]` = all, `[]` = none).
+    pub credentials: Vec<String>,
+    /// Methods the key may use (`["*"]` = all, `[]` = none).
+    pub methods: Vec<String>,
+    /// False for a key created with 0.1.0 that has no policy yet: it is
+    /// deny-all until one is set with PATCH.
+    pub policy_set: bool,
+}
+
+impl KeySummary {
+    fn new(k: &AgentKey) -> Self {
+        Self {
+            id: k.id.clone(),
+            name: k.name.clone(),
+            created_at: k.created_at,
+            credentials: k.policy.credentials.clone(),
+            methods: k.policy.methods.clone(),
+            policy_set: k.policy_set,
+        }
+    }
 }
 
 /// POST /v1/admin/keys
@@ -69,7 +129,9 @@ pub async fn create_key(
                     .request(&ctx)
                     .status(StatusCode::CREATED.as_u16())
                     .detail("key_id", created.id.as_str())
-                    .detail_str("key_name", &created.name),
+                    .detail_str("key_name", &created.name)
+                    .detail("credentials", created.credentials.clone())
+                    .detail("methods", created.methods.clone()),
             );
             Ok((StatusCode::CREATED, Json(created)))
         }
@@ -101,6 +163,8 @@ async fn create_key_inner(
         ));
     }
 
+    let policy = KeyPolicy::from_raw(req.credentials, req.methods)?;
+
     // Serialize key-file updates: without this, two concurrent creates (or a
     // create and a revoke) can each read the old file and drop the other's change.
     let _guard = state.keys_file_lock.lock().await;
@@ -110,12 +174,13 @@ async fn create_key_inner(
     if let Some(ref path) = state.config.keys_file {
         let mut stored = load(path)
             .map_err(|e| FerroError::Internal(format!("Failed to read key file: {e}")))?;
-        stored.push(StoredKey {
-            id: id.clone(),
-            name: name.clone(),
-            token_hash: token_hash.clone(),
-            created_at: now,
-        });
+        stored.push(StoredKey::new(
+            id.clone(),
+            name.clone(),
+            token_hash.clone(),
+            now,
+            &policy,
+        ));
         save(path, &stored)
             .map_err(|e| FerroError::Internal(format!("Failed to write key file: {e}")))?;
     }
@@ -127,6 +192,8 @@ async fn create_key_inner(
             id: id.clone(),
             name: name.clone(),
             created_at: now,
+            policy: policy.clone(),
+            policy_set: true,
         },
     );
 
@@ -138,12 +205,15 @@ async fn create_key_inner(
         // Return the raw token once — the caller must store it
         token,
         created_at: now,
+        credentials: policy.credentials,
+        methods: policy.methods,
+        policy_set: true,
     })
 }
 
 /// GET /v1/admin/keys
 ///
-/// List all agent keys by id and name. Token values are never returned.
+/// List all agent keys by id, name and policy. Token values are never returned.
 /// Admin auth required.
 pub async fn list_keys(
     State(state): State<Arc<AppState>>,
@@ -153,14 +223,7 @@ pub async fn list_keys(
     authenticate_admin(&state, &ctx, &headers, "/v1/admin/keys")?;
 
     let keys = state.agent_keys.read().await;
-    let summaries: Vec<KeySummary> = keys
-        .values()
-        .map(|k| KeySummary {
-            id: k.id.clone(),
-            name: k.name.clone(),
-            created_at: k.created_at,
-        })
-        .collect();
+    let summaries: Vec<KeySummary> = keys.values().map(KeySummary::new).collect();
 
     state.events.emit(
         SecurityEvent::new(Action::KeyList)
@@ -238,6 +301,244 @@ async fn revoke_key_inner(state: &Arc<AppState>, id: &str) -> FerroResult<String
 
     Ok(name)
 }
+
+/// What a policy change did, for the response and the audit event.
+struct PolicyChange {
+    summary: KeySummary,
+    name: String,
+    before: KeyPolicy,
+    after: KeyPolicy,
+}
+
+/// PATCH /v1/admin/keys/{id}
+///
+/// Replace the policy fields that are present in the body; fields left out are
+/// unchanged. `null` and an empty body are rejected. Takes effect for the very
+/// next request. Admin auth required.
+pub async fn patch_key(
+    State(state): State<Arc<AppState>>,
+    ctx: RequestContext,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<StrictJson<PatchKeyRequest>, FerroError>,
+) -> FerroResult<Json<KeySummary>> {
+    const ENDPOINT: &str = "/v1/admin/keys/{id}";
+    authenticate_admin(&state, &ctx, &headers, ENDPOINT)?;
+    let req = match body {
+        Ok(StrictJson(req)) => req,
+        Err(e) => {
+            emit_rejected(&state.events, &ctx, None, ENDPOINT, &e);
+            return Err(e);
+        }
+    };
+
+    match patch_key_inner(&state, &id, req).await {
+        Ok(change) => {
+            state.events.emit(
+                SecurityEvent::new(Action::KeyPolicyChange)
+                    .request(&ctx)
+                    .status(200)
+                    .detail_str("key_id", &id)
+                    .detail_str("key_name", &change.name)
+                    .detail("before", change.before.to_json())
+                    .detail("after", change.after.to_json()),
+            );
+            Ok(Json(change.summary))
+        }
+        Err(e) => {
+            state.events.emit(
+                SecurityEvent::new(Action::KeyPolicyChange)
+                    .request(&ctx)
+                    .failed_with(&e)
+                    .status(e.status_code().as_u16())
+                    .detail_str("key_id", &id),
+            );
+            Err(e)
+        }
+    }
+}
+
+async fn patch_key_inner(
+    state: &Arc<AppState>,
+    id: &str,
+    req: PatchKeyRequest,
+) -> FerroResult<PolicyChange> {
+    if req.credentials.is_absent() && req.methods.is_absent() {
+        return Err(FerroError::InvalidRequest(
+            "nothing to change: send `credentials` and/or `methods`".to_string(),
+        ));
+    }
+
+    let _guard = state.keys_file_lock.lock().await;
+
+    let (name, before) = state
+        .agent_keys
+        .read()
+        .await
+        .values()
+        .find(|k| k.id == id)
+        .map(|k| (k.name.clone(), k.policy.clone()))
+        .ok_or(FerroError::AgentKeyNotFound)?;
+    // Absent fields keep the current value; on a legacy key that is deny-all.
+    let after = before.patched(req.credentials, req.methods)?;
+
+    // Persist first, so a failed write leaves memory and disk consistent. The
+    // entry is saved with both fields explicit, which also marks a legacy key
+    // as having a policy.
+    if let Some(ref path) = state.config.keys_file {
+        let mut stored = load(path)
+            .map_err(|e| FerroError::Internal(format!("Failed to read key file: {e}")))?;
+        let entry = stored
+            .iter_mut()
+            .find(|k| k.id == id)
+            // The key is in memory but not on disk: the two have diverged
+            // (e.g. the file was edited by hand). Fail loudly rather than
+            // report "not found" for a key that is in use.
+            .ok_or_else(|| {
+                FerroError::Internal("Agent key is loaded but missing from the key file".into())
+            })?;
+        entry.set_policy(&after);
+        save(path, &stored)
+            .map_err(|e| FerroError::Internal(format!("Failed to write key file: {e}")))?;
+    }
+
+    let mut keys = state.agent_keys.write().await;
+    let mut summary = None;
+    for key in keys.values_mut().filter(|k| k.id == id) {
+        key.policy = after.clone();
+        key.policy_set = true;
+        summary.get_or_insert_with(|| KeySummary::new(key));
+    }
+    drop(keys);
+
+    tracing::info!(agent_id = %id, "Agent key policy changed");
+
+    Ok(PolicyChange {
+        summary: summary.ok_or(FerroError::AgentKeyNotFound)?,
+        name,
+        before,
+        after,
+    })
+}
+
+/// POST /v1/admin/keys/{id}/preview
+///
+/// Show what a draft policy would allow, without saving anything, reading any
+/// credential value or sending anything: the credentials it reaches, what it
+/// gains and loses against the saved policy, and optionally whether one
+/// request would be allowed. Admin auth required.
+pub async fn preview_key(
+    State(state): State<Arc<AppState>>,
+    ctx: RequestContext,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<StrictJson<PreviewRequest>, FerroError>,
+) -> FerroResult<Json<serde_json::Value>> {
+    const ENDPOINT: &str = "/v1/admin/keys/{id}/preview";
+    authenticate_admin(&state, &ctx, &headers, ENDPOINT)?;
+    let req = match body {
+        Ok(StrictJson(req)) => req,
+        Err(e) => {
+            emit_rejected(&state.events, &ctx, None, ENDPOINT, &e);
+            return Err(e);
+        }
+    };
+
+    match preview_inner(&state, &id, req).await {
+        Ok((body, name, checked)) => {
+            state.events.emit(
+                SecurityEvent::new(Action::PolicyPreview)
+                    .request(&ctx)
+                    .status(200)
+                    .detail_str("key_id", &id)
+                    .detail_str("key_name", &name)
+                    .detail("request_checked", checked),
+            );
+            Ok(Json(body))
+        }
+        Err(e) => {
+            state.events.emit(
+                SecurityEvent::new(Action::PolicyPreview)
+                    .request(&ctx)
+                    .failed_with(&e)
+                    .status(e.status_code().as_u16())
+                    .detail_str("key_id", &id),
+            );
+            Err(e)
+        }
+    }
+}
+
+/// Returns the response body, the key name and whether a request was checked.
+async fn preview_inner(
+    state: &Arc<AppState>,
+    id: &str,
+    req: PreviewRequest,
+) -> FerroResult<(serde_json::Value, String, bool)> {
+    let key = state
+        .agent_keys
+        .read()
+        .await
+        .values()
+        .find(|k| k.id == id)
+        .cloned()
+        .ok_or(FerroError::AgentKeyNotFound)?;
+    let saved = key.policy.clone();
+    // Absent fields fall back to the saved value.
+    let draft = saved.patched(req.credentials, req.methods)?;
+
+    // Like GET /v1/credentials, but a locked vault is fine while a credential
+    // cache exists: only names and metadata are used, never values.
+    if state.is_locked().await
+        && state.credentials.read().await.is_empty()
+        && !crate::vault::refresh::reunlock_if_possible(state).await
+    {
+        return Err(FerroError::VaultLocked);
+    }
+    let credentials = state.credentials.read().await.clone();
+
+    let details = visible_details(&credentials, &draft);
+    let mut gained = Vec::new();
+    let mut lost = Vec::new();
+    for name in credentials.keys() {
+        match (saved.allows_credential(name), draft.allows_credential(name)) {
+            (false, true) => gained.push(name.clone()),
+            (true, false) => lost.push(name.clone()),
+            _ => {}
+        }
+    }
+
+    let checked = req.request.is_some();
+    let request_check = match &req.request {
+        None => None,
+        Some(request) => Some(match check_only(state, &draft, request).await {
+            Ok(()) => serde_json::json!({ "allowed": true, "note": DNS_NOTE }),
+            Err(e) => serde_json::json!({
+                "allowed": false,
+                "status": e.status_code().as_u16(),
+                "reason": Reason::from(&e),
+                "message": e.to_string(),
+                "note": DNS_NOTE,
+            }),
+        }),
+    };
+
+    let mut body = serde_json::json!({
+        "key": { "id": key.id, "name": key.name, "policy_set": key.policy_set },
+        "saved_policy": saved.to_json(),
+        "draft_policy": draft.to_json(),
+        "credentials": details,
+        "gained": gained,
+        "lost": lost,
+    });
+    if let Some(check) = request_check {
+        body["request_check"] = check;
+    }
+    Ok((body, key.name, checked))
+}
+
+/// The one check a preview cannot run: it never resolves or connects.
+const DNS_NOTE: &str = "The target host is checked against the outbound policy by name and IP literal only; private-address checks on resolved DNS names happen when a request is actually forwarded.";
 
 /// Default number of events returned by `GET /v1/admin/audit`.
 const DEFAULT_AUDIT_LIMIT: usize = 100;

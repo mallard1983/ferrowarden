@@ -111,7 +111,7 @@ docker compose up -d
 # 4. Create an agent key — the token is shown ONCE
 curl -s -X POST https://localhost:3000/v1/admin/keys --cacert certs/server.crt \
   -H "X-Admin-Key: $(cat secrets/ferrowarden_admin_key)" \
-  -H "Content-Type: application/json" -d '{"name": "my-agent"}'
+  -H "Content-Type: application/json"   -d '{"name": "my-agent", "credentials": ["my_api_*"], "methods": ["GET"]}'
 
 # 5. Use the proxy (the item "my_api_token" must list https://api.example.com as a URI)
 curl -s -X POST https://localhost:3000/v1/forward --cacert certs/server.crt \

@@ -33,10 +33,17 @@ pub struct ProxyRequest {
 }
 
 impl ProxyRequest {
+    /// The method, upper-cased. Only meaningful after [`validate`](Self::validate).
+    pub fn normalized_method(&self) -> String {
+        self.method.to_ascii_uppercase()
+    }
+
     /// Reject requests that are ambiguous even though they parsed: header names
     /// that differ only by case are distinct JSON keys but the same HTTP header,
     /// so the agent could be stacking values the target resolves differently.
     pub fn validate(&self) -> FerroResult<()> {
+        // Only the standard methods are forwarded, whatever the key's policy.
+        crate::policy::normalize_method(&self.method)?;
         let mut seen = std::collections::HashSet::new();
         for name in self.headers.keys() {
             if !seen.insert(name.to_ascii_lowercase()) {
