@@ -136,7 +136,15 @@ echo -n "user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" > secrets/bw_client_id
 echo -n "YourClientSecretHere" > secrets/bw_client_secret
 ```
 
-Add at least one credential to your vault via the web UI. You can add more later — the name you give it here is what you will use in `{{vault:name}}` placeholders.
+Add at least one credential to your vault via the web UI, as a **Login** item. You can add more later.
+
+- The item **name** is what agents use in `{{vault:name}}` placeholders. Names must be unique across login items — a duplicated name is refused as ambiguous.
+- The item **password** is the value that gets substituted.
+- The item **URIs** decide where the credential may be sent. Add one URI per service it belongs to, e.g. `https://api.example.com` or `https://proxmox.lan:8006`. Ferrowarden refuses to send a credential to any other host, and an item with no URIs cannot be used. See [Security Model §13](security.md#13-credential-host-binding) for the matching rules.
+
+If the service lives on your private network (e.g. `192.168.1.0/24` or `proxmox.lan`), also add it to `allowed_targets` (`FERROWARDEN_ALLOWED_TARGETS`) — private and internal addresses are blocked by default.
+
+New items and URI changes are picked up automatically within `refresh_interval_secs` (default 5 minutes).
 
 ---
 
@@ -250,6 +258,13 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `tls_enabled` | `FERROWARDEN_TLS_ENABLED` | `true` |
 | `tls_cert_file` | `FERROWARDEN_TLS_CERT_FILE` | *(required when tls_enabled)* |
 | `tls_key_file` | `FERROWARDEN_TLS_KEY_FILE` | *(required when tls_enabled)* |
+| `allowed_targets` | `FERROWARDEN_ALLOWED_TARGETS` | *(empty)* — comma-separated CIDRs, IPs or host names of internal targets agents may reach |
+| `allow_private_targets` | `FERROWARDEN_ALLOW_PRIVATE_TARGETS` | `false` — allow all private/internal targets (bw serve stays blocked) |
+| `enforce_credential_hosts` | `FERROWARDEN_ENFORCE_CREDENTIAL_HOSTS` | `true` — only send credentials to hosts in their vault item URIs |
+| `refresh_interval_secs` | `FERROWARDEN_REFRESH_INTERVAL_SECS` | `300` — sync/refresh interval; `0` disables |
+| `max_response_bytes` | `FERROWARDEN_MAX_RESPONSE_BYTES` | `10485760` (10 MiB) |
+| `forward_timeout_secs` | `FERROWARDEN_FORWARD_TIMEOUT_SECS` | `30` |
+| `trusted_proxies` | `FERROWARDEN_TRUSTED_PROXIES` | *(empty)* — CIDRs/IPs of reverse proxies whose `X-Forwarded-For` is trusted for rate limiting |
 | *(env only)* | `FERROWARDEN_LOG_LEVEL` | `info` — requires restart to change |
 
 ---

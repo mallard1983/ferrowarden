@@ -4,6 +4,7 @@ mod config;
 mod error;
 mod keys;
 mod middleware;
+mod net;
 mod proxy;
 mod state;
 mod vault;
@@ -15,7 +16,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use audit::AuditLog;
 use config::{Config, UnlockMode};
 use state::AppState;
-use vault::{read_password_file, unlock_vault, VaultClient};
+use vault::refresh::{spawn_refresher, unlock_from_file};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -64,28 +65,26 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // File mode: read and use the password before accepting any requests
+    // File mode: read and use the password before accepting any requests.
+    // unlock_from_file also syncs bw serve and loads the credential cache.
     if config.unlock_mode == UnlockMode::File {
-        let path = config
-            .unlock_file
-            .as_ref()
-            .expect("unlock_file required in file mode");
-
-        tracing::info!("File unlock mode: reading password from {:?}", path);
-
-        let password = read_password_file(path)?;
-        unlock_vault(&config.bw_serve_url, password).await?;
-
-        // Populate credential name cache
-        let vault_client = VaultClient::new(config.bw_serve_url.clone());
-        let names = vault_client.list_item_names().await?;
-        *state.credential_names.write().await = names;
-
-        state.set_unlocked().await;
-
+        tracing::info!("File unlock mode: reading password from {:?}", config.unlock_file);
+        unlock_from_file(&state).await?;
         tracing::info!("Vault unlocked via file mode");
     } else {
         tracing::info!("Manual unlock mode: POST /v1/unlock with admin key to unlock the vault");
+    }
+
+    // Periodic sync/refresh; also re-unlocks in file mode if bw serve restarts.
+    spawn_refresher(state.clone());
+
+    if config.enforce_credential_hosts {
+        tracing::info!("Credential host binding enforced: credentials are only sent to hosts in their vault item URIs");
+    } else {
+        tracing::warn!("enforce_credential_hosts = false: any agent can send any credential to any reachable host");
+    }
+    if config.allow_private_targets {
+        tracing::warn!("allow_private_targets = true: agents may reach private/internal addresses (bw serve is still blocked)");
     }
 
     let router = api::router(state);

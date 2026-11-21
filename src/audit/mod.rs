@@ -12,8 +12,11 @@ pub enum Outcome {
     VaultLocked,
     /// A placeholder referenced a credential that doesn't exist.
     UnknownCredential,
-    /// The forwarded request failed at the network level.
+    /// The forwarded request failed (network error, bad URL, oversized response).
     ForwardFailed,
+    /// The target was refused by the outbound policy, or a credential is not
+    /// bound to the target host.
+    Blocked,
     /// The agent presented an invalid or missing API key.
     #[allow(dead_code)]
     Unauthorized,
@@ -30,7 +33,8 @@ pub struct AuditEntry {
     pub agent_id: String,
     pub agent_name: String,
     pub method: String,
-    /// Target URL with any credentials stripped by the scrubber.
+    /// Target URL as the agent sent it — with placeholders, before
+    /// substitution — so it never contains credential values.
     pub target_url: String,
     /// Names of credentials resolved for this request.
     pub credential_names: Vec<String>,
@@ -76,7 +80,6 @@ impl AuditLog {
         if entries.len() >= self.capacity {
             entries.remove(0);
         }
-
         entries.push(entry);
     }
 
@@ -84,6 +87,28 @@ impl AuditLog {
     pub async fn recent(&self, limit: usize) -> Vec<AuditEntry> {
         let entries = self.entries.read().await;
         entries.iter().rev().take(limit).cloned().collect()
+    }
+}
+
+/// Build an audit entry for the common proxy request path.
+pub fn build_entry(
+    agent_id: &str,
+    agent_name: &str,
+    method: &str,
+    target_url: &str,
+    credential_names: Vec<String>,
+    outcome: Outcome,
+    response_status: Option<u16>,
+) -> AuditEntry {
+    AuditEntry {
+        timestamp: Utc::now(),
+        agent_id: agent_id.to_string(),
+        agent_name: agent_name.to_string(),
+        method: method.to_string(),
+        target_url: target_url.to_string(),
+        credential_names,
+        outcome,
+        response_status,
     }
 }
 
@@ -154,27 +179,5 @@ mod tests {
         assert_eq!(e.credential_names, vec!["cred_a"]);
         assert!(matches!(e.outcome, Outcome::ForwardFailed));
         assert!(e.response_status.is_none());
-    }
-}
-
-/// Build an audit entry for the common proxy request path.
-pub fn build_entry(
-    agent_id: &str,
-    agent_name: &str,
-    method: &str,
-    target_url: &str,
-    credential_names: Vec<String>,
-    outcome: Outcome,
-    response_status: Option<u16>,
-) -> AuditEntry {
-    AuditEntry {
-        timestamp: Utc::now(),
-        agent_id: agent_id.to_string(),
-        agent_name: agent_name.to_string(),
-        method: method.to_string(),
-        target_url: target_url.to_string(),
-        credential_names,
-        outcome,
-        response_status,
     }
 }

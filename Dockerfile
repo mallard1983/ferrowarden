@@ -5,7 +5,9 @@
 # the compiler, cargo, and all build tooling are absent at runtime.
 
 # ── Build stage ──────────────────────────────────────────────────────────────
-FROM rust:slim AS builder
+# Builder and runtime are pinned to the same Debian release (trixie) so the
+# binary is never linked against a newer glibc than the runtime provides.
+FROM rust:1.100-slim-trixie AS builder
 
 WORKDIR /build
 
@@ -25,7 +27,7 @@ RUN cargo build --release
 
 
 # ── Runtime stage ────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Install only what is needed at runtime:
 # - ca-certificates: TLS when ferrowarden makes outbound HTTPS calls

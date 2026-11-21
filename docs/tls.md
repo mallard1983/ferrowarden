@@ -30,6 +30,8 @@ Agent  ──HTTPS──►  Pangolin (Let's Encrypt cert)  ──HTTP──► 
 ```
 
 **When this is safe without internal TLS:**
+With a reverse proxy in front, every request reaches Ferrowarden from the proxy's IP, so all agents would share one rate-limit bucket. Set `FERROWARDEN_TRUSTED_PROXIES` to the proxy's address (e.g. its Docker network CIDR) and Ferrowarden will rate-limit by the client IP in `X-Forwarded-For`. Only list the proxy itself — any client in that range could otherwise forge the header.
+
 Pangolin and Ferrowarden must run on the same host (same Docker Compose stack or same machine). The HTTP hop between Pangolin and Ferrowarden is then on `localhost` or an internal bridge network — it never crosses a physical network segment. If they are on different hosts, that internal segment must also be encrypted (use a WireGuard tunnel, which Pangolin can provide).
 
 **Ferrowarden configuration (`docker-compose.yml`):**

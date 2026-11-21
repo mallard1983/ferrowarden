@@ -54,7 +54,7 @@ All fields in `request`:
 | `method` | string | yes | HTTP method (GET, POST, PUT, PATCH, DELETE, HEAD) |
 | `url` | string | yes | Full target URL — must start with `http://` or `https://` |
 | `headers` | object | no | Headers to send to the target — string values only |
-| `body` | string or JSON | no | Request body — string or any JSON value |
+| `body` | string or JSON | no | A JSON string is sent as raw text (e.g. form data); an object/array is sent as JSON (with `Content-Type: application/json` added if you did not set one) |
 
 **Response** `200 OK`:
 ```json
@@ -63,11 +63,14 @@ All fields in `request`:
   "headers": {
     "content-type": "application/json"
   },
-  "body": "..."
+  "body": "...",
+  "body_encoding": "utf8"
 }
 ```
 
-The `status` and `headers` are from the target service. The `body` is the target's response body — scrubbed to remove any credential-shaped content that might have been echoed back.
+The `status` and `headers` are from the target service. The `body` is the target's response body — scrubbed to remove the credential values used in the request (shown as `[REDACTED]`) and other credential-shaped content. If the response is binary, `body` is base64 and `body_encoding` is `"base64"`.
+
+**Each credential only works with its own service.** The operator binds every credential to the host(s) it belongs to. Using `{{vault:grafana_token}}` in a request to any other host returns `403` and nothing is sent.
 
 ---
 
@@ -166,11 +169,13 @@ All errors return `{"error": "message"}` with an appropriate HTTP status.
 
 | Status | Meaning | What to do |
 |---|---|---|
-| `400 Bad Request` | Invalid target URL or HTTP method | Check the URL scheme (must be http/https) and method spelling |
+| `400 Bad Request` | Invalid target URL or HTTP method, or a placeholder in the URL host/port | Check the URL scheme (must be http/https) and method spelling; put placeholders only in the path, query, headers or body |
 | `401 Unauthorized` | Missing or invalid `X-Agent-Key` | Your token is wrong or has been revoked; contact the operator |
+| `403 Forbidden` | The credential is not allowed for this host, or the target is blocked (internal address, the vault backend) | Do not retry with another host. Tell the user which credential and host were refused; the operator must add the host to the vault item's URIs or to `allowed_targets` |
+| `409 Conflict` | The credential name matches more than one vault item | Tell the user; the operator must rename one of the items |
 | `422 Unprocessable Entity` | Placeholder references an unknown credential name | Call `GET /v1/credentials` and use an exact name from the list |
 | `429 Too Many Requests` | Rate limit exceeded | Wait the number of seconds in the `Retry-After` header, then retry |
-| `502 Bad Gateway` | Could not reach the target service | The target URL is unreachable; check the URL and network |
+| `502 Bad Gateway` | Could not reach the target service, timeout, or response too large | The target URL is unreachable; check the URL and network |
 | `503 Service Unavailable` | Vault is locked | Ferrowarden needs to be unlocked by the operator; wait and retry |
 
 ---
@@ -184,6 +189,10 @@ All errors return `{"error": "message"}` with an appropriate HTTP status.
 **Timeout is 30 seconds.** Target requests that take longer return a `502 Bad Gateway`.
 
 **Only http and https targets are allowed.** `file://`, `data:`, and other schemes are rejected with `400`.
+
+**Placeholders cannot go in the URL host or port.** `https://{{vault:x}}.example.com/` is rejected with `400`.
+
+**Internal targets are blocked unless the operator allows them.** Private and loopback addresses return `403` unless listed in the operator's `allowed_targets`. The vault backend itself is always blocked.
 
 **Rate limits apply per source IP.** You have 120 requests per minute with a burst of 20. Respect `Retry-After` headers on `429` responses.
 

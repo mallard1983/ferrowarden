@@ -19,7 +19,8 @@ pub async fn list_credentials(
         return Err(FerroError::VaultLocked);
     }
 
-    let names = state.credential_names.read().await.clone();
+    // BTreeMap keys: sorted, de-duplicated names. Values (ids, URIs) are not exposed.
+    let names = state.credentials.read().await.keys().cloned().collect();
 
     Ok(Json(names))
 }

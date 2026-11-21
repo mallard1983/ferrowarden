@@ -64,9 +64,16 @@ The agent sends the request it wants to make, with `{{vault:name}}` placeholders
 | `request.method` | string | yes | HTTP method (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`) |
 | `request.url` | string | yes | Target URL. Must be `http://` or `https://`. |
 | `request.headers` | object | no | Headers to send. `x-fw-*` headers are stripped. |
-| `request.body` | any JSON | no | Request body. Can be an object, array, string, or null. |
+| `request.body` | any JSON | no | Request body. A JSON **string** is sent as raw text (e.g. form data). An object, array, number or boolean is serialized and sent as JSON, with `Content-Type: application/json` added if you did not set one. `null` sends no body. |
 
-Placeholders (`{{vault:name}}`) may appear in the URL, any header value, or anywhere in the body (including nested inside JSON strings).
+Placeholders (`{{vault:name}}`) may appear in the URL's path, query or user info, in any header value, and anywhere in the body (inside JSON string values and object keys). They may **not** appear in the URL's scheme, host or port.
+
+In a JSON body, values are substituted into the parsed structure, so a credential containing `"` or `\` is escaped correctly.
+
+**Checks before anything is sent** (failures return an error and nothing is forwarded):
+- Every placeholder names exactly one vault login item (`422` unknown, `409` ambiguous).
+- Each credential is bound to the target: the target's host (and scheme/port, if the item's URI states them) matches one of the URIs on the vault item (`403`). See [Security Model §13](security.md#13-credential-host-binding).
+- The target is allowed by the outbound policy: never bw serve; private/internal addresses only if listed in `allowed_targets` (`403`). See [Security Model §14](security.md#14-outbound-target-policy-ssrf-protection).
 
 **Response `200 OK`**
 ```json
@@ -76,21 +83,25 @@ Placeholders (`{{vault:name}}`) may appear in the URL, any header value, or anyw
     "content-type": "application/json",
     "x-request-id": "abc123"
   },
-  "body": "{\"data\":[...]}"
+  "body": "{\"data\":[...]}",
+  "body_encoding": "utf8"
 }
 ```
 
-The `body` is always a string. If the target returned JSON, it is a JSON string (not parsed). Hop-by-hop headers (`transfer-encoding`, `connection`, etc.) are excluded from the response headers.
+The `body` is always a string. If the target returned JSON, it is a JSON string (not parsed). If the response was not valid UTF-8 (an image, a binary file), `body` is its base64 encoding and `body_encoding` is `"base64"`. Hop-by-hop headers (`transfer-encoding`, `connection`, etc.) and `content-length` are excluded from the response headers.
+
+Every credential value used in the request is redacted (`[REDACTED]`) wherever it appears in the response body or header values, in raw, JSON-escaped, URL-encoded or base64 form. Responses larger than `max_response_bytes` (default 10 MiB) are rejected.
 
 **Errors**
 | Status | Condition |
 |---|---|
-| `400 Bad Request` | Malformed request JSON |
+| `400 Bad Request` | Malformed request JSON; unparseable URL; scheme not http/https; invalid HTTP method; placeholder in the URL host/port |
 | `401 Unauthorized` | Missing or invalid agent key |
+| `403 Forbidden` | Credential not bound to the target host, or target refused by the outbound policy (bw serve, private/internal address not in `allowed_targets`) |
+| `409 Conflict` | Placeholder name matches more than one vault item |
 | `422 Unprocessable Entity` | Placeholder references an unknown credential name |
-| `503 Service Unavailable` | Vault is locked |
-| `502 Bad Gateway` | Forward to target failed (network error, timeout) |
-| `400 Bad Request` | Invalid target URL scheme (not http/https) or invalid HTTP method |
+| `502 Bad Gateway` | Forward to target failed (connection error, timeout) or response exceeded `max_response_bytes`. The message never includes the target URL. |
+| `503 Service Unavailable` | Vault is locked, or bw serve is unreachable |
 
 ---
 
@@ -105,7 +116,7 @@ Unlock the vault by supplying the master password. Only valid when `unlock_mode 
 Returns `404 Not Found` when `unlock_mode = file` (file mode unlocks automatically at startup; this endpoint is disabled to prevent confusion).
 
 **Headers**
-- `X-Admin-Key: <key>` — required
+- `X-Admin-Key: <key>` — required (`Authorization: Bearer <key>` is also accepted, for compatibility with earlier releases)
 - `Content-Type: application/json` — required
 
 **Request Body**
@@ -115,15 +126,17 @@ Returns `404 Not Found` when `unlock_mode = file` (file mode unlocks automatical
 
 **Response `200 OK`**
 ```json
-{ "message": "Vault unlocked successfully" }
+{ "status": "unlocked" }
 ```
+
+On success Ferrowarden also syncs bw serve with Vaultwarden and reloads the credential list. This endpoint shares the admin rate limit (30/min, burst 5).
 
 **Errors**
 | Status | Condition |
 |---|---|
-| `401 Unauthorized` | Invalid admin key |
+| `401 Unauthorized` | Invalid admin key, or bw serve rejected the master password |
 | `404 Not Found` | Unlock mode is `file` |
-| `503 Service Unavailable` | bw serve unreachable or unlock failed |
+| `503 Service Unavailable` | bw serve unreachable |
 
 ---
 
@@ -245,8 +258,8 @@ Names are case-sensitive and must exactly match the credential name in Vaultward
 
 **Placement**
 Placeholders may appear anywhere in:
-- The request URL (e.g., in a query parameter)
+- The request URL's path, query string or user info — **not** its scheme, host or port
 - Any header value
-- The request body (as part of a JSON string value or a plain string)
+- The request body (inside JSON string values or object keys, or a raw string body)
 
 A single request may use multiple different placeholders. Duplicate placeholders in the same request (e.g., the same credential in two headers) are resolved with one vault call.

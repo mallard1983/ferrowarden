@@ -9,7 +9,8 @@ use crate::error::{FerroError, FerroResult};
 /// retain a copy. Returns Ok(()) on success.
 pub async fn unlock_vault(base_url: &str, password: Zeroizing<String>) -> FerroResult<()> {
     let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .no_proxy()
         .build()
         .map_err(|e| FerroError::Internal(e.to_string()))?;
 
@@ -28,7 +29,7 @@ pub async fn unlock_vault(base_url: &str, password: Zeroizing<String>) -> FerroR
         .json(&body)
         .send()
         .await
-        .map_err(|_| FerroError::UnlockFailed("bw serve unreachable".to_string()))?;
+        .map_err(|_| FerroError::VaultUnavailable)?;
 
     let status = resp.status();
 
@@ -86,7 +87,7 @@ mod tests {
     #[test]
     fn strips_trailing_newline() {
         let mut f = NamedTempFile::new().unwrap();
-        write!(f, "my_secure_password\n").unwrap();
+        writeln!(f, "my_secure_password").unwrap();
         let pw = read_password_file(f.path()).unwrap();
         assert_eq!(pw.as_str(), "my_secure_password");
     }

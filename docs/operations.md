@@ -350,14 +350,27 @@ $key   = -join (1..48 | ForEach-Object { $rng.GetBytes($buf); $chars[$buf[0] % $
 ### `503 Service Unavailable` on all requests
 
 The vault is locked. Check `GET /v1/admin/status`. If `locked: true`:
-- **File mode**: Check the startup logs for unlock errors. The password file may be wrong or the file may be missing.
+- **File mode**: Check the startup logs for unlock errors. The password file may be wrong or the file may be missing. If bw serve restarted, Ferrowarden notices on the next refresh (`refresh_interval_secs`, default 5 minutes) and re-unlocks it automatically from the password file.
 - **Manual mode**: The vault needs to be unlocked via `POST /v1/unlock`.
 
 ### `422 Unprocessable Entity` — unknown credential
 
-The placeholder name does not match any credential in the vault (or the vault was unlocked before that credential was added). Options:
+The placeholder name does not match any login item in the vault. Options:
 1. Check the credential name spelling — names are case-sensitive.
-2. The credential was added after the last unlock: restart in file mode, or re-unlock in manual mode to refresh the cache.
+2. The credential was added recently: Ferrowarden syncs bw serve and refreshes its list every `refresh_interval_secs` (default 5 minutes). Wait, or restart / re-unlock to refresh immediately.
+3. The item is not a **Login** item (secure notes, cards and identities have no password and are not listed).
+
+### `403 Forbidden` — credential not allowed for this host
+
+The error names the credential and host. The target does not match any URI on the vault item. Add the service's URL (e.g. `https://api.example.com` or `nas.lan`) to the item's URIs in Vaultwarden; the change applies after the next refresh.
+
+### `403 Forbidden` — target not allowed
+
+The target resolved to a private or internal address that is not in `allowed_targets`, or it is the bw serve endpoint (always refused). Add the host name, IP or CIDR to `FERROWARDEN_ALLOWED_TARGETS` and restart Ferrowarden.
+
+### `409 Conflict` — ambiguous credential
+
+Two or more login items share that name. Rename one of them in Vaultwarden.
 
 To list what credentials ferrowarden knows about:
 
@@ -372,6 +385,8 @@ curl https://<ferrowarden-host>:3000/v1/credentials \
 ```sh
 docker compose logs bw-serve
 ```
+
+bw-serve only runs `bw login` when the CLI is not already logged in, so restarts with a persistent `bw-data` volume work.
 
 Common causes:
 - Vaultwarden is not fully started when bw-serve attempts login — check Vaultwarden is healthy

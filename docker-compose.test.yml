@@ -24,7 +24,9 @@ services:
   # Allow signups during the initial setup run. The dev-setup script disables
   # this after account creation.
   vaultwarden:
-    image: vaultwarden/server:latest
+    # Pinned: bw CLI 2023.12.1 (see docker/bw-cli.Dockerfile) is verified
+    # against this release. Upgrade both deliberately and re-run the tests.
+    image: vaultwarden/server:1.37.5
     restart: unless-stopped
     volumes:
       - vaultwarden-test-data:/data
@@ -81,6 +83,10 @@ services:
       # network on the same host — there is no network hop to protect.
       # Production deployments must use tls_enabled = true.
       FERROWARDEN_TLS_ENABLED: "false"
+      # mock-api lives on a private Docker network; allow it explicitly.
+      FERROWARDEN_ALLOWED_TARGETS: "mock-api"
+      # Short refresh so tests see vault changes quickly.
+      FERROWARDEN_REFRESH_INTERVAL_SECS: "30"
     networks:
       - vault-internal
       - test-net

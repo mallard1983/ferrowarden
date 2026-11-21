@@ -72,9 +72,31 @@ pub fn save(path: &Path, keys: &[StoredKey]) -> io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    std::fs::write(&tmp, json)?;
+    write_private(&tmp, json.as_bytes())?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Write a file readable only by the owner (0600 on Unix) and flush it to disk
+/// before the rename, so the rename never exposes a partially written file.
+fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        // The mode only applies on creation; tighten a pre-existing tmp file too.
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    f.write_all(data)?;
+    f.sync_all()
 }
 
 #[cfg(test)]

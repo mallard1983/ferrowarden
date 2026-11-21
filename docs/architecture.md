@@ -38,8 +38,9 @@ Using an existing, audited password manager means we do not have to implement en
 `bw serve` is the official Bitwarden CLI running in server mode. It exposes a local REST API on port 8087 (default) for the locked/unlocked vault:
 
 - `POST /unlock` — unlock the vault session with the master password
-- `GET /list/object/items` — list credential names (not values)
-- `GET /object/password/:id` — retrieve a credential value by name
+- `POST /sync` — pull the latest vault contents from Vaultwarden
+- `GET /list/object/items` — list items (Ferrowarden keeps only names, ids and URIs)
+- `GET /object/password/:id` — retrieve a credential value by item id
 
 The key property: `bw serve` performs decryption locally. Credential values are decrypted on the host, in memory, and never transmitted over a network connection. The only network traffic between `bw serve` and Vaultwarden is the encrypted vault sync.
 
@@ -53,10 +54,11 @@ Ferrowarden is the proxy. It manages:
 - **Agent authentication**: `X-Agent-Key` header check on every request (constant-time comparison)
 - **Admin authentication**: Separate admin key for management operations
 - **Vault lock state**: Tracks whether `bw serve` has been unlocked; rejects requests when locked
-- **Credential name cache**: The list of available credential names, populated at unlock time
-- **Substitution**: Finds `{{vault:name}}` placeholders, validates names against the cache, fetches values, builds the substituted request
-- **Forwarding**: Sends the substituted request to the target, respecting a 30-second timeout with no redirect following
-- **Scrubbing**: Runs the response body through regex patterns that redact bearer tokens, API key JSON fields, Proxmox tokens, basic auth in URLs, and PEM private key blocks
+- **Credential cache**: Login item names, ids and URIs (never values), loaded at unlock and refreshed every `refresh_interval_secs` after a `bw serve` sync. The refresher also notices when bw serve has locked (e.g. after a restart) and, in file mode, re-unlocks it
+- **Target policy**: Checks every address the target resolves to (inside the DNS resolver, so there is no rebinding gap); refuses bw serve and, unless allowed, private/internal addresses
+- **Substitution**: Finds `{{vault:name}}` placeholders, validates names against the cache (known, unambiguous, bound to the target host via the item's URIs), fetches values by item id, and substitutes them into the URL, headers, and the parsed JSON body
+- **Forwarding**: Sends the substituted request to the target with a configurable timeout (default 30 seconds), no redirect following, no HTTP proxy, and a response size cap
+- **Scrubbing**: Removes every encoding of each substituted value from the response body, headers and errors, then runs regex patterns that redact bearer tokens, API key JSON fields, Proxmox tokens, basic auth in URLs, and PEM private key blocks
 - **Agent key persistence**: On create, appends a SHA-256 hash of the token to a JSON file (never the plaintext). On startup, re-loads those hashes so keys survive container restarts.
 - **Audit log**: Records every proxy request (credential names, outcome, response status) to a ring buffer and to structured log output
 

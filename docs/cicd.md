@@ -69,7 +69,7 @@ The integration tests are gated behind the `FERROWARDEN_INTEGRATION` environment
 
 ```sh
 # Unit tests only (no Docker required):
-cargo test --lib
+cargo test --bins   # binary crate: --lib would fail with "no library targets"
 
 # Unit + all non-integration tests:
 cargo test

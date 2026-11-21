@@ -97,6 +97,20 @@ impl TestEnv {
             .expect("forward request failed")
     }
 
+    /// Forward a request to an arbitrary URL (not necessarily the mock API).
+    async fn forward_url(&self, method: &str, url: &str, headers: Value, body: Option<Value>) -> reqwest::Response {
+        let payload = json!({
+            "request": { "method": method, "url": url, "headers": headers, "body": body }
+        });
+        self.client
+            .post(format!("{}/v1/forward", self.fw_url))
+            .header("X-Agent-Key", &self.agent_key)
+            .json(&payload)
+            .send()
+            .await
+            .expect("forward request failed")
+    }
+
     /// The URL the mock API is reachable at FROM INSIDE the Docker network.
     /// Ferrowarden forwards to this URL; the Docker DNS resolves "mock-api".
     fn mock_url_via_ferrowarden(&self) -> String {
@@ -621,4 +635,168 @@ async fn test_admin_status_shows_unlocked_and_credential_count() {
     );
 
     println!("Status: {}", serde_json::to_string_pretty(&status).unwrap());
+}
+
+// ── Leak-prevention tests ─────────────────────────────────────────────────────
+
+const TEST_API_TOKEN_VALUE: &str = "test-token-abc123def456";
+
+/// Case-insensitive header lookup in a captured mock-api request
+/// (HTTP/1 header names arrive lower-cased).
+fn captured_header<'a>(captured: &'a Value, name: &str) -> Option<&'a str> {
+    captured["headers"]
+        .as_object()?
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .and_then(|(_, v)| v.as_str())
+}
+
+/// Security property: a target that echoes a credential back (like httpbin's
+/// /anything) must not leak it to the agent. The scrubber removes the exact
+/// value from the response body, whatever field it appears in.
+#[tokio::test]
+async fn test_echoed_credential_is_scrubbed_from_body() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    let resp = env.forward(
+        "GET",
+        "/echo",
+        json!({ "X-Arbitrary-Name": "{{vault:test_api_token}}" }),
+        None,
+    ).await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+
+    // The target really received the credential...
+    let captured = env.last_captured_request().await;
+    assert_eq!(captured_header(&captured, "X-Arbitrary-Name"), Some(TEST_API_TOKEN_VALUE));
+    // ...but the agent never sees it.
+    assert!(!text.contains(TEST_API_TOKEN_VALUE), "credential leaked via echo: {text}");
+    assert!(text.contains("[REDACTED]"));
+}
+
+/// Security property: credentials echoed in response headers are scrubbed too.
+#[tokio::test]
+async fn test_echoed_credential_is_scrubbed_from_headers() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    let resp = env.forward(
+        "GET",
+        "/echo-header",
+        json!({ "X-Arbitrary-Name": "{{vault:test_api_token}}" }),
+        None,
+    ).await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(!text.contains(TEST_API_TOKEN_VALUE), "credential leaked via header echo: {text}");
+}
+
+/// Security property: the agent cannot use the proxy to call bw serve
+/// directly. bw serve's /object/password/<id> returns plaintext passwords.
+#[tokio::test]
+async fn test_vault_backend_is_not_a_valid_target() {
+    let Some(env) = TestEnv::load() else { return };
+
+    for url in [
+        "http://bw-serve:8087/list/object/items",
+        "http://bw-serve:8087/object/password/test_api_token",
+        "http://BW-SERVE:8087/status",
+    ] {
+        let resp = env.forward_url("GET", url, json!({}), None).await;
+        assert_eq!(resp.status(), 403, "{url} must be refused");
+        let text = resp.text().await.unwrap();
+        assert!(!text.contains(TEST_API_TOKEN_VALUE), "{text}");
+    }
+}
+
+/// Security property: internal hosts not listed in allowed_targets are refused.
+#[tokio::test]
+async fn test_unlisted_internal_target_is_blocked() {
+    let Some(env) = TestEnv::load() else { return };
+
+    for url in [
+        "http://vaultwarden/api/config",
+        "http://127.0.0.1:3000/health",
+        "http://169.254.169.254/latest/meta-data/",
+    ] {
+        let resp = env.forward_url("GET", url, json!({}), None).await;
+        assert_eq!(resp.status(), 403, "{url} must be refused");
+    }
+}
+
+/// Security property: a credential is only sent to hosts in its vault item's
+/// URIs. test_unbound is bound to https://api.example.com, so ferrowarden must
+/// refuse to send it to mock-api — and must not contact mock-api at all.
+#[tokio::test]
+async fn test_credential_not_sent_to_unbound_host() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    let resp = env.forward(
+        "GET",
+        "/api/unbound",
+        json!({ "Authorization": "Bearer {{vault:test_unbound}}" }),
+        None,
+    ).await;
+    assert_eq!(resp.status(), 403);
+    assert!(env.all_captured_requests().await.is_empty(), "request must not be forwarded");
+}
+
+/// Security property: a placeholder cannot choose the destination host (the
+/// value would leak through DNS and to whoever controls that name).
+#[tokio::test]
+async fn test_placeholder_in_host_is_rejected() {
+    let Some(env) = TestEnv::load() else { return };
+
+    let resp = env.forward_url(
+        "GET",
+        "http://{{vault:test_api_token}}.mock-api:7777/",
+        json!({}),
+        None,
+    ).await;
+    assert_eq!(resp.status(), 400);
+}
+
+/// Correctness: credential values containing JSON metacharacters (" and \)
+/// are escaped when substituted into a JSON body, so the body stays valid JSON
+/// and cannot be altered structurally.
+#[tokio::test]
+async fn test_json_body_with_special_characters_stays_valid() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    let resp = env.forward(
+        "POST",
+        "/api/login",
+        json!({}),
+        Some(json!({ "user": "admin", "password": "{{vault:test_special_chars}}" })),
+    ).await;
+    assert_eq!(resp.status(), 200);
+
+    let captured = env.last_captured_request().await;
+    let body: Value = serde_json::from_str(captured["body"].as_str().unwrap())
+        .expect("forwarded body must be valid JSON");
+    assert_eq!(body["password"], r#"quote"back\slash-55555"#);
+    assert_eq!(body.as_object().unwrap().len(), 2);
+    assert_eq!(captured_header(&captured, "Content-Type"), Some("application/json"));
+}
+
+/// Correctness: a JSON string body is sent as raw text, not as a quoted JSON string.
+#[tokio::test]
+async fn test_string_body_is_sent_raw() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    let resp = env.forward(
+        "POST",
+        "/api/form",
+        json!({ "Content-Type": "application/x-www-form-urlencoded" }),
+        Some(json!("token={{vault:test_api_token}}&x=1")),
+    ).await;
+    assert_eq!(resp.status(), 200);
+
+    let captured = env.last_captured_request().await;
+    assert_eq!(captured["body"], format!("token={TEST_API_TOKEN_VALUE}&x=1"));
 }

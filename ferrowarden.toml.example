@@ -63,6 +63,39 @@ unlock_file = "/run/secrets/bw_master_password"
 # keys_file = "/data/agent_keys.json"
 
 
+# ── Outbound targets and credential binding ─────────────────────────────────
+
+# Credentials are only sent to hosts listed in their Vaultwarden login item's
+# URIs (e.g. https://api.example.com, nas.lan, https://proxmox.lan:8006).
+# An item with no URIs cannot be used. Turning this off lets any agent send
+# any credential to any reachable host — including one that echoes it back.
+enforce_credential_hosts = true
+
+# Private, loopback, link-local (cloud metadata) and other internal addresses
+# are blocked as targets by default. List the internal targets agents need:
+# CIDRs, single IPs, or host names, comma-separated. bw serve is always blocked.
+# allowed_targets = "192.168.1.0/24,proxmox.lan"
+
+# Allow ALL private/internal targets. Prefer allowed_targets.
+allow_private_targets = false
+
+# Seconds between bw serve syncs / credential cache refreshes. The refresher
+# also re-unlocks bw serve in file mode if it restarted. 0 disables it.
+refresh_interval_secs = 300
+
+# Forwarded request timeout (seconds) and maximum response size (bytes).
+forward_timeout_secs = 30
+max_response_bytes = 10485760
+
+
+# ── Rate limiting behind a reverse proxy ────────────────────────────────────
+
+# CIDRs/IPs of reverse proxies in front of ferrowarden (e.g. Pangolin). When a
+# request comes from one of these, the client IP for rate limiting is read from
+# X-Forwarded-For. Leave empty if clients connect directly.
+# trusted_proxies = "172.16.0.0/12"
+
+
 # ── TLS ──────────────────────────────────────────────────────────────────────
 #
 # TLS is ENABLED by default. You must supply a certificate and key before

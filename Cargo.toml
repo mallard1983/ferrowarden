@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 description = "A credential proxy for AI agents — substitutes Vaultwarden secrets into API calls without exposing values to the agent"
 license = "MIT"
-repository = "https://github.com/yourusername/ferrowarden"
 
 [dependencies]
 # Async runtime
@@ -54,8 +53,12 @@ rand = "0.9"
 # SHA-256 for token hashing in the key store (tokens are stored as hashes, never plaintext)
 sha2 = "0.10"
 
-# URL encoding for vault item name lookups
+# URL encoding for vault item lookups and response scrubbing variants
 urlencoding = "2"
+
+# Base64 encoding: scrubbing base64-encoded credential echoes and returning
+# non-UTF-8 response bodies to the agent
+base64 = "0.22"
 
 # Per-IP token bucket rate limiting. Keyed limiter maps source IP → token bucket.
 # Using 0.6 — verify compatibility before upgrading to 0.7+ (breaking API changes possible).

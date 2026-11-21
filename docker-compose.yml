@@ -23,7 +23,9 @@ services:
   # storage and the human-facing web vault UI for managing credentials.
   # Ferrowarden itself never talks directly to Vaultwarden — only bw serve does.
   vaultwarden:
-    image: vaultwarden/server:latest
+    # Pinned: bw CLI 2023.12.1 (see docker/bw-cli.Dockerfile) is verified
+    # against this release. Upgrade both deliberately and re-run the tests.
+    image: vaultwarden/server:1.37.5
     restart: unless-stopped
     volumes:
       - vaultwarden-data:/data
@@ -129,6 +131,16 @@ services:
       # Module-scoped: "ferrowarden=debug,tower_http=warn"
       # Changing this requires a container restart — intentional, see docs/logging.md.
       FERROWARDEN_LOG_LEVEL: "info"
+      # Outbound target policy. Private/internal addresses are blocked by
+      # default; list the internal hosts or ranges agents need to reach
+      # (comma-separated CIDRs, IPs or host names). bw serve is always blocked.
+      # FERROWARDEN_ALLOWED_TARGETS: "192.168.1.0/24,proxmox.lan"
+      # Credentials are only sent to hosts listed in their vault item's URIs.
+      # Leave this on; see docs/security.md before changing it.
+      FERROWARDEN_ENFORCE_CREDENTIAL_HOSTS: "true"
+      # If a reverse proxy (e.g. Pangolin) sits in front of ferrowarden, set its
+      # address so rate limiting uses the real client IP from X-Forwarded-For.
+      # FERROWARDEN_TRUSTED_PROXIES: "172.16.0.0/12"
     networks:
       - vault-internal
       - agent-facing

@@ -1,0 +1,11 @@
+# Files that run inside Linux containers must keep LF line endings, even on a
+# Windows checkout with core.autocrlf=true. A CRLF shell script fails in the
+# container with errors like "set: Illegal option -".
+*.sh          text eol=lf
+*.js          text eol=lf
+*.py          text eol=lf
+Dockerfile    text eol=lf
+*.Dockerfile  text eol=lf
+
+# PowerShell scripts are run on the Windows host.
+*.ps1         text eol=crlf

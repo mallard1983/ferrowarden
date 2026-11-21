@@ -19,7 +19,13 @@ Management endpoints (not logged themselves):
   POST /__reset__          — clear the request log (call between tests)
   GET  /__health__         — liveness check
 
-All other paths are captured and return 200 OK with a JSON echo.
+All other paths are captured and return 200 OK with {"captured": true, "id": N}.
+
+Paths containing "/echo" are captured and respond with the full captured
+request (headers, body, path) — like httpbin's /anything. Tests use this to
+prove that credentials echoed back by a target are scrubbed before they reach
+the agent. Paths containing "/echo-header" also copy every request header
+value into a response header (X-Echo-<name>).
 """
 
 import json
@@ -123,6 +129,21 @@ class RequestHandler(BaseHTTPRequestHandler):
         )
 
         # Echo back the entry id so tests can correlate
+        if "/echo-header" in self.path:
+            body = json.dumps(entry).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            for k, v in entry["headers"].items():
+                self.send_header(f"X-Echo-{k}", v)
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if "/echo" in self.path:
+            self._send_json(200, entry)
+            return
+
         self._send_json(200, {"captured": True, "id": entry_id})
 
     def _dispatch(self) -> None:

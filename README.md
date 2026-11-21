@@ -76,6 +76,8 @@ curl -X POST http://localhost:3000/v1/admin/keys \
 # The token is shown ONCE. Store it securely.
 
 # 5. Use the proxy
+#    The vault item "my_api_token" must have https://api.example.com in its
+#    URIs: credentials are only ever sent to hosts listed on their item.
 curl -X POST http://localhost:3000/v1/forward \
   -H "X-Agent-Key: <token-from-step-4>" \
   -H "Content-Type: application/json" \
@@ -126,9 +128,11 @@ The skill covers endpoint schemas, placeholder syntax, error handling, and worke
 - Credential values are stored only in Vaultwarden (encrypted at rest).
 - In Ferrowarden's process, values are held as `Zeroizing<String>` — wiped from memory when dropped.
 - The agent API key grants access only to the proxy endpoints. It cannot read vault contents directly.
+- Each credential is bound to the hosts in its vault item's URIs; it is never sent anywhere else.
+- Outbound targets are checked at DNS-resolution time: bw serve is always refused, and private/internal addresses (including cloud metadata) are refused unless listed in `allowed_targets`.
 - The admin key is enforced environment-only (minimum 32 characters); it cannot be set in a config file.
 - All credential names (not values) used in a request are recorded in the audit log.
-- Response bodies are scrubbed for common credential patterns before being returned to the agent.
+- Every credential value used in a request is scrubbed from the response body, headers and error messages (raw, JSON-escaped, URL-encoded and base64 forms), followed by common credential patterns.
 
 See [Security Model](docs/security.md) for the full threat model and design rationale.
 

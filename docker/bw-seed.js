@@ -16,8 +16,9 @@
  *   3. Decrypt the vault symmetric key from the Key field in the token response
  *   4. List existing items (GET /api/ciphers) for idempotency
  *   5. For each credential in credentials.json:
- *      - Encrypt name and password with the vault key
- *      - POST /api/ciphers with encryptedFor = user UUID
+ *      - Encrypt name, password and URIs with the vault key
+ *      - POST /api/ciphers with encryptedFor = user UUID (or PUT to
+ *        update an existing item whose URIs differ from the seed file)
  *
  * Environment:
  *   BW_SERVER_URL          — Vaultwarden base URL
@@ -181,30 +182,71 @@ async function seed() {
 
   // 5. List existing items for idempotency
   const listRes = await get('/api/ciphers', accessToken);
-  let existingNames = new Set();
-  if (listRes.status === 200) {
-    const ciphers = JSON.parse(listRes.body);
-    // Vaultwarden returns {Data:[...], Object:"list"} or a bare array
-    const items = Array.isArray(ciphers?.Data) ? ciphers.Data
-                : Array.isArray(ciphers)        ? ciphers
-                : [];
-    for (const c of items) {
-      try {
-        const name = decryptCipherString(symKey, c.Name || c.name).toString('utf8');
-        existingNames.add(name);
-      } catch (_) { /* skip undecryptable items */ }
+  if (listRes.status !== 200) {
+    console.error(`[seed] Listing existing items failed (${listRes.status}): ${listRes.body}`);
+    return 1;
+  }
+  // name -> [{ id, uris: [decrypted URI strings] }, ...]
+  const existingAll = new Map();
+  const ciphers = JSON.parse(listRes.body);
+  // Older Vaultwarden returns {Data:[...]}, current releases {data:[...]},
+  // some proxies a bare array. Missing this made every run re-create items.
+  const items = Array.isArray(ciphers?.data) ? ciphers.data
+              : Array.isArray(ciphers?.Data) ? ciphers.Data
+              : Array.isArray(ciphers)       ? ciphers
+              : [];
+  for (const c of items) {
+    if (c.deletedDate || c.DeletedDate) continue; // already in the trash
+    try {
+      const name  = decryptCipherString(symKey, c.Name || c.name).toString('utf8');
+      const login = c.Login || c.login || {};
+      const uris  = (login.Uris || login.uris || [])
+        .map((u) => u.Uri || u.uri)
+        .filter(Boolean)
+        .map((u) => decryptCipherString(symKey, u).toString('utf8'));
+      if (!existingAll.has(name)) existingAll.set(name, []);
+      existingAll.get(name).push({ id: c.Id || c.id, uris });
+    } catch (_) { /* skip undecryptable items */ }
+  }
+
+  // Ferrowarden refuses ambiguous names, so the seed must leave exactly one
+  // item per seeded name. Move extra copies (from earlier non-idempotent runs)
+  // to the trash — only for names this seed file manages.
+  const sameUris = (a, b) => a.length === b.length && a.every((u, i) => u === b[i]);
+  const existing = new Map();
+  let trashed = 0;
+  for (const cred of credentials) {
+    const copies = existingAll.get(cred.name) || [];
+    if (copies.length === 0) continue;
+    const want = cred.uris || [];
+    const keep = copies.find((c) => sameUris(c.uris, want)) || copies[0];
+    existing.set(cred.name, keep);
+    for (const extra of copies.filter((c) => c !== keep)) {
+      const res = await request('PUT', `/api/ciphers/${extra.id}/delete`, null, {
+        'Authorization': `Bearer ${accessToken}`,
+      });
+      if (res.status === 200 || res.status === 204) {
+        console.log(`  trashed duplicate: ${cred.name}`);
+        trashed++;
+      } else {
+        console.error(`  ERROR trashing duplicate ${cred.name} (${res.status}): ${res.body}`);
+      }
     }
   }
 
-  // 6. Create missing credentials
+  // 6. Create missing credentials; update existing ones whose URIs differ.
+  // Ferrowarden only sends a credential to hosts in its item's URIs, so stale
+  // URIs from an older seed would break the integration tests.
   let created = 0;
+  let updated = 0;
   let skipped = 0;
   let failed  = 0;
 
   for (const cred of credentials) {
-    const { name, value, note = '' } = cred;
+    const { name, value, note = '', uris = [] } = cred;
+    const current = existing.get(name);
 
-    if (existingNames.has(name)) {
+    if (current && sameUris(current.uris, uris)) {
       console.log(`  skip (exists): ${name}`);
       skipped++;
       continue;
@@ -215,6 +257,9 @@ async function seed() {
     const encNotes    = note
       ? encryptCipherString(symKey, Buffer.from(note, 'utf8'))
       : null;
+    const encUris     = uris.length
+      ? uris.map((u) => ({ uri: encryptCipherString(symKey, Buffer.from(u, 'utf8')), match: null }))
+      : null;
 
     const cipher = {
       type: 1,
@@ -223,7 +268,7 @@ async function seed() {
       reprompt: 0,
       encryptedFor: userUuid,
       login: {
-        uris: null,
+        uris: encUris,
         username: null,
         password: encPassword,
         passwordRevisionDate: null,
@@ -231,6 +276,21 @@ async function seed() {
         autofillOnPageLoad: null,
       },
     };
+
+    if (current) {
+      const res = await request('PUT', `/api/ciphers/${current.id}`, JSON.stringify(cipher), {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+      });
+      if (res.status === 200) {
+        console.log(`  updated URIs: ${name}`);
+        updated++;
+      } else {
+        console.error(`  ERROR updating ${name} (${res.status}): ${res.body}`);
+        failed++;
+      }
+      continue;
+    }
 
     const createRes = await post('/api/ciphers', JSON.stringify(cipher), accessToken);
     if (createRes.status === 200 || createRes.status === 201) {
@@ -242,7 +302,7 @@ async function seed() {
     }
   }
 
-  console.log(`\nDone. Created: ${created}, Skipped: ${skipped}, Failed: ${failed}`);
+  console.log(`\nDone. Created: ${created}, Updated: ${updated}, Trashed duplicates: ${trashed}, Skipped: ${skipped}, Failed: ${failed}`);
   return failed > 0 ? 1 : 0;
 }
 

@@ -51,31 +51,40 @@ pub async fn create_key(
     let token_hash = hash_token(&token);
     let now = Utc::now();
 
-    let key = AgentKey {
-        id: id.clone(),
-        name: req.name.clone(),
-        created_at: now,
-    };
+    let name = req.name.trim().to_string();
+    if name.is_empty() || name.len() > 128 {
+        return Err(FerroError::InvalidRequest(
+            "name must be 1-128 characters".to_string(),
+        ));
+    }
 
-    // Insert into in-memory map keyed by hash — plaintext never stored
-    state.agent_keys.write().await.insert(token_hash.clone(), key);
+    // Serialize key-file updates: without this, two concurrent creates (or a
+    // create and a revoke) can each read the old file and drop the other's change.
+    let _guard = state.keys_file_lock.lock().await;
 
-    // Persist to key file if configured
+    // Persist first. If the write fails, the key is never activated, so the
+    // caller is not left with an error response for a token that still works.
     if let Some(ref path) = state.config.keys_file {
         let mut stored = load(path).map_err(|e| {
             FerroError::Internal(format!("Failed to read key file: {e}"))
         })?;
-        stored.push(StoredKey { id: id.clone(), name: req.name.clone(), token_hash, created_at: now });
+        stored.push(StoredKey { id: id.clone(), name: name.clone(), token_hash: token_hash.clone(), created_at: now });
         save(path, &stored).map_err(|e| {
             FerroError::Internal(format!("Failed to write key file: {e}"))
         })?;
     }
 
-    tracing::info!(agent_id = %id, agent_name = %req.name, "Agent key created");
+    // Insert into in-memory map keyed by hash — plaintext never stored
+    state.agent_keys.write().await.insert(
+        token_hash,
+        AgentKey { id: id.clone(), name: name.clone(), created_at: now },
+    );
+
+    tracing::info!(agent_id = %id, agent_name = %name, "Agent key created");
 
     Ok((StatusCode::CREATED, Json(CreateKeyResponse {
         id,
-        name: req.name,
+        name,
         // Return the raw token once — the caller must store it
         token,
         created_at: now,
@@ -116,19 +125,14 @@ pub async fn revoke_key(
 ) -> FerroResult<Json<serde_json::Value>> {
     authenticate_admin(&state, &headers)?;
 
-    let mut keys = state.agent_keys.write().await;
+    let _guard = state.keys_file_lock.lock().await;
 
-    // Find the hash (map key) for this id — the map is keyed by token hash
-    let hash = keys
-        .iter()
-        .find(|(_, k)| k.id == id)
-        .map(|(h, _)| h.clone())
-        .ok_or(FerroError::AgentKeyNotFound)?;
+    if !state.agent_keys.read().await.values().any(|k| k.id == id) {
+        return Err(FerroError::AgentKeyNotFound);
+    }
 
-    keys.remove(&hash);
-    drop(keys);
-
-    // Rewrite the key file without the revoked entry
+    // Rewrite the key file without the revoked entry first, so a failed write
+    // is reported before the in-memory state diverges from disk.
     if let Some(ref path) = state.config.keys_file {
         let stored = load(path).map_err(|e| {
             FerroError::Internal(format!("Failed to read key file: {e}"))
@@ -138,6 +142,9 @@ pub async fn revoke_key(
             FerroError::Internal(format!("Failed to write key file: {e}"))
         })?;
     }
+
+    // Revoke in memory — takes effect for the very next request.
+    state.agent_keys.write().await.retain(|_, k| k.id != id);
 
     tracing::info!(agent_id = %id, "Agent key revoked");
 
@@ -167,7 +174,7 @@ pub async fn get_status(
     authenticate_admin(&state, &headers)?;
 
     let locked = state.is_locked().await;
-    let credential_count = state.credential_names.read().await.len();
+    let credential_count = state.credentials.read().await.len();
     let key_count = state.agent_keys.read().await.len();
 
     Ok(Json(serde_json::json!({
@@ -177,10 +184,19 @@ pub async fn get_status(
     })))
 }
 
-fn authenticate_admin(state: &Arc<AppState>, headers: &HeaderMap) -> FerroResult<()> {
+/// Check the admin key. Accepts `X-Admin-Key: <key>` (documented) and, for
+/// backward compatibility with earlier releases of `/v1/unlock`,
+/// `Authorization: Bearer <key>`.
+pub(crate) fn authenticate_admin(state: &AppState, headers: &HeaderMap) -> FerroResult<()> {
     let token = headers
         .get("x-admin-key")
         .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+        })
         .ok_or(FerroError::Unauthorized)?;
 
     if !state.authenticate_admin(token) {

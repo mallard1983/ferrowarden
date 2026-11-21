@@ -27,7 +27,16 @@ bw config server "$BW_SERVER_URL"
 # Log in using the API key (non-interactive, scriptable).
 # This stores an encrypted local vault copy — the master password is NOT
 # required for login, only for unlock.
-bw login --apikey
+#
+# With a persistent bw-data volume the CLI is still logged in after a
+# container restart, and `bw login` would then fail ("You are already logged
+# in"), which under `set -e` would crash-loop the container. Only log in when
+# needed.
+if bw login --check > /dev/null 2>&1; then
+    echo "bw CLI already logged in; skipping login."
+else
+    bw login --apikey
+fi
 
 # bw serve starts with the vault locked. Ferrowarden will POST /unlock
 # with the master password once it starts.

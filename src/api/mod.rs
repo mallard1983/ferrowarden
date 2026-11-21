@@ -11,7 +11,9 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::middleware::rate_limit::{new_limiter, rate_limit};
+use crate::config::split_list;
+use crate::middleware::rate_limit::{new_limiter, rate_limit, TrustedProxies};
+use crate::net::Cidr;
 use crate::state::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -21,9 +23,18 @@ pub fn router(state: Arc<AppState>) -> Router {
     let agent_limiter = new_limiter(120, 20);
 
     // Admin endpoints: 30 requests/min sustained, burst of 5.
-    // Admin actions (key management, audit queries) are infrequent by design.
-    // Stricter limits reduce the blast radius if the admin key is compromised.
+    // Admin actions (unlock, key management, audit queries) are infrequent by
+    // design. Stricter limits reduce the blast radius if the admin key is
+    // compromised and slow down guessing.
     let admin_limiter = new_limiter(30, 5);
+
+    // Validated in Config::validate, so every entry parses.
+    let trusted = TrustedProxies(Arc::new(
+        split_list(&state.config.trusted_proxies)
+            .iter()
+            .filter_map(|e| Cidr::parse(e))
+            .collect(),
+    ));
 
     // Layer ordering: Axum runs the last-added layer first.
     // Extension (outer, added second) adds the limiter to request extensions.
@@ -31,18 +42,20 @@ pub fn router(state: Arc<AppState>) -> Router {
     let agent_routes = Router::new()
         .route("/v1/forward", post(forward::forward))
         .route("/v1/credentials", get(credentials::list_credentials))
-        .route("/v1/unlock", post(unlock::unlock))
         .layer(middleware::from_fn(rate_limit))
-        .layer(Extension(agent_limiter));
+        .layer(Extension(agent_limiter))
+        .layer(Extension(trusted.clone()));
 
     let admin_routes = Router::new()
+        .route("/v1/unlock", post(unlock::unlock))
         .route("/v1/admin/keys", post(admin::create_key))
         .route("/v1/admin/keys", get(admin::list_keys))
         .route("/v1/admin/keys/{id}", delete(admin::revoke_key))
         .route("/v1/admin/audit", get(admin::get_audit))
         .route("/v1/admin/status", get(admin::get_status))
         .layer(middleware::from_fn(rate_limit))
-        .layer(Extension(admin_limiter));
+        .layer(Extension(admin_limiter))
+        .layer(Extension(trusted));
 
     Router::new()
         // Health check: public, no auth, no rate limit.

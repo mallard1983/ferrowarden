@@ -5,6 +5,8 @@ use tokio::sync::RwLock;
 use crate::audit::AuditLog;
 use crate::config::Config;
 use crate::keys::hash_token;
+use crate::net::TargetPolicy;
+use crate::vault::CredentialMap;
 
 /// A single agent API key entry.
 /// The token itself is never stored here — only metadata. The HashMap is
@@ -39,9 +41,17 @@ pub struct AppState {
     /// token and looks it up here.
     pub agent_keys: Arc<RwLock<HashMap<String, AgentKey>>>,
 
-    /// Credential name cache — item names from bw serve GET /list/object/items.
-    /// Refreshed on unlock and periodically. Names only, never values.
-    pub credential_names: Arc<RwLock<Vec<String>>>,
+    /// Credential cache — login item names, ids and URIs from bw serve
+    /// GET /list/object/items. Refreshed on unlock and every
+    /// `refresh_interval_secs`. Never holds credential values.
+    pub credentials: Arc<RwLock<CredentialMap>>,
+
+    /// Serializes read-modify-write cycles on the agent key file so that
+    /// concurrent create/revoke calls cannot drop each other's changes.
+    pub keys_file_lock: Arc<tokio::sync::Mutex<()>>,
+
+    /// Outbound target policy (SSRF protection), built once from config.
+    pub target_policy: Arc<TargetPolicy>,
 
     /// Audit log — shared with the admin API handler.
     pub audit: Arc<AuditLog>,
@@ -51,11 +61,14 @@ impl AppState {
     pub fn new_with_audit(config: Config, audit: Arc<AuditLog>) -> Self {
         // Start locked regardless of unlock mode — unlock happens during
         // startup (file mode) or on first POST /v1/unlock (manual mode).
+        let target_policy = Arc::new(TargetPolicy::from_config(&config));
         Self {
             config,
             lock_state: Arc::new(RwLock::new(LockState::Locked)),
             agent_keys: Arc::new(RwLock::new(HashMap::new())),
-            credential_names: Arc::new(RwLock::new(Vec::new())),
+            credentials: Arc::new(RwLock::new(CredentialMap::new())),
+            keys_file_lock: Arc::new(tokio::sync::Mutex::new(())),
+            target_policy,
             audit,
         }
     }
@@ -68,7 +81,6 @@ impl AppState {
         *self.lock_state.write().await = LockState::Unlocked;
     }
 
-    #[allow(dead_code)]
     pub async fn set_locked(&self) {
         *self.lock_state.write().await = LockState::Locked;
     }
@@ -85,6 +97,25 @@ impl AppState {
     pub fn authenticate_admin(&self, token: &str) -> bool {
         constant_time_eq(self.config.admin_key.as_str(), token)
     }
+}
+
+/// Constant-time string comparison to prevent timing-based token enumeration.
+/// Compares all bytes regardless of where a mismatch occurs.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+
+    if a.len() != b.len() {
+        return false;
+    }
+
+    // XOR each byte pair and OR the results — any mismatch sets a bit.
+    // This runs in constant time for equal-length inputs.
+    let result = a
+        .iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    result == 0
 }
 
 #[cfg(test)]
@@ -104,6 +135,13 @@ mod tests {
             tls_enabled: false,
             tls_cert_file: None,
             tls_key_file: None,
+            allow_private_targets: false,
+            allowed_targets: String::new(),
+            enforce_credential_hosts: true,
+            refresh_interval_secs: 0,
+            max_response_bytes: 1024,
+            forward_timeout_secs: 30,
+            trusted_proxies: String::new(),
         }
     }
 
@@ -185,23 +223,4 @@ mod tests {
 
         assert!(state.authenticate("wrong_token").await.is_none());
     }
-}
-
-/// Constant-time string comparison to prevent timing-based token enumeration.
-/// Compares all bytes regardless of where a mismatch occurs.
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-
-    if a.len() != b.len() {
-        return false;
-    }
-
-    // XOR each byte pair and OR the results — any mismatch sets a bit.
-    // This runs in constant time for equal-length inputs.
-    let result = a
-        .iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y));
-    result == 0
 }

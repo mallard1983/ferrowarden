@@ -27,13 +27,14 @@ variables:
 
 # ── Unit tests ─────────────────────────────────────────────────────────────────
 # Runs on every push. No Docker required.
+# --bins: ferrowarden is a binary crate (no lib target), so `--lib` fails.
 
 unit-tests:
   stage: test
-  image: rust:slim
+  image: rust:1.100-slim-trixie
   <<: *cargo-cache
   script:
-    - cargo test --lib
+    - cargo test --bins
   rules:
     - if: $CI_PIPELINE_SOURCE == "push"
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -48,7 +49,7 @@ unit-tests:
 
 integration-tests:
   stage: test
-  image: rust:slim
+  image: rust:1.100-slim-trixie
   services:
     - name: docker:dind
       alias: docker
