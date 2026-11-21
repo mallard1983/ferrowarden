@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Added
 
+- **Per-agent credential scoping and method policy** (#9): every agent key carries a policy, `credentials` (name patterns, `*` wildcard, whole-name, case-sensitive) and `methods` (`GET HEAD POST PUT PATCH DELETE OPTIONS`). `GET /v1/credentials` lists only matching credentials. `/v1/forward` refuses a disallowed method or an out-of-scope placeholder with `403` before any vault access, target check or connection. An out-of-scope name gives the same response and event whether or not the credential exists, so scoping cannot be used to probe the vault.
+- **`PATCH /v1/admin/keys/{id}`** changes a key's policy (absent field = unchanged, `null` and `{}` rejected, takes effect immediately).
+- **`POST /v1/admin/keys/{id}/preview`**: shows what a draft policy would allow (credentials reached, access gained and lost against the saved policy, and optionally whether a given request would be allowed), without saving, reading values or sending anything.
+- Events `key_policy_change` and `policy_preview`; reasons `credential_out_of_scope` and `method_not_allowed`; `key_create` records the policy; the `startup` event reports `keys_without_policy`. SIEM examples updated.
 - **Field placeholders** (#8): `{{vault:NAME:username}}`, `:totp`, `:notes` and `:field:FIELD` for custom fields (text, hidden, boolean, and linked to the username or password). **Secure notes** are now supported.
 - **Any item or field name**: names with spaces, colons or other characters are referenced with single quotes, e.g. `{{vault:'Proxmox (prod)':field:'api secret'}}`.
 - `GET /v1/credentials?detail=true` returns ready-made placeholders for every available value, unavailable values with the reason, and each credential's `bound_to` hosts.
@@ -19,12 +23,24 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Changed
 
+- Revoking (or patching, or previewing) an unknown agent key id returns `404 Not Found` instead of `401`, as documented.
 - Malformed placeholders (anything starting with `{{vault:` that does not parse) are rejected with `422` instead of being forwarded as literal text.
 - `GET /v1/credentials` also lists secure notes, and names that previously could not be referenced.
 - **Strict JSON input** (#23): request bodies and the key file are rejected if they contain duplicate object keys (at any depth), unknown fields, trailing data or nesting deeper than 64 levels; header names that differ only by case are treated as duplicates; `GET /v1/credentials` rejects unknown and repeated query parameters. Error messages name the problem but never echo values from the body.
 
 ### Upgrading
 
+- **Agent keys now require an explicit policy, and keys created with 0.1.0 become deny-all.** `POST /v1/admin/keys` now requires `credentials` and `methods` (`["*"]` for everything, `[]` for nothing; omitting them or sending `null` is a `400`). Keys already in your key file have no policy: after the upgrade they authenticate but can list no credentials and forward nothing until you set one. They are shown with `"policy_set": false` in `GET /v1/admin/keys`, counted in the `startup` event (`keys_without_policy`), and a warning is logged at startup. To restore the previous behaviour for a key, run:
+
+  ```sh
+  curl -X PATCH https://<host>:3000/v1/admin/keys/<key-id> \
+    -H "X-Admin-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+    -d '{"credentials":["*"],"methods":["*"]}'
+  ```
+
+  (set both fields; a field you leave out stays deny-all on such a key). Better, scope each key to what its agent needs. Scripts that create keys must send a policy. A key file with `null` policy values fails to load at startup.
+- **`/v1/forward` now rejects methods outside `GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS`** (for example `TRACE` or `CONNECT`) with `400`, for every key. The method is matched case-insensitively.
+- **Key list output now includes policy fields** (`credentials`, `methods`, `policy_set`), and so do the create and patch responses. Unrestricted is shown as `["*"]`, never `null`.
 - **`GET /v1/admin/audit` returns security events instead of the old audit entries.** The fields changed: `timestamp` is now `@timestamp`, `agent_id`/`agent_name` are `ferrowarden.key.id`/`.name`, `method` and `target_url` are `http.request.method` and `url.original`, `credential_names` is `ferrowarden.credentials`, `response_status` is `http.response.status_code` (now a number; it was the string `"Some(200)"`), and `outcome` is `event.outcome` (`success`/`failure`) with the cause in `event.reason`. The ring buffer now also contains non-forward events (authentication failures, key changes, vault events), so filter on `event.action == "forward"` for the old view.
 - **The `audit` log line is gone.** The `tracing` line with `message: "audit"` (fields `agent_id`, `credential_names`, `outcome`, ...) is replaced by security events on stdout with a different shape (`event.dataset == "ferrowarden.security"`). Update Loki queries and Wazuh decoders that matched `message="audit"`; see `docs/events.md` and `docs/logging.md`.
 - **Authentication is now checked before request bodies are parsed.** An unauthenticated request with a malformed body gets `401` (it used to get a `400` with parse details). Authenticated requests are unaffected.

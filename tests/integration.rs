@@ -526,7 +526,7 @@ async fn test_admin_key_lifecycle_create_use_revoke() {
         .client
         .post(format!("{}/v1/admin/keys", env.fw_url))
         .header("X-Admin-Key", &env.admin_key)
-        .json(&json!({ "name": "lifecycle-test-key" }))
+        .json(&json!({ "name": "lifecycle-test-key", "credentials": ["*"], "methods": ["*"] }))
         .send()
         .await
         .expect("create key request failed");
@@ -981,7 +981,7 @@ async fn test_key_create_and_revoke_are_recorded() {
         .client
         .post(format!("{}/v1/admin/keys", env.fw_url))
         .header("X-Admin-Key", &env.admin_key)
-        .json(&json!({ "name": "events-test-key" }))
+        .json(&json!({ "name": "events-test-key", "credentials": ["*"], "methods": ["*"] }))
         .send()
         .await
         .expect("create failed");
@@ -1017,6 +1017,7 @@ async fn test_key_create_and_revoke_are_recorded() {
         .send()
         .await
         .expect("revoke failed");
+    assert_eq!(unknown.status(), 404, "unknown key id is a 404");
     let e = env.event_for(&request_id(&unknown), "key_revoke").await;
     assert_eq!(e["event"]["outcome"], "failure");
     assert_eq!(e["event"]["reason"], "key_not_found");
@@ -1862,7 +1863,7 @@ async fn test_unknown_field_in_create_key_is_rejected() {
         .client
         .post(format!("{}/v1/admin/keys", env.fw_url))
         .header("X-Admin-Key", &env.admin_key)
-        .json(&json!({ "name": "strict-test-key", "role": "admin" }))
+        .json(&json!({ "name": "strict-test-key", "credentials": ["*"], "methods": ["*"], "role": "admin" }))
         .send()
         .await
         .expect("request failed");
@@ -1872,4 +1873,600 @@ async fn test_unknown_field_in_create_key_is_rejected() {
         .as_str()
         .unwrap()
         .contains("unknown field `role`"));
+}
+
+// ── Per-key policy: credential scoping, method policy, preview (#9) ───────────
+
+impl TestEnv {
+    /// Create an agent key with a policy through the admin API. Returns
+    /// (id, token). Callers revoke it at the end of the test.
+    async fn create_key(&self, name: &str, credentials: Value, methods: Value) -> (String, String) {
+        let resp = self
+            .client
+            .post(format!("{}/v1/admin/keys", self.fw_url))
+            .header("X-Admin-Key", &self.admin_key)
+            .json(&json!({ "name": name, "credentials": credentials, "methods": methods }))
+            .send()
+            .await
+            .expect("create key failed");
+        assert_eq!(resp.status(), 201, "creating key {name}");
+        let body: Value = resp.json().await.unwrap();
+        (
+            body["id"].as_str().unwrap().to_string(),
+            body["token"].as_str().unwrap().to_string(),
+        )
+    }
+
+    async fn revoke_key(&self, id: &str) {
+        let resp = self
+            .client
+            .delete(format!("{}/v1/admin/keys/{id}", self.fw_url))
+            .header("X-Admin-Key", &self.admin_key)
+            .send()
+            .await
+            .expect("revoke failed");
+        assert_eq!(resp.status(), 200, "revoking {id}");
+    }
+
+    async fn admin_call(&self, method: &str, path: &str, body: Option<Value>) -> reqwest::Response {
+        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+        let mut req = self
+            .client
+            .request(method, format!("{}{path}", self.fw_url))
+            .header("X-Admin-Key", &self.admin_key);
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        req.send().await.expect("admin request failed")
+    }
+
+    /// Forward to the mock API as `token`.
+    async fn forward_as(
+        &self,
+        token: &str,
+        method: &str,
+        path: &str,
+        headers: Value,
+    ) -> reqwest::Response {
+        let url = format!("{}/mock-api{}", self.mock_url_via_ferrowarden(), path);
+        self.client
+            .post(format!("{}/v1/forward", self.fw_url))
+            .header("X-Agent-Key", token)
+            .json(&json!({ "request": { "method": method, "url": url, "headers": headers } }))
+            .send()
+            .await
+            .expect("forward request failed")
+    }
+
+    /// Credential names as seen by `token` (plain listing).
+    async fn names_for(&self, token: &str) -> Vec<String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/credentials", self.fw_url))
+            .header("X-Agent-Key", token)
+            .send()
+            .await
+            .expect("list failed");
+        assert_eq!(resp.status(), 200);
+        resp.json().await.unwrap()
+    }
+}
+
+/// Scoped keys list only the credentials their patterns match, in both the
+/// plain and the detailed listing.
+#[tokio::test]
+async fn test_scoped_key_lists_only_matching_credentials() {
+    let Some(env) = TestEnv::load() else { return };
+    let (id, token) = env
+        .create_key(
+            "scope-list",
+            json!(["test_api_*", "nas_api_key"]),
+            json!(["*"]),
+        )
+        .await;
+
+    let names = env.names_for(&token).await;
+    assert_eq!(names, ["nas_api_key", "test_api_token"]);
+
+    let detail: Vec<Value> = env
+        .client
+        .get(format!("{}/v1/credentials?detail=true", env.fw_url))
+        .header("X-Agent-Key", &token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let detailed: Vec<&str> = detail.iter().map(|d| d["name"].as_str().unwrap()).collect();
+    assert_eq!(detailed, ["nas_api_key", "test_api_token"]);
+
+    // The unrestricted pre-created key still sees everything.
+    assert!(env.names_for(&env.agent_key).await.len() > 5);
+
+    // `[]` sees nothing.
+    let (empty_id, empty_token) = env.create_key("scope-empty", json!([]), json!(["*"])).await;
+    assert!(env.names_for(&empty_token).await.is_empty());
+
+    env.revoke_key(&empty_id).await;
+    env.revoke_key(&id).await;
+}
+
+/// An out-of-scope credential is a 403 whether or not it exists, with the same
+/// body shape, and nothing is forwarded. In-scope credentials still work.
+#[tokio::test]
+async fn test_out_of_scope_credential_is_403_with_no_existence_oracle() {
+    let Some(env) = TestEnv::load() else { return };
+    let (id, token) = env
+        .create_key("scope-forward", json!(["test_api_token"]), json!(["*"]))
+        .await;
+    env.reset_mock().await;
+
+    // Exists in the vault, out of scope.
+    let existing = env
+        .forward_as(
+            &token,
+            "GET",
+            "/api/x",
+            json!({"Authorization": "Bearer {{vault:test_bearer}}"}),
+        )
+        .await;
+    let existing_rid = request_id(&existing);
+    assert_eq!(existing.status(), 403);
+    let existing_body: Value = existing.json().await.unwrap();
+
+    // Does not exist anywhere, out of scope.
+    let ghost = env
+        .forward_as(
+            &token,
+            "GET",
+            "/api/x",
+            json!({"Authorization": "Bearer {{vault:no_such_cred_zz}}"}),
+        )
+        .await;
+    let ghost_rid = request_id(&ghost);
+    assert_eq!(ghost.status(), 403);
+    let ghost_body: Value = ghost.json().await.unwrap();
+
+    assert_eq!(
+        existing_body["error"],
+        "Credential test_bearer is not available to this agent key"
+    );
+    assert_eq!(
+        existing_body["error"]
+            .as_str()
+            .unwrap()
+            .replace("test_bearer", "X"),
+        ghost_body["error"]
+            .as_str()
+            .unwrap()
+            .replace("no_such_cred_zz", "X"),
+        "message must be identical apart from the echoed name"
+    );
+    for (rid, name) in [
+        (&existing_rid, "test_bearer"),
+        (&ghost_rid, "no_such_cred_zz"),
+    ] {
+        let e = env.event_for(rid, "forward").await;
+        assert_eq!(e["event"]["outcome"], "failure");
+        assert_eq!(e["event"]["reason"], "credential_out_of_scope");
+        assert_eq!(e["http"]["response"]["status_code"], 403);
+        assert_eq!(e["ferrowarden"]["credentials"][0], name);
+    }
+    // Mixed in-scope + out-of-scope is refused as a whole.
+    let mixed = env
+        .forward_as(
+            &token,
+            "GET",
+            "/api/x",
+            json!({"A": "{{vault:test_api_token}}", "B": "{{vault:test_bearer}}"}),
+        )
+        .await;
+    assert_eq!(mixed.status(), 403);
+    assert!(
+        env.all_captured_requests().await.is_empty(),
+        "nothing may reach the target"
+    );
+
+    // In scope works.
+    let ok = env
+        .forward_as(
+            &token,
+            "GET",
+            "/api/check",
+            json!({"Authorization": "Bearer {{vault:test_api_token}}"}),
+        )
+        .await;
+    assert_eq!(ok.status(), 200);
+    assert_eq!(env.all_captured_requests().await.len(), 1);
+
+    env.revoke_key(&id).await;
+}
+
+/// The method policy is enforced before anything is forwarded, and methods
+/// outside the standard list are a 400 for every key.
+#[tokio::test]
+async fn test_method_policy_and_method_list() {
+    let Some(env) = TestEnv::load() else { return };
+    let (id, token) = env
+        .create_key("method-get", json!(["*"]), json!(["get"]))
+        .await;
+    env.reset_mock().await;
+
+    let denied = env.forward_as(&token, "POST", "/api/x", json!({})).await;
+    assert_eq!(denied.status(), 403);
+    let rid = request_id(&denied);
+    assert_eq!(
+        denied.json::<Value>().await.unwrap()["error"],
+        "Method POST is not allowed for this agent key"
+    );
+    let e = env.event_for(&rid, "forward").await;
+    assert_eq!(e["event"]["reason"], "method_not_allowed");
+    assert!(env.all_captured_requests().await.is_empty());
+
+    let allowed = env.forward_as(&token, "get", "/api/check", json!({})).await;
+    assert_eq!(allowed.status(), 200);
+
+    // TRACE / unknown methods: 400 for the unrestricted key too.
+    for method in ["TRACE", "CONNECT", "FOO"] {
+        for key in [&token, &env.agent_key] {
+            let resp = env.forward_as(key, method, "/api/x", json!({})).await;
+            assert_eq!(resp.status(), 400, "{method}");
+        }
+    }
+    env.revoke_key(&id).await;
+}
+
+/// `credentials: []` cannot use placeholders. A forward with no placeholders is
+/// still allowed when the method is (documented behaviour).
+#[tokio::test]
+async fn test_empty_credentials_blocks_placeholders_only() {
+    let Some(env) = TestEnv::load() else { return };
+    let (id, token) = env
+        .create_key("scope-none", json!([]), json!(["GET"]))
+        .await;
+    env.reset_mock().await;
+
+    let blocked = env
+        .forward_as(
+            &token,
+            "GET",
+            "/api/x",
+            json!({"A": "{{vault:test_api_token}}"}),
+        )
+        .await;
+    assert_eq!(blocked.status(), 403);
+    let plain = env.forward_as(&token, "GET", "/api/check", json!({})).await;
+    assert_eq!(
+        plain.status(),
+        200,
+        "no placeholders: only the method matters"
+    );
+
+    env.revoke_key(&id).await;
+}
+
+/// PATCH widens and narrows immediately for the same token; `null`, `{}`,
+/// unknown ids and unknown fields are rejected; revoking an unknown id is 404.
+#[tokio::test]
+async fn test_patch_changes_policy_immediately_and_is_strict() {
+    let Some(env) = TestEnv::load() else { return };
+    let (id, token) = env
+        .create_key("patch-me", json!(["test_api_token"]), json!(["GET"]))
+        .await;
+    let path = format!("/v1/admin/keys/{id}");
+    assert_eq!(env.names_for(&token).await, ["test_api_token"]);
+
+    // Widen.
+    let resp = env
+        .admin_call("PATCH", &path, Some(json!({"credentials": ["test_*"]})))
+        .await;
+    assert_eq!(resp.status(), 200);
+    let rid = request_id(&resp);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["credentials"], json!(["test_*"]));
+    assert_eq!(body["methods"], json!(["GET"]), "absent field unchanged");
+    assert_eq!(body["policy_set"], true);
+    assert!(env.names_for(&token).await.len() > 1);
+
+    let e = env.event_for(&rid, "key_policy_change").await;
+    assert_eq!(e["event"]["category"][0], "iam");
+    assert_eq!(e["event"]["type"][0], "change");
+    assert_eq!(e["ferrowarden"]["details"]["key_id"], id.as_str());
+    assert_eq!(
+        e["ferrowarden"]["details"]["before"],
+        json!({"credentials": ["test_api_token"], "methods": ["GET"]})
+    );
+    assert_eq!(
+        e["ferrowarden"]["details"]["after"],
+        json!({"credentials": ["test_*"], "methods": ["GET"]})
+    );
+
+    // Narrow, and lift with ["*"].
+    env.admin_call("PATCH", &path, Some(json!({"credentials": []})))
+        .await;
+    assert!(env.names_for(&token).await.is_empty());
+    env.admin_call(
+        "PATCH",
+        &path,
+        Some(json!({"credentials": ["*"], "methods": ["*"]})),
+    )
+    .await;
+    assert!(env.names_for(&token).await.len() > 5);
+
+    // Strictness.
+    for body in [
+        json!({}),
+        json!({"credentials": null}),
+        json!({"methods": null}),
+        json!({"methods": ["TRACE"]}),
+        json!({"credentails": ["*"]}),
+    ] {
+        let resp = env.admin_call("PATCH", &path, Some(body.clone())).await;
+        assert_eq!(resp.status(), 400, "{body}");
+    }
+    let resp = env
+        .admin_call("PATCH", &path, Some(json!({"credentials": null})))
+        .await;
+    let err: Value = resp.json().await.unwrap();
+    assert!(
+        err["error"].as_str().unwrap().contains("`credentials`"),
+        "{err}"
+    );
+
+    // Unknown ids.
+    let resp = env
+        .admin_call(
+            "PATCH",
+            "/v1/admin/keys/no-such-key",
+            Some(json!({"methods": ["*"]})),
+        )
+        .await;
+    assert_eq!(resp.status(), 404);
+    let e = env.event_for(&request_id(&resp), "key_policy_change").await;
+    assert_eq!(e["event"]["reason"], "key_not_found");
+    let resp = env
+        .admin_call("DELETE", "/v1/admin/keys/no-such-key", None)
+        .await;
+    assert_eq!(resp.status(), 404);
+    let resp = env
+        .admin_call(
+            "POST",
+            "/v1/admin/keys/no-such-key/preview",
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(resp.status(), 404);
+
+    env.revoke_key(&id).await;
+}
+
+/// Creating a key requires an explicit policy: missing or null is a 400 that
+/// names the field.
+#[tokio::test]
+async fn test_create_requires_a_policy_and_rejects_null() {
+    let Some(env) = TestEnv::load() else { return };
+    let cases = [
+        (json!({"name": "no-policy"}), "missing field `credentials`"),
+        (
+            json!({"name": "no-methods", "credentials": ["*"]}),
+            "missing field `methods`",
+        ),
+        (
+            json!({"name": "no-creds", "methods": ["*"]}),
+            "missing field `credentials`",
+        ),
+        (
+            json!({"name": "null-creds", "credentials": null, "methods": ["*"]}),
+            "`credentials`",
+        ),
+        (
+            json!({"name": "null-methods", "credentials": ["*"], "methods": null}),
+            "`methods`",
+        ),
+    ];
+    for (body, needle) in cases {
+        let resp = env
+            .admin_call("POST", "/v1/admin/keys", Some(body.clone()))
+            .await;
+        assert_eq!(resp.status(), 400, "{body}");
+        let err: Value = resp.json().await.unwrap();
+        assert!(
+            err["error"].as_str().unwrap().contains(needle),
+            "{body}: {err}"
+        );
+    }
+    // None of those created a key.
+    let list: Vec<Value> = env
+        .admin_call("GET", "/v1/admin/keys", None)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(!list.iter().any(|k| {
+        k["name"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("no-") || n.starts_with("null-"))
+    }));
+}
+
+/// Preview shows the gained/lost diff against the saved policy, saves nothing
+/// and contacts nobody; its request check reports what a forward would.
+#[tokio::test]
+async fn test_policy_preview() {
+    let Some(env) = TestEnv::load() else { return };
+    let (id, _token) = env
+        .create_key("preview-me", json!(["test_api_*"]), json!(["*"]))
+        .await;
+    let path = format!("/v1/admin/keys/{id}/preview");
+    env.reset_mock().await;
+
+    let keys_before: Vec<Value> = env
+        .admin_call("GET", "/v1/admin/keys", None)
+        .await
+        .json()
+        .await
+        .unwrap();
+
+    let resp = env
+        .admin_call(
+            "POST",
+            &path,
+            Some(json!({"credentials": ["test_bearer", "nas_*"], "methods": ["GET"]})),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let rid = request_id(&resp);
+    let p: Value = resp.json().await.unwrap();
+    assert_eq!(p["key"]["name"], "preview-me");
+    assert_eq!(
+        p["saved_policy"],
+        json!({"credentials": ["test_api_*"], "methods": ["*"]})
+    );
+    assert_eq!(
+        p["draft_policy"],
+        json!({"credentials": ["test_bearer", "nas_*"], "methods": ["GET"]})
+    );
+    let strs = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(strs(&p["gained"]), ["nas_api_key", "test_bearer"]);
+    assert_eq!(strs(&p["lost"]), ["test_api_token"]);
+    let names: Vec<&str> = p["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["nas_api_key", "test_bearer"]);
+    // Names and ready-made placeholders only: no secret value anywhere.
+    let text = p.to_string();
+    for secret in seeded_secrets() {
+        assert!(!text.contains(&secret), "preview leaked a seeded value");
+    }
+    let e = env.event_for(&rid, "policy_preview").await;
+    assert_eq!(e["event"]["category"][0], "iam");
+    assert_eq!(e["ferrowarden"]["details"]["key_id"], id.as_str());
+
+    // Request checks, against the draft.
+    let mock = format!("{}/mock-api/api/x", env.mock_url_via_ferrowarden());
+    let check = |draft: Value, method: &str, url: &str, headers: Value| {
+        let mut body = json!({"request": {"method": method, "url": url, "headers": headers}});
+        for (k, v) in draft.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        body
+    };
+    let run = |body: Value| {
+        let env = &env;
+        let path = path.clone();
+        async move {
+            let r: Value = env
+                .admin_call("POST", &path, Some(body))
+                .await
+                .json()
+                .await
+                .unwrap();
+            r["request_check"].clone()
+        }
+    };
+    let draft = json!({"credentials": ["test_*"], "methods": ["GET"]});
+
+    let ok = run(check(
+        draft.clone(),
+        "GET",
+        &mock,
+        json!({"A": "{{vault:test_api_token}}"}),
+    ))
+    .await;
+    assert_eq!(ok["allowed"], true, "{ok}");
+    let scope = run(check(
+        draft.clone(),
+        "GET",
+        &mock,
+        json!({"A": "{{vault:nas_api_key}}"}),
+    ))
+    .await;
+    assert_eq!(
+        (scope["status"].as_u64(), scope["reason"].as_str()),
+        (Some(403), Some("credential_out_of_scope"))
+    );
+    let ghost = run(check(
+        draft.clone(),
+        "GET",
+        &mock,
+        json!({"A": "{{vault:no_such_cred_zz}}"}),
+    ))
+    .await;
+    assert_eq!(ghost["reason"], "credential_out_of_scope");
+    let method = run(check(draft.clone(), "POST", &mock, json!({}))).await;
+    assert_eq!(method["reason"], "method_not_allowed");
+    let bound = run(check(
+        draft.clone(),
+        "GET",
+        "https://elsewhere.example/x",
+        json!({"A": "{{vault:test_api_token}}"}),
+    ))
+    .await;
+    assert_eq!(bound["reason"], "credential_host_not_allowed");
+    let unknown = run(check(
+        draft.clone(),
+        "GET",
+        &mock,
+        json!({"A": "{{vault:test_nonexistent}}"}),
+    ))
+    .await;
+    assert_eq!(
+        (unknown["status"].as_u64(), unknown["reason"].as_str()),
+        (Some(422), Some("unknown_credential"))
+    );
+
+    // Nothing saved, nothing sent.
+    let keys_after: Vec<Value> = env
+        .admin_call("GET", "/v1/admin/keys", None)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let find = |keys: &[Value]| {
+        keys.iter()
+            .find(|k| k["id"] == id.as_str())
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(find(&keys_before), find(&keys_after));
+    assert!(
+        env.all_captured_requests().await.is_empty(),
+        "preview must not reach the target"
+    );
+
+    env.revoke_key(&id).await;
+}
+
+/// A key created with a policy records it in the `key_create` event.
+#[tokio::test]
+async fn test_key_create_event_includes_the_policy() {
+    let Some(env) = TestEnv::load() else { return };
+    let resp = env
+        .admin_call(
+            "POST",
+            "/v1/admin/keys",
+            Some(json!({"name": "policy-event", "credentials": ["lab_*"], "methods": ["get", "head"]})),
+        )
+        .await;
+    assert_eq!(resp.status(), 201);
+    let rid = request_id(&resp);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["methods"], json!(["GET", "HEAD"]));
+    let e = env.event_for(&rid, "key_create").await;
+    assert_eq!(e["ferrowarden"]["details"]["credentials"], json!(["lab_*"]));
+    assert_eq!(
+        e["ferrowarden"]["details"]["methods"],
+        json!(["GET", "HEAD"])
+    );
+    env.revoke_key(body["id"].as_str().unwrap()).await;
 }

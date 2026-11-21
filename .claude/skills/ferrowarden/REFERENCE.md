@@ -53,9 +53,11 @@ Returns `200 OK` with no body. No authentication required. Used by health checks
 
 | Status | Error | Cause | Action |
 |---|---|---|---|
-| 400 | Bad Request | Invalid URL scheme or HTTP method; placeholder in URL host/port; invalid request JSON (extra fields, duplicate keys, header names differing only by case) | Use `http://` or `https://`; check method; keep placeholders out of the host; fix the request JSON and don't send extra fields |
+| 400 | Bad Request | Invalid URL scheme, or a method other than GET/HEAD/POST/PUT/PATCH/DELETE/OPTIONS (TRACE, CONNECT are refused); placeholder in URL host/port; invalid request JSON (extra fields, duplicate keys, header names differing only by case) | Use `http://` or `https://`; check method; keep placeholders out of the host; fix the request JSON and don't send extra fields |
 | 401 | Unauthorized | Missing or invalid `X-Agent-Key` | Token is wrong or revoked; notify the operator |
 | 403 | Forbidden | Credential not bound to this host, or target blocked (internal address / vault backend) | Do not try other hosts. Tell the user which credential/host was refused |
+| 403 | Forbidden | "Credential X is not available to this agent key" (your key's scope excludes it; same answer whether or not it exists) | Do not retry with other names. Tell the user which credential you needed |
+| 403 | Forbidden | "Method M is not allowed for this agent key" | Do not switch methods to work around it. Tell the user which method you needed |
 | 409 | Conflict | Credential name matches several vault items | Tell the user; the operator must rename one |
 | 422 | Unprocessable Entity | Malformed placeholder, unknown name, or value/field the item lacks | Copy a placeholder from `GET /v1/credentials?detail=true` |
 | 429 | Too Many Requests | Rate limit exceeded | Wait `Retry-After` seconds; retry once |
@@ -74,6 +76,7 @@ All error responses: `{ "error": "message" }`
 - Names are case-sensitive. `proxmox_api_token` != `Proxmox_API_Token`.
 - Placeholders are valid in the path, query or user info of `request.url` (never the scheme, host or port), any header value in `request.headers`, and anywhere in `request.body` (inside JSON strings/keys or a plain string body).
 - Each credential only works for the host(s) the operator bound it to; any other host returns 403.
+- `GET /v1/credentials` lists only what your key may use; a name outside that is refused with 403 even if it exists.
 - An unknown name causes the entire request to be rejected (422) before any outbound call is made.
 - Multiple different placeholders in one request: allowed.
 - Same placeholder repeated: allowed.

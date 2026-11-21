@@ -215,7 +215,7 @@ ADMIN_KEY="$(cat "$SECRETS_DIR/ferrowarden_admin_key")"
 AGENT_RESPONSE=$(curl -sf -X POST "$FERROWARDEN_URL/v1/admin/keys" \
     -H "X-Admin-Key: $ADMIN_KEY" \
     -H "Content-Type: application/json" \
-    -d '{"name": "integration-test-agent"}')
+    -d '{"name": "integration-test-agent", "credentials": ["*"], "methods": ["*"]}')
 
 AGENT_TOKEN=$(python3 -c "
 import sys, json

@@ -11,9 +11,11 @@ use std::sync::Arc;
 use crate::error::{FerroError, FerroResult};
 use crate::events::{emit_rejected, Action, Reason, SecurityEvent};
 use crate::middleware::request_context::RequestContext;
+use crate::policy::KeyPolicy;
 use crate::proxy::placeholder::{Placeholder, Selector};
 use crate::state::AppState;
 use crate::vault::client::{CredentialEntry, FieldKind, FieldLookup, ItemKind};
+use crate::vault::CredentialMap;
 
 /// One credential in the detailed listing: ready-made placeholders for every
 /// available value, so agents copy strings instead of building quoting
@@ -45,6 +47,19 @@ pub struct CredentialDetail {
     /// Set when the whole credential cannot be used, with the reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<String>,
+}
+
+/// The detailed listing of the credentials `policy` allows, sorted by name.
+/// Shared by `GET /v1/credentials?detail=true` and the policy preview.
+pub(crate) fn visible_details(
+    credentials: &CredentialMap,
+    policy: &KeyPolicy,
+) -> Vec<CredentialDetail> {
+    credentials
+        .iter()
+        .filter(|(name, _)| policy.allows_credential(name))
+        .map(|(name, entries)| detail(name, entries))
+        .collect()
 }
 
 fn detail(name: &str, entries: &[CredentialEntry]) -> CredentialDetail {
@@ -154,7 +169,7 @@ fn parse_detail(params: &[(String, String)]) -> FerroResult<bool> {
 /// GET /v1/credentials
 ///
 /// Returns the credentials available in the vault — names only, never
-/// values. With `?detail=true`, returns [`CredentialDetail`] objects with
+/// values, and only those the agent key's policy allows. With `?detail=true`, returns [`CredentialDetail`] objects with
 /// ready-made placeholders for every usable value and field.
 /// Requires a valid agent key in the X-Agent-Key header.
 pub async fn list_credentials(
@@ -173,7 +188,7 @@ pub async fn list_credentials(
         }
     };
 
-    let result = list(&state, detailed).await;
+    let result = list(&state, &agent.policy, detailed).await;
 
     let event = SecurityEvent::new(Action::CredentialsList)
         .request(&ctx)
@@ -187,8 +202,13 @@ pub async fn list_credentials(
     result.map(|(body, _)| Json(body))
 }
 
-/// The credential listing and how many credentials it holds.
-async fn list(state: &Arc<AppState>, detailed: bool) -> FerroResult<(Value, usize)> {
+/// The credential listing (limited to what `policy` allows) and how many
+/// credentials it holds.
+async fn list(
+    state: &Arc<AppState>,
+    policy: &KeyPolicy,
+    detailed: bool,
+) -> FerroResult<(Value, usize)> {
     // In file mode, try to unlock again right away (e.g. after a bw serve
     // restart) instead of failing until the next refresh.
     if state.is_locked().await && !crate::vault::refresh::reunlock_if_possible(state).await {
@@ -196,18 +216,20 @@ async fn list(state: &Arc<AppState>, detailed: bool) -> FerroResult<(Value, usiz
     }
 
     let credentials = state.credentials.read().await;
-    let count = credentials.len();
-    let body = if detailed {
-        let list: Vec<CredentialDetail> = credentials
-            .iter()
-            .map(|(name, entries)| detail(name, entries))
-            .collect();
-        serde_json::to_value(list)
+    let (body, count) = if detailed {
+        let list = visible_details(&credentials, policy);
+        let count = list.len();
+        (serde_json::to_value(list), count)
     } else {
         // BTreeMap keys: sorted, de-duplicated names.
-        serde_json::to_value(credentials.keys().collect::<Vec<_>>())
-    }
-    .map_err(|e| FerroError::Internal(e.to_string()))?;
+        let names: Vec<&String> = credentials
+            .keys()
+            .filter(|name| policy.allows_credential(name))
+            .collect();
+        let count = names.len();
+        (serde_json::to_value(names), count)
+    };
+    let body = body.map_err(|e| FerroError::Internal(e.to_string()))?;
 
     Ok((body, count))
 }

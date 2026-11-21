@@ -79,6 +79,16 @@ topk(5, sum by (key) (
 ))
 ```
 
+Out-of-scope attempts by key: agents asking for credentials or methods their policy does not allow (possible probing or a steered agent). The reason is the same whether or not the credential exists:
+
+```logql
+sum by (key) (
+  count_over_time({job="ferrowarden", action="forward", outcome="failure"}
+    | json reason="event.reason", key="ferrowarden.key.name"
+    | reason=~"credential_out_of_scope|method_not_allowed" [24h])
+)
+```
+
 Rejected requests (malformed bodies from an authenticated agent):
 
 ```logql
@@ -120,7 +130,7 @@ Failed unlocks only:
 Agent key creation and revocation (audit trail of who changed access):
 
 ```logql
-{job="ferrowarden", action=~"key_create|key_revoke"}
+{job="ferrowarden", action=~"key_create|key_revoke|key_policy_change"}
   | json key_name="ferrowarden.details.key_name", ip="source.ip"
   | line_format "{{.action}} {{.key_name}} from {{.ip}} ({{.outcome}})"
 ```

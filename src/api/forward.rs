@@ -12,11 +12,12 @@ use crate::api::strict_json::StrictJson;
 use crate::error::{FerroError, FerroResult};
 use crate::events::{emit_rejected, Action, SecurityEvent};
 use crate::middleware::request_context::RequestContext;
+use crate::policy::KeyPolicy;
 use crate::proxy::forward::{ProxyRequest, ZeroizingHeaders};
 use crate::proxy::placeholder::{self, Placeholder};
 use crate::proxy::{
-    forward_request, resolve_credentials, substitute_json, substitute_str, zeroize_json,
-    ForwardLimits,
+    check_credentials, fetch_credentials, forward_request, substitute_json, substitute_str,
+    zeroize_json, CredentialPlan, ForwardLimits,
 };
 use crate::state::AppState;
 use crate::vault::refresh::reunlock_if_possible;
@@ -63,8 +64,15 @@ pub async fn forward(
     // `'Proxmox (prod)':username` — never values.
     let placeholder_names: Vec<String> = names.iter().map(Placeholder::label).collect();
 
+    // The key's policy is enforced here, before run_forward: so before any
+    // vault access, target check or DNS lookup. The checks see only the
+    // method and the placeholder names the agent sent, never the vault, which
+    // is what keeps an out-of-scope name from revealing whether it exists.
     let mut result = match collected {
-        Ok(_) => run_forward(&state, &req, &names).await,
+        Ok(_) => match agent.policy.check_request(&req.normalized_method(), &names) {
+            Ok(()) => run_forward(&state, &req, &names).await,
+            Err(e) => Err(e),
+        },
         Err(e) => Err(e),
     };
 
@@ -98,7 +106,7 @@ pub async fn forward(
 }
 
 /// Every distinct placeholder in the request's URL, header values and body.
-fn collect_placeholders(req: &ProxyRequest) -> FerroResult<BTreeSet<Placeholder>> {
+pub(crate) fn collect_placeholders(req: &ProxyRequest) -> FerroResult<BTreeSet<Placeholder>> {
     let mut out = BTreeSet::new();
     placeholder::collect(&req.url, &mut out)?;
     for v in req.headers.values() {
@@ -110,12 +118,21 @@ fn collect_placeholders(req: &ProxyRequest) -> FerroResult<BTreeSet<Placeholder>
     Ok(out)
 }
 
-async fn run_forward(
+/// Everything `/v1/forward` checks without touching the vault or the network
+/// beyond the policy's own IP-literal test: the vault state, the target URL
+/// against the outbound policy, and every placeholder against the cached item
+/// metadata. Returns the parsed target and the plan of what to fetch.
+///
+/// With `preview` set, a locked vault is tolerated when a credential cache
+/// exists (the policy preview answers from the cache); a real forward needs
+/// the vault unlocked.
+async fn prepare(
     state: &Arc<AppState>,
     req: &ProxyRequest,
     names: &BTreeSet<Placeholder>,
-) -> FerroResult<crate::proxy::forward::ProxyResponse> {
-    if state.is_locked().await {
+    preview: bool,
+) -> FerroResult<(Url, CredentialPlan)> {
+    if state.is_locked().await && !(preview && !state.credentials.read().await.is_empty()) {
         return Err(FerroError::VaultLocked);
     }
 
@@ -125,19 +142,43 @@ async fn run_forward(
         .map_err(|_| FerroError::InvalidTargetUrl("URL could not be parsed (placeholders are only allowed in the path, query, or user info)".to_string()))?;
     state.target_policy.check_url(&target).await?;
 
-    let credentials = state.credentials.read().await.clone();
-    let vault = VaultClient::new(state.config.bw_serve_url.clone());
-
     // Validate every placeholder (item exists and is unambiguous, no re-prompt,
     // selected value/field exists, bound to this host) before fetching any value.
-    let values = resolve_credentials(
-        names,
-        &credentials,
-        &target,
-        state.config.enforce_credential_hosts,
-        &vault,
-    )
-    .await?;
+    let plan = {
+        let credentials = state.credentials.read().await;
+        check_credentials(
+            names,
+            &credentials,
+            &target,
+            state.config.enforce_credential_hosts,
+        )?
+    };
+    Ok((target, plan))
+}
+
+/// Run every check `/v1/forward` would run for `req` under `policy`, in the
+/// same order, without fetching a value or opening a connection. Used by the
+/// policy preview. (Name-based hosts are additionally checked at DNS
+/// resolution time, which only happens when a request is really forwarded.)
+pub(crate) async fn check_only(
+    state: &Arc<AppState>,
+    policy: &KeyPolicy,
+    req: &ProxyRequest,
+) -> FerroResult<()> {
+    req.validate()?;
+    let names = collect_placeholders(req)?;
+    policy.check_request(&req.normalized_method(), &names)?;
+    prepare(state, req, &names, true).await.map(|_| ())
+}
+
+async fn run_forward(
+    state: &Arc<AppState>,
+    req: &ProxyRequest,
+    names: &BTreeSet<Placeholder>,
+) -> FerroResult<crate::proxy::forward::ProxyResponse> {
+    let (target, plan) = prepare(state, req, names, false).await?;
+    let vault = VaultClient::new(state.config.bw_serve_url.clone());
+    let values = fetch_credentials(&plan, &vault).await?;
 
     // URL: substitute, then require the scheme/host/port to be unchanged.
     let subst_url = substitute_str(&req.url, &values);

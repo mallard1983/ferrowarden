@@ -21,7 +21,7 @@ X-Agent-Key: <your-token>
 ["proxmox_api_token", "nas_api_key", "plex_token", "grafana_service_account"]
 ```
 
-Names are **case-sensitive**. Use them exactly as returned. These are the only names you can use in `{{vault:name}}` placeholders — any other name will be rejected.
+Names are **case-sensitive**. Use them exactly as returned. These are the only names you can use in `{{vault:name}}` placeholders — any other name will be rejected. The list shows only what **your key** is allowed to use; the operator may have scoped it to a subset of the vault, and may also limit which HTTP methods it can send.
 
 ---
 
@@ -196,8 +196,10 @@ All errors return `{"error": "message"}` with an appropriate HTTP status.
 
 | Status | Meaning | What to do |
 |---|---|---|
-| `400 Bad Request` | Invalid target URL or HTTP method, a placeholder in the URL host/port, or invalid request JSON (extra fields, duplicate keys, header names differing only by case) | Check the URL scheme (must be http/https) and method spelling; put placeholders only in the path, query, headers or body; fix the request JSON and don't send extra fields or repeated keys |
+| `400 Bad Request` | Invalid target URL, a method that is not one of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS (e.g. TRACE, CONNECT), a placeholder in the URL host/port, or invalid request JSON (extra fields, duplicate keys, header names differing only by case) | Check the URL scheme (must be http/https) and method spelling; put placeholders only in the path, query, headers or body; fix the request JSON and don't send extra fields or repeated keys |
 | `401 Unauthorized` | Missing or invalid `X-Agent-Key` | Your token is wrong or has been revoked; contact the operator |
+| `403 Forbidden` ("not available to this agent key") | `Credential <name> is not available to this agent key`: your key is not allowed to use that credential. This looks the same whether or not the credential exists | Do not retry with other names or try to discover it. Tell the user which credential you needed so the operator can widen your key's scope |
+| `403 Forbidden` ("method not allowed") | `Method <M> is not allowed for this agent key`: your key may not use that HTTP method | Do not retry with a different method to work around it. Tell the user which method you needed |
 | `403 Forbidden` | The credential is not allowed for this host, or the target is blocked (internal address, the vault backend) | Do not retry with another host. Tell the user which credential and host were refused; the operator must add the host to the vault item's URIs or to `allowed_targets` |
 | `409 Conflict` | The credential name matches more than one vault item, or the field name appears twice on the item | Tell the user; the operator must rename one of them |
 | `422 Unprocessable Entity` | Malformed placeholder, unknown credential, or a value/field the item doesn't have | Call `GET /v1/credentials?detail=true` and copy a placeholder from it |

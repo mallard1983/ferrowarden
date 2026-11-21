@@ -13,10 +13,18 @@
 //!     "id": "uuid",
 //!     "name": "homelab-claude",
 //!     "token_hash": "hex-encoded-sha256",
-//!     "created_at": "2026-11-21T01:00:00Z"
+//!     "created_at": "2026-11-21T01:00:00Z",
+//!     "credentials": ["uptime_*"],
+//!     "methods": ["GET"]
 //!   }
 //! ]
 //! ```
+//!
+//! `credentials` and `methods` are the key's policy (see [`crate::policy`]);
+//! entries written by this version always contain both. An entry without them
+//! was written by 0.1.0 and loads as **deny-all**: the operator has to set a
+//! policy with `PATCH /v1/admin/keys/{id}`. `null` is rejected, so startup
+//! fails rather than guessing what was meant.
 //!
 //! # Key rotation
 //!
@@ -30,6 +38,8 @@ use sha2::{Digest, Sha256};
 use std::io;
 use std::path::Path;
 
+use crate::policy::{self, KeyPolicy};
+
 /// One entry in the on-disk key file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +49,61 @@ pub struct StoredKey {
     /// Hex-encoded SHA-256 of the plaintext token.
     pub token_hash: String,
     pub created_at: DateTime<Utc>,
+    /// Credential name patterns. Absent only in entries written by 0.1.0.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "policy::stored_credentials"
+    )]
+    pub credentials: Option<Vec<String>>,
+    /// Allowed HTTP methods. Absent only in entries written by 0.1.0.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "policy::stored_methods"
+    )]
+    pub methods: Option<Vec<String>>,
+}
+
+impl StoredKey {
+    /// An entry with an explicit policy.
+    pub fn new(
+        id: String,
+        name: String,
+        token_hash: String,
+        created_at: DateTime<Utc>,
+        policy: &KeyPolicy,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            token_hash,
+            created_at,
+            credentials: Some(policy.credentials.clone()),
+            methods: Some(policy.methods.clone()),
+        }
+    }
+
+    /// Whether the entry carries a policy (both fields present). A legacy
+    /// entry does not.
+    pub fn policy_set(&self) -> bool {
+        self.credentials.is_some() && self.methods.is_some()
+    }
+
+    /// The policy in effect: the stored one, with any missing field (a legacy
+    /// entry) denying everything.
+    pub fn policy(&self) -> KeyPolicy {
+        KeyPolicy {
+            credentials: self.credentials.clone().unwrap_or_default(),
+            methods: self.methods.clone().unwrap_or_default(),
+        }
+    }
+
+    /// Store `policy` explicitly (both fields).
+    pub fn set_policy(&mut self, policy: &KeyPolicy) {
+        self.credentials = Some(policy.credentials.clone());
+        self.methods = Some(policy.methods.clone());
+    }
 }
 
 /// Hash a token for storage or lookup.
@@ -68,8 +133,26 @@ pub fn load(path: &Path) -> io::Result<Vec<StoredKey>> {
     let raw = std::fs::read(path)?;
     // Same strictness as request bodies: duplicate keys and unknown fields make
     // the file ambiguous, so startup fails closed instead of guessing.
-    crate::api::strict_json::parse_strict(&raw)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("key file: {e}")))
+    let mut keys: Vec<StoredKey> = crate::api::strict_json::parse_strict(&raw)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("key file: {e}")))?;
+    // Policies are validated (and normalised) like API input; an invalid one
+    // fails startup instead of being loaded in some guessed form.
+    for key in &mut keys {
+        let id = key.id.clone();
+        let bad = |e: crate::error::FerroError| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("key file: key {id:?}: {e}"),
+            )
+        };
+        if let Some(list) = key.credentials.take() {
+            key.credentials = Some(policy::validate_credentials(list).map_err(bad)?);
+        }
+        if let Some(list) = key.methods.take() {
+            key.methods = Some(policy::validate_methods(list).map_err(bad)?);
+        }
+    }
+    Ok(keys)
 }
 
 /// Write all keys to disk atomically.
@@ -167,12 +250,16 @@ mod tests {
                 name: "agent-one".to_string(),
                 token_hash: hash_token("secret-token-one"),
                 created_at: Utc::now(),
+                credentials: None,
+                methods: None,
             },
             StoredKey {
                 id: "id-2".to_string(),
                 name: "agent-two".to_string(),
                 token_hash: hash_token("secret-token-two"),
                 created_at: Utc::now(),
+                credentials: None,
+                methods: None,
             },
         ];
 
@@ -207,6 +294,8 @@ mod tests {
             name: "old".to_string(),
             token_hash: "hash1".to_string(),
             created_at: Utc::now(),
+            credentials: None,
+            methods: None,
         }];
         save(&path, &v1).unwrap();
 
@@ -259,5 +348,102 @@ mod tests {
         assert!(load(&p).is_err());
         let (_d, p) = write_raw(&format!("[{ONE}] []"));
         assert!(load(&p).is_err());
+    }
+
+    // ── policy fields ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn legacy_entry_without_policy_loads_deny_all_and_is_marked() {
+        let (_d, p) = write_raw(&format!("[{ONE}]"));
+        let keys = load(&p).unwrap();
+        assert!(!keys[0].policy_set());
+        assert_eq!(keys[0].policy(), KeyPolicy::default());
+    }
+
+    #[test]
+    fn entry_with_both_fields_has_a_policy() {
+        let (_d, p) = write_raw(&format!(
+            "[{}]",
+            ONE.replace('}', r#","credentials":["a_*","a_*"],"methods":["get"]}"#)
+        ));
+        let keys = load(&p).unwrap();
+        assert!(keys[0].policy_set());
+        let policy = keys[0].policy();
+        assert_eq!(policy.credentials, vec!["a_*".to_string()]);
+        assert_eq!(policy.methods, vec!["GET".to_string()]);
+    }
+
+    #[test]
+    fn explicit_empty_lists_are_a_set_deny_all_policy() {
+        let (_d, p) = write_raw(&format!(
+            "[{}]",
+            ONE.replace('}', r#","credentials":[],"methods":[]}"#)
+        ));
+        let keys = load(&p).unwrap();
+        assert!(keys[0].policy_set());
+        assert!(keys[0].policy().credentials.is_empty());
+    }
+
+    #[test]
+    fn a_single_field_leaves_the_other_denied_and_the_policy_unset() {
+        let (_d, p) = write_raw(&format!(
+            "[{}]",
+            ONE.replace('}', r#","credentials":["*"]}"#)
+        ));
+        let keys = load(&p).unwrap();
+        assert!(!keys[0].policy_set());
+        assert_eq!(keys[0].policy().credentials, vec!["*".to_string()]);
+        assert!(keys[0].policy().methods.is_empty());
+    }
+
+    #[test]
+    fn null_policy_fields_fail_the_load() {
+        for field in ["credentials", "methods"] {
+            let (_d, p) = write_raw(&format!(
+                "[{}]",
+                ONE.replace('}', &format!(r#","{field}":null}}"#))
+            ));
+            let e = load(&p).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+            assert!(e.to_string().contains(&format!("`{field}`")), "{e}");
+        }
+    }
+
+    #[test]
+    fn invalid_policy_values_fail_the_load() {
+        for extra in [
+            r#","credentials":[""]"#,
+            r#","credentials":["a
+b"]"#,
+            r#","credentials":"*""#,
+            r#","methods":["TRACE"]"#,
+            r#","methods":["*","GET"]"#,
+        ] {
+            let (_d, p) = write_raw(&format!("[{}]", ONE.replace('}', &format!("{extra}}}"))));
+            assert!(load(&p).is_err(), "{extra}");
+        }
+    }
+
+    #[test]
+    fn policy_roundtrips_and_is_always_written_explicitly() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("keys.json");
+        let policy = KeyPolicy::from_raw(vec!["lab_*".into()], vec!["*".into()]).unwrap();
+        let keys = vec![StoredKey::new(
+            "i".into(),
+            "n".into(),
+            "h".into(),
+            Utc::now(),
+            &policy,
+        )];
+        save(&path, &keys).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("\"credentials\"") && raw.contains("\"methods\""),
+            "{raw}"
+        );
+        let loaded = load(&path).unwrap();
+        assert!(loaded[0].policy_set());
+        assert_eq!(loaded[0].policy(), policy);
     }
 }

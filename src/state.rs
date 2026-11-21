@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::events::{Action, EventLog, SecurityEvent};
 use crate::keys::hash_token;
 use crate::net::TargetPolicy;
+use crate::policy::KeyPolicy;
 use crate::vault::CredentialMap;
 
 /// A single agent API key entry.
@@ -17,6 +18,11 @@ pub struct AgentKey {
     pub id: String,
     pub name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// What this key may do. A legacy key without a policy is deny-all.
+    pub policy: KeyPolicy,
+    /// False for a key loaded from a 0.1.0 key file that has no policy yet
+    /// (it runs deny-all until a policy is set with PATCH).
+    pub policy_set: bool,
 }
 
 /// Lock state of the vault.
@@ -77,6 +83,36 @@ impl AppState {
             target_policy,
             events,
         }
+    }
+
+    /// Load the persisted agent keys from `path` into the key ring. Returns
+    /// how many of them have no policy (written by 0.1.0): those load as
+    /// deny-all and are marked `policy_set: false`, so the operator can find
+    /// them. A key file that is malformed, or has `null` or invalid policy
+    /// values, is an error (startup fails closed).
+    pub async fn load_keys(&self, path: &std::path::Path) -> std::io::Result<usize> {
+        let stored = crate::keys::load(path)?;
+        let mut without_policy = 0;
+        let mut map = self.agent_keys.write().await;
+        for k in stored {
+            let policy = k.policy();
+            let policy_set = k.policy_set();
+            if !policy_set {
+                without_policy += 1;
+            }
+            map.insert(
+                k.token_hash,
+                AgentKey {
+                    id: k.id,
+                    name: k.name,
+                    created_at: k.created_at,
+                    policy,
+                    policy_set,
+                },
+            );
+        }
+        tracing::info!("Loaded {} agent key(s) from {:?}", map.len(), path);
+        Ok(without_policy)
     }
 
     pub async fn is_locked(&self) -> bool {
@@ -242,6 +278,8 @@ mod tests {
             id: "test-id".to_string(),
             name: "test-agent".to_string(),
             created_at: chrono::Utc::now(),
+            policy: KeyPolicy::default(),
+            policy_set: true,
         };
         // Insert keyed by hash — matches how the admin create_key handler works
         state
@@ -262,6 +300,8 @@ mod tests {
             id: "test-id".to_string(),
             name: "test-agent".to_string(),
             created_at: chrono::Utc::now(),
+            policy: KeyPolicy::default(),
+            policy_set: true,
         };
         state
             .agent_keys

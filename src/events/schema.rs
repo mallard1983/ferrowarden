@@ -54,6 +54,8 @@ pub enum Action {
     KeyCreate,
     KeyRevoke,
     KeyList,
+    KeyPolicyChange,
+    PolicyPreview,
     AuditRead,
     StatusRead,
     VaultUnlock,
@@ -76,6 +78,8 @@ impl Action {
             Action::KeyCreate => "key_create",
             Action::KeyRevoke => "key_revoke",
             Action::KeyList => "key_list",
+            Action::KeyPolicyChange => "key_policy_change",
+            Action::PolicyPreview => "policy_preview",
             Action::AuditRead => "audit_read",
             Action::StatusRead => "status_read",
             Action::VaultUnlock => "vault_unlock",
@@ -97,7 +101,11 @@ impl Action {
             | Action::StatusRead => "web",
             Action::AgentAuth | Action::AdminAuth | Action::VaultUnlock => "authentication",
             Action::RateLimited => "network",
-            Action::KeyCreate | Action::KeyRevoke | Action::KeyList => "iam",
+            Action::KeyCreate
+            | Action::KeyRevoke
+            | Action::KeyList
+            | Action::KeyPolicyChange
+            | Action::PolicyPreview => "iam",
             Action::VaultLock
             | Action::VaultSync
             | Action::Startup
@@ -125,6 +133,8 @@ impl Action {
             Action::KeyCreate => "key creation",
             Action::KeyRevoke => "key revocation",
             Action::KeyList => "key listing",
+            Action::KeyPolicyChange => "key policy change",
+            Action::PolicyPreview => "policy preview",
             Action::AuditRead => "audit read",
             Action::StatusRead => "status read",
             Action::VaultUnlock => "vault unlock",
@@ -148,6 +158,8 @@ impl Action {
             Action::KeyCreate => "agent key created",
             Action::KeyRevoke => "agent key revoked",
             Action::KeyList => "agent keys listed",
+            Action::KeyPolicyChange => "agent key policy changed",
+            Action::PolicyPreview => "policy previewed",
             Action::AuditRead => "audit log read",
             Action::StatusRead => "status read",
             Action::VaultUnlock => "vault unlocked",
@@ -184,6 +196,8 @@ pub enum Reason {
     TargetBlocked,
     InvalidTargetUrl,
     CredentialHostNotAllowed,
+    CredentialOutOfScope,
+    MethodNotAllowed,
     RepromptRequired,
     UnknownCredential,
     AmbiguousCredential,
@@ -214,6 +228,8 @@ impl Reason {
                 | Reason::InvalidRequest
                 | Reason::TargetBlocked
                 | Reason::CredentialHostNotAllowed
+                | Reason::CredentialOutOfScope
+                | Reason::MethodNotAllowed
                 | Reason::RepromptRequired
         )
     }
@@ -231,6 +247,8 @@ impl Reason {
             Reason::TargetBlocked => "target not allowed by the outbound policy",
             Reason::InvalidTargetUrl => "invalid target URL",
             Reason::CredentialHostNotAllowed => "credential not bound to target host",
+            Reason::CredentialOutOfScope => "credential not available to this agent key",
+            Reason::MethodNotAllowed => "method not allowed for this agent key",
             Reason::RepromptRequired => "credential requires master password re-prompt",
             Reason::UnknownCredential => "unknown credential or field",
             Reason::AmbiguousCredential => "credential name is ambiguous",
@@ -261,6 +279,8 @@ impl From<&FerroError> for Reason {
             FerroError::CredentialHostNotAllowed { .. } => Reason::CredentialHostNotAllowed,
             FerroError::Unauthorized => Reason::InvalidKey,
             FerroError::AgentKeyNotFound => Reason::KeyNotFound,
+            FerroError::CredentialOutOfScope(_) => Reason::CredentialOutOfScope,
+            FerroError::MethodNotAllowed(_) => Reason::MethodNotAllowed,
             FerroError::ForwardFailed(_) => Reason::UpstreamError,
             FerroError::InvalidTargetUrl(_) => Reason::InvalidTargetUrl,
             FerroError::TargetBlocked(_) => Reason::TargetBlocked,
@@ -428,9 +448,12 @@ impl SecurityEvent {
                     vec!["access"]
                 }
             }
-            Action::CredentialsList | Action::KeyList | Action::AuditRead | Action::StatusRead => {
-                vec!["access"]
-            }
+            Action::CredentialsList
+            | Action::KeyList
+            | Action::PolicyPreview
+            | Action::AuditRead
+            | Action::StatusRead => vec!["access"],
+            Action::KeyPolicyChange => vec!["change"],
             Action::AgentAuth | Action::AdminAuth | Action::VaultUnlock => vec!["start"],
             Action::RateLimited | Action::RequestRejected => vec!["denied"],
             Action::KeyCreate => vec!["creation"],
@@ -566,6 +589,8 @@ mod tests {
             id: "11111111-1111-1111-1111-111111111111".into(),
             name: "monitoring-agent".into(),
             created_at: Utc::now(),
+            policy: Default::default(),
+            policy_set: true,
         }
     }
 
@@ -652,6 +677,8 @@ mod tests {
             (Action::KeyCreate, "iam", vec!["creation"]),
             (Action::KeyRevoke, "iam", vec!["deletion"]),
             (Action::KeyList, "iam", vec!["access"]),
+            (Action::KeyPolicyChange, "iam", vec!["change"]),
+            (Action::PolicyPreview, "iam", vec!["access"]),
             (Action::AuditRead, "web", vec!["access"]),
             (Action::StatusRead, "web", vec!["access"]),
             (Action::VaultUnlock, "authentication", vec!["start"]),
@@ -705,6 +732,8 @@ mod tests {
             Action::KeyCreate,
             Action::KeyRevoke,
             Action::KeyList,
+            Action::KeyPolicyChange,
+            Action::PolicyPreview,
             Action::AuditRead,
             Action::StatusRead,
             Action::VaultUnlock,
@@ -745,6 +774,14 @@ mod tests {
             ),
             (FerroError::Unauthorized, Reason::InvalidKey),
             (FerroError::AgentKeyNotFound, Reason::KeyNotFound),
+            (
+                FerroError::CredentialOutOfScope("x".into()),
+                Reason::CredentialOutOfScope,
+            ),
+            (
+                FerroError::MethodNotAllowed("GET".into()),
+                Reason::MethodNotAllowed,
+            ),
             (FerroError::ForwardFailed("x".into()), Reason::UpstreamError),
             (
                 FerroError::InvalidTargetUrl("x".into()),
@@ -801,6 +838,8 @@ mod tests {
                 Reason::CredentialHostNotAllowed,
                 "credential_host_not_allowed",
             ),
+            (Reason::CredentialOutOfScope, "credential_out_of_scope"),
+            (Reason::MethodNotAllowed, "method_not_allowed"),
             (Reason::RepromptRequired, "reprompt_required"),
             (Reason::UnknownCredential, "unknown_credential"),
             (Reason::AmbiguousCredential, "ambiguous_credential"),
@@ -830,6 +869,8 @@ mod tests {
                 id: long.clone(),
                 name: long.clone(),
                 created_at: Utc::now(),
+                policy: Default::default(),
+                policy_set: true,
             })
             .credentials([long.clone()])
             .detail_str("k", &long);
