@@ -1,7 +1,6 @@
 # CI/CD Pipeline
 
-> **Status: UNTESTED**
-> This document and the accompanying pipeline files have not been run against a real CI environment. They are a reasonable starting point based on the project's requirements, but will likely need adjustment. Known unknowns are called out inline.
+> **Status:** the **GitHub Actions** workflow (`.github/workflows/test.yml`) runs on every push to [github.com/mallard1983/ferrowarden](https://github.com/mallard1983/ferrowarden/actions) — formatting, clippy, unit tests and the full Docker integration suite. The **GitLab CI** file is still an untested draft; known unknowns are called out inline.
 
 ---
 
@@ -11,9 +10,9 @@
 push → build → unit tests → integration tests → (optional) build Docker image
 ```
 
-The unit tests (50 tests across all modules) run in a plain Rust environment with no external dependencies.
+The unit tests (run with `cargo test --bins`) need only a Rust toolchain. CI also runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
 
-The integration tests (11 tests in `tests/integration.rs`) require the full Docker Compose stack — Vaultwarden, bw-serve, ferrowarden, and mock-api — all healthy and communicating. This makes integration tests significantly harder to run in CI than unit tests, and the two are separated below so unit tests can pass without a Docker environment.
+The integration tests (`tests/integration.rs`) require the full Docker Compose stack — Vaultwarden, bw-serve, ferrowarden, and mock-api — all healthy and communicating. This makes integration tests significantly harder to run in CI than unit tests, and the two are separated below so unit tests can pass without a Docker environment.
 
 ---
 
@@ -45,7 +44,7 @@ See [`.gitlab-ci.yml`](../.gitlab-ci.yml).
 
 ## Option B: GitHub Actions
 
-Place `.github/workflows/test.yml` at the repo root. A draft is provided in this repository.
+`.github/workflows/test.yml` is in use and passing. Its actions are pinned to commit SHAs and the token is read-only (`permissions: contents: read`).
 
 ### Services vs Docker Compose
 
@@ -57,7 +56,7 @@ GitHub Actions supports `services:` for simple containers but not Docker Compose
 
 GitHub Actions secrets are set in the repository settings. The admin key does not need to be pre-configured — `dev-setup.sh` generates it. No secrets are required in the CI environment for the tests to run.
 
-### Draft Pipeline
+### Pipeline
 
 See [`.github/workflows/test.yml`](../.github/workflows/test.yml).
 

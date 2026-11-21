@@ -39,6 +39,17 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::env;
 
+/// Describe a captured value for an assertion message without printing it.
+/// Captured headers and bodies can contain real (test) credential values,
+/// and test output must never include credential values.
+fn describe(value: &str) -> String {
+    format!(
+        "<{} chars, still contains a placeholder: {}>",
+        value.len(),
+        value.contains("{{vault:")
+    )
+}
+
 // ── Test harness helpers ──────────────────────────────────────────────────────
 
 struct TestEnv {
@@ -214,8 +225,9 @@ async fn test_credential_substituted_in_authorization_header() {
     assert!(
         auth_header.contains("test-token-abc123def456"),
         "real credential value not found in forwarded Authorization header.\n\
-         Got: {auth_header}\n\
-         This means substitution failed — the placeholder was forwarded as-is."
+         Got: {}\n\
+         This means substitution failed — the placeholder was forwarded as-is.",
+        describe(auth_header)
     );
 
     // The placeholder must NOT have been forwarded
@@ -341,13 +353,15 @@ async fn test_multiple_placeholders_all_substituted() {
 
     assert!(
         api_key_header.contains("test-nas-key-11111111111111"),
-        "nas_api_key was not substituted in header. Got: {api_key_header}"
+        "nas_api_key was not substituted in header. Got: {}",
+        describe(api_key_header)
     );
 
     let body_str = captured["body"].as_str().unwrap_or("");
     assert!(
         body_str.contains("test-bearer-xyz789uvw012"),
-        "test_bearer was not substituted in body. Got: {body_str}"
+        "test_bearer was not substituted in body. Got: {}",
+        describe(body_str)
     );
 }
 
@@ -730,7 +744,7 @@ async fn test_echoed_credential_is_scrubbed_from_body() {
     // ...but the agent never sees it.
     assert!(
         !text.contains(TEST_API_TOKEN_VALUE),
-        "credential leaked via echo: {text}"
+        "credential leaked via echo (response not printed: it contains the value)"
     );
     assert!(text.contains("[REDACTED]"));
 }
@@ -753,7 +767,7 @@ async fn test_echoed_credential_is_scrubbed_from_headers() {
     let text = resp.text().await.unwrap();
     assert!(
         !text.contains(TEST_API_TOKEN_VALUE),
-        "credential leaked via header echo: {text}"
+        "credential leaked via header echo (response not printed: it contains the value)"
     );
 }
 
@@ -771,7 +785,10 @@ async fn test_vault_backend_is_not_a_valid_target() {
         let resp = env.forward_url("GET", url, json!({}), None).await;
         assert_eq!(resp.status(), 403, "{url} must be refused");
         let text = resp.text().await.unwrap();
-        assert!(!text.contains(TEST_API_TOKEN_VALUE), "{text}");
+        assert!(
+            !text.contains(TEST_API_TOKEN_VALUE),
+            "{url}: response contained the credential value (not printed)"
+        );
     }
 }
 

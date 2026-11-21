@@ -1,10 +1,17 @@
 # .github/workflows/test.yml
 #
-# UNTESTED — see docs/cicd.md before using this.
-# This is a draft based on the project's requirements. It will likely need
-# adjustment for your specific repository configuration.
+# Runs on github.com/mallard1983/ferrowarden: formatting, clippy and unit
+# tests on every push; the full Docker integration suite on pushes to the
+# default branch and on pull requests. See docs/cicd.md.
+#
+# Actions are pinned to commit SHAs (version in the comment); Dependabot
+# keeps them current.
 
 name: Test
+
+# Least privilege: the jobs only need to read the repository.
+permissions:
+  contents: read
 
 on:
   push:
@@ -19,15 +26,16 @@ jobs:
     name: Unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache Cargo
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -48,22 +56,23 @@ jobs:
   # ── Integration tests ─────────────────────────────────────────────────────────
   # Requires Docker Compose. Runs on pull requests and the default branch.
   #
-  # KNOWN UNKNOWNS (see docs/cicd.md):
-  # - Assumes docker compose (v2 plugin) is available on ubuntu-latest
-  # - dev-setup.sh wait times may need tuning for GitHub-hosted runner speed
+  # Runs scripts/dev-setup.sh as the runner user (UID 1001): the test stack
+  # handles non-1000 UIDs (see docker-compose.test.yml, vault-setup).
   integration:
     name: Integration tests
     runs-on: ubuntu-latest
     # Only run on PRs and the default branch to save runner minutes
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+        with:
+          toolchain: stable
 
       - name: Cache Cargo
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
