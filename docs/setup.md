@@ -34,36 +34,32 @@ Both scripts perform identical steps. Use `dev-setup.sh` on Linux/Mac and `dev-s
 
 ---
 
-## Step 0: Generate TLS Certificate
+## Step 0: Set Up TLS
 
-Ferrowarden requires TLS by default. Generate a certificate before starting the stack. For production, use a certificate from a trusted CA. For development or a homelab, a self-signed certificate is fine — your agent will need to either trust the cert or use `--cacert`.
+Ferrowarden requires TLS by default. The full TLS reference — including Pangolin/reverse-proxy setup, local CA generation, and installing the CA on Linux and Windows — is in **[docs/tls.md](tls.md)**.
+
+For a quick self-signed cert to get started (the setup scripts do this automatically):
 
 **Linux/Mac:**
 ```sh
 mkdir -p certs
-
 openssl req -x509 -newkey ed25519 \
-    -keyout certs/server.key \
-    -out certs/server.crt \
-    -days 365 -nodes \
-    -subj "/CN=ferrowarden"
+    -keyout certs/server.key -out certs/server.crt \
+    -days 365 -nodes -subj "/CN=ferrowarden"
 chmod 400 certs/server.key
 ```
 
 **Windows (PowerShell):**
 ```powershell
 New-Item -ItemType Directory -Force certs | Out-Null
-
 openssl req -x509 -newkey ed25519 `
-    -keyout certs\server.key `
-    -out certs\server.crt `
-    -days 365 -nodes `
-    -subj '/CN=ferrowarden' 2>$null
+    -keyout certs\server.key -out certs\server.crt `
+    -days 365 -nodes -subj '/CN=ferrowarden' 2>$null
 ```
 
-`openssl` ships with Git for Windows — if the command is not found, install Git for Windows. The `certs/` directory is in `.gitignore`. Never commit certificate files.
+`openssl` ships with Git for Windows. The `certs/` directory is gitignored — never commit cert files.
 
-If you are running ferrowarden on the same host as the agent (no network hop), you can disable TLS by setting `FERROWARDEN_TLS_ENABLED=false`. Ferrowarden will log a prominent warning. See [Security: Native TLS](security.md#10-native-tls-transport-security) for when this is acceptable.
+If the agent and Ferrowarden run on the same host (no network hop), you can skip TLS entirely with `FERROWARDEN_TLS_ENABLED=false`. Ferrowarden logs a prominent warning when this is set. See [Security: TLS](security.md#10-native-tls-transport-security) for when it is acceptable.
 
 ---
 

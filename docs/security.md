@@ -178,7 +178,7 @@ Before going to production:
 - [ ] Vaultwarden's `SIGNUPS_ALLOWED` is set to `false`
 - [ ] Vaultwarden is not exposed on a public port
 - [ ] `bw serve` port (8087) is not reachable from outside Docker (`internal: true` network)
-- [ ] TLS is enabled (`tls_enabled = true`, which is the default); if disabled, Ferrowarden and the agent must run on the same host with no network hop
+- [ ] TLS is configured — either Ferrowarden's built-in TLS or a TLS-terminating proxy (Pangolin, Caddy, Nginx). See [docs/tls.md](tls.md) for both options. If TLS is disabled, Ferrowarden and the agent must run on the same host with no network hop.
 - [ ] `tls_cert_file` and `tls_key_file` point to valid, non-expired certificates
 - [ ] All secret files are `chmod 600` and owned by the deployment user
 - [ ] `FERROWARDEN_ADMIN_KEY` is at least 32 random characters
