@@ -1,4 +1,4 @@
-FROM node:22-slim
+FROM node:26-slim
 
 # The entrypoint scripts use curl, wget, and python3 for Vaultwarden API calls
 # and health checks; openssl generates the internal CA and Vaultwarden
@@ -24,14 +24,18 @@ RUN npm install -g @bitwarden/cli@2026.11.0 \
 # is absent Node logs a warning and continues with the system CAs.
 ENV NODE_EXTRA_CA_CERTS=/pki/ca.crt
 
+# Helper scripts live in /usr/local/share/ferrowarden (world-readable), not in
+# /home/node: setup containers may run as the invoking user's UID (see
+# docker-compose.test.yml), and newer node images make /home/node private.
+#
 # bw-register.js: performs Bitwarden-compatible account registration using
 # only Node.js built-in crypto (no npm deps). The bw CLI has no register
 # command; this script calls POST /api/accounts/register directly.
-COPY bw-register.js /home/node/bw-register.js
+COPY bw-register.js /usr/local/share/ferrowarden/bw-register.js
 
 # bw-seed.js: seeds vault items via direct Vaultwarden API calls, so the test
 # fixtures do not depend on CLI item-creation behaviour.
-COPY bw-seed.js /home/node/bw-seed.js
+COPY bw-seed.js /usr/local/share/ferrowarden/bw-seed.js
 
 # Internal certificate generator, run by the one-shot internal-certs service.
 COPY gen-internal-certs.sh /usr/local/bin/gen-internal-certs.sh

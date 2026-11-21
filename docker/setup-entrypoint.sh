@@ -57,7 +57,7 @@ echo "[setup] Vaultwarden is ready."
 # POST /api/accounts/register directly. Uses only Node.js built-in modules.
 
 echo "[setup] Registering account: $EMAIL"
-if node /home/node/bw-register.js; then
+if node /usr/local/share/ferrowarden/bw-register.js; then
     echo "[setup] Account registration step complete."
 else
     echo "[setup] bw-register.js returned non-zero — will attempt to continue." >&2

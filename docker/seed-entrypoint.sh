@@ -60,4 +60,4 @@ SETUP_MASTER_PASSWORD="$(cat /run/secrets/bw_master_password)"
 export SETUP_MASTER_PASSWORD SETUP_EMAIL BW_SERVER_URL CREDENTIALS_FILE
 
 echo "Seeding credentials from $CREDENTIALS_FILE ..."
-exec node /home/node/bw-seed.js
+exec node /usr/local/share/ferrowarden/bw-seed.js
