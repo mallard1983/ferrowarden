@@ -16,7 +16,7 @@ First public release. Ferrowarden is a credential proxy for AI agents: credentia
 - **Response scrubbing** — every substituted value is removed from response bodies, headers and errors in raw, JSON-escaped, URL-encoded and base64 forms, plus common credential patterns. Binary responses are returned base64-encoded.
 - **Agent and admin keys** — agent keys stored only as SHA-256 hashes (optionally persisted); environment-only admin key (≥ 32 characters); key rotation via the admin API.
 - **Audit log** — credential names (never values), target, outcome and status for every request, in memory and as structured JSON log lines.
-- **Rate limiting** — per client IP, with `trusted_proxies` for deployments behind a reverse proxy.
+- **Rate limiting** — per client IP (agent limits configurable via `agent_rate_limit_per_minute` / `agent_rate_limit_burst`), with `trusted_proxies` for deployments behind a reverse proxy.
 - **Vault lifecycle** — file or manual unlock; periodic `bw serve` sync and credential refresh (`refresh_interval_secs`); automatic re-unlock in file mode after bw serve restarts.
 - **Configurable API prefix** — `api_prefix` moves every route except `/health` under a hard-to-guess path.
 - **Docker Compose stack** — Vaultwarden (pinned 1.37.5) with its web vault published for managing credentials; Bitwarden CLI 2026.11.0 `bw serve` on an internal-only network; internal CA and HTTPS between bw serve and Vaultwarden; settings via `.env` (see `.env.example`).

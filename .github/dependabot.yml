@@ -1,0 +1,41 @@
+# Dependabot version updates: weekly pull requests to keep dependencies
+# current. Security updates for vulnerable dependencies are separate and
+# enabled in the repository settings.
+version: 2
+updates:
+  # Rust crates (Cargo.toml / Cargo.lock)
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # GitHub Actions used in .github/workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Ferrowarden image base images (Dockerfile)
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # bw-cli / mock API images (docker/, tests/mock-api/)
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/tests/mock-api"
+    schedule:
+      interval: "weekly"
+
+  # Images pinned in the Compose files (e.g. vaultwarden/server)
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"

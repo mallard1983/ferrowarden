@@ -138,6 +138,7 @@ Behind a TLS reverse proxy such as Pangolin, see [docs/tls.md](docs/tls.md#pango
 | [Agent Skill](docs/agent-skill.md) | Reference doc for agents using the proxy (non-skill format) |
 | [Changelog](CHANGELOG.md) | Release notes and upgrade steps |
 | [Security Policy](SECURITY.md) | How to report a vulnerability privately |
+| [Contributing](CONTRIBUTING.md) | Development setup, checks, and pull request guidelines |
 
 ### Claude Code skill
 
@@ -167,6 +168,12 @@ The skill covers endpoint schemas, placeholder syntax, error handling, and worke
 - Every credential value used in a request is scrubbed from the response body, headers and error messages (raw, JSON-escaped, URL-encoded and base64 forms), followed by common credential patterns.
 
 See [Security Model](docs/security.md) for the full threat model and design rationale. To report a vulnerability, follow the [Security Policy](SECURITY.md) — please don't open a public issue.
+
+---
+
+## Contributing
+
+Contributions are welcome — bug reports, docs, tests and code. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the checks to run before a pull request, and the extra bar for security-sensitive changes. Please report vulnerabilities privately as described in the [Security Policy](SECURITY.md), not in public issues.
 
 ---
 
