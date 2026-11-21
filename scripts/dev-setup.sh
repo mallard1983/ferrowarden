@@ -32,6 +32,12 @@ set -e
 
 COMPOSE="docker compose -f docker-compose.test.yml"
 SECRETS_DIR="./secrets"
+
+# vault-setup runs as this user so it can write into ./secrets (see
+# docker-compose.test.yml). Ignored by Docker Desktop.
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+export HOST_UID HOST_GID
 FERROWARDEN_URL="${FERROWARDEN_URL:-http://localhost:3000}"
 
 echo "=================================================="
@@ -89,7 +95,12 @@ else
     echo "  Skipping: ferrowarden_admin_key already exists"
 fi
 
-chmod 600 "$SECRETS_DIR"/* 2>/dev/null || true
+# TEST FIXTURES ONLY: the test stack's containers run as UID 999
+# (ferrowarden) and 1000 (bw serve), and Compose mounts file secrets with
+# their host owner and mode, so make them readable to every UID. These
+# protect only fake credentials. Production uses chown instead — see
+# docs/setup.md.
+chmod 644 "$SECRETS_DIR"/* 2>/dev/null || true
 
 # ── Generate self-signed TLS certificate (if not already present) ────────────
 
@@ -146,6 +157,7 @@ VAULTWARDEN_SIGNUPS_ALLOWED=true $COMPOSE run --rm \
     -e SETUP_MASTER_PASSWORD="$(cat "$SECRETS_DIR/bw_master_password")" \
     vault-setup
 
+chmod 644 "$SECRETS_DIR/bw_client_id" "$SECRETS_DIR/bw_client_secret"   # test fixtures; see above
 echo "  API credentials written to secrets/"
 
 # ── Disable signups ────────────────────────────────────────────────────────────

@@ -164,6 +164,10 @@ services:
   # Run manually: docker compose -f docker-compose.test.yml run --rm vault-setup
   vault-setup:
     profiles: ["setup"]
+    # Runs as the invoking user (dev-setup.sh exports HOST_UID/HOST_GID) so it
+    # can write bw_client_id/bw_client_secret into the bind-mounted secrets/
+    # directory on Linux hosts whose UID is not 1000 (e.g. CI runners).
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     build:
       context: ./docker
       dockerfile: bw-cli.Dockerfile
