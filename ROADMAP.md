@@ -11,7 +11,9 @@ Make Ferrowarden a drop-in for more services and more agent harnesses.
 | Issue | Summary |
 |---|---|
 | [#8](https://github.com/mallard1983/ferrowarden/issues/8) | **Field placeholders** — `{{vault:name:username}}`, custom fields, notes, TOTP |
-| [#9](https://github.com/mallard1983/ferrowarden/issues/9) | **Per-agent scoping** — limit a key to certain credentials and HTTP methods |
+| [#22](https://github.com/mallard1983/ferrowarden/issues/22) | **Security event log** — complete, structured events for Loki, Wazuh and other SIEMs |
+| [#23](https://github.com/mallard1983/ferrowarden/issues/23) | **Strict JSON input** — reject unknown fields, `null` policy values and duplicate keys |
+| [#9](https://github.com/mallard1983/ferrowarden/issues/9) | **Per-agent scoping** — limit a key to certain credentials and HTTP methods, with a policy preview |
 | [#10](https://github.com/mallard1983/ferrowarden/issues/10) | **OpenAPI specification** for harnesses and automation tools such as n8n |
 | [#11](https://github.com/mallard1983/ferrowarden/issues/11) | **MCP server** (`ferrowarden-mcp`) so any MCP-capable harness can use Ferrowarden |
 | [#12](https://github.com/mallard1983/ferrowarden/issues/12) | **Push notifications** for blocked requests and security events (Gotify, webhooks) |
@@ -23,6 +25,7 @@ Keep humans in control of sensitive actions, and keep derived and newly created 
 
 | Issue | Summary |
 |---|---|
+| [#24](https://github.com/mallard1983/ferrowarden/issues/24) | **Admin web UI** — Vaultwarden sign-in, key and policy management, "check policy" |
 | [#14](https://github.com/mallard1983/ferrowarden/issues/14) | **Human approval** for sensitive credentials, with time-boxed grants |
 | [#15](https://github.com/mallard1983/ferrowarden/issues/15) | **Server-side session tokens** — capture login JWTs/tickets so the agent never sees them |
 | [#16](https://github.com/mallard1983/ferrowarden/issues/16) | **Generate and store** new credentials without the agent seeing the value |
@@ -46,4 +49,5 @@ A typical "deploy a new service" task, once the roadmap lands, never exposes a s
 2. **Write** the compose `.env` on the Docker host with the password substituted (#18); the command policy protects that file from being read back (#19).
 3. **Start** the stack with an allowed `docker compose up -d` (#17).
 4. **Configure** the service through its API with the password and, after login, a captured session token (#15).
-5. **Ask a human** first if the target is sensitive (#14), and **alert** on anything blocked along the way (#12).
+5. **Ask a human** first if the target is sensitive (#14, in the web UI #24), and **alert** on anything blocked along the way (#12).
+6. **Record** every step as a security event your SIEM can alert on (#22).
