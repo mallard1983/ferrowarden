@@ -1,0 +1,24 @@
+{% extends "ui/base.html" %}
+{% block title %}Create key{% endblock %}
+{% block content %}
+<h1>Create key</h1>
+{% include "ui/_sudo.html" %}
+{% if let Some(message) = error %}<p class="alert error" role="alert">{{ message }}</p>{% endif %}
+<form method="post" action="/ui/keys/new">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<label for="name">Name</label>
+<input id="name" name="name" type="text" maxlength="128" required autocomplete="off" value="{{ name }}">
+<label for="credentials">Credential patterns</label>
+<p class="muted hint">One pattern per line. <code>*</code> matches any run of characters; a line with just <code>*</code> allows every credential. Leave empty to allow none.</p>
+<textarea id="credentials" name="credentials" rows="6" spellcheck="false" autocomplete="off">
+{{ patterns }}</textarea>
+<fieldset>
+<legend>Methods</legend>
+{% for m in methods %}<label class="check"><input type="checkbox" name="{{ m.field }}" value="1"{% if m.checked %} checked{% endif %}> {{ m.label }}</label>
+{% endfor %}<label class="check"><input type="checkbox" name="m_all" value="1"{% if all_methods %} checked{% endif %}> All methods (<code>*</code>)</label>
+</fieldset>
+<p class="muted hint">A key with no patterns or no methods can do nothing. Both lists are always explicit; there is no default.</p>
+<button type="submit">Create key</button>
+<a class="button secondary" href="/ui/keys">Cancel</a>
+</form>
+{% endblock %}

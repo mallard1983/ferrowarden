@@ -2,6 +2,7 @@ pub mod admin;
 pub mod credentials;
 pub mod forward;
 pub mod health;
+pub mod key_service;
 pub mod strict_json;
 pub mod unlock;
 

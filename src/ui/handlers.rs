@@ -26,16 +26,16 @@ use crate::middleware::request_context::RequestContext;
 use crate::ui::crypto::{self, Kdf};
 use crate::ui::lockout::LockedBy;
 use crate::ui::pages::{
-    InsecurePage, LoginPage, MessagePage, ProviderOption, StatusPage, TwoFactorPage,
+    InsecurePage, LoginPage, MessagePage, Nav, ProviderOption, StatusPage, SudoInfo, TwoFactorPage,
 };
 use crate::ui::session::{
     random_token, secrets_equal, Lookup, PendingCheck, PendingLogin, SessionView,
 };
 use crate::ui::vw_login::{LoginOutcome, Provider, TwoFactorRequired, VwError};
 use crate::ui::web::{
-    clear_cookie, cookie_value, is_form_content_type, origin_ok, parse_form, read_body, set_cookie,
-    Form, Transport, LOGIN_COOKIE, LOGIN_COOKIE_MAX_AGE, MAX_FORM_BYTES, PENDING_COOKIE,
-    PENDING_COOKIE_MAX_AGE, SESSION_COOKIE,
+    clear_cookie, cookie_value, is_form_content_type, origin_ok, parse_form, read_body, safe_next,
+    set_cookie, Form, Transport, LOGIN_COOKIE, LOGIN_COOKIE_MAX_AGE, MAX_FORM_BYTES,
+    PENDING_COOKIE, PENDING_COOKIE_MAX_AGE, SESSION_COOKIE,
 };
 use crate::ui::{lock, UiState};
 
@@ -59,6 +59,7 @@ fn login_notice(code: &str) -> Option<&'static str> {
         "failed" => Some(MSG_INVALID),
         "logged_out" => Some("You have been signed out."),
         "session" => Some("Your session ended. Sign in again."),
+        "sudo" => Some("Sign in again to continue."),
         _ => None,
     }
 }
@@ -66,14 +67,14 @@ fn login_notice(code: &str) -> Option<&'static str> {
 // ── Response plumbing ─────────────────────────────────────────────────────────
 
 pub struct Reply {
-    status: StatusCode,
+    pub(super) status: StatusCode,
     body: Option<String>,
     location: Option<String>,
     cookies: Vec<String>,
 }
 
 impl Reply {
-    fn html(status: StatusCode, body: String) -> Self {
+    pub(super) fn html(status: StatusCode, body: String) -> Self {
         Self {
             status,
             body: Some(body),
@@ -82,7 +83,7 @@ impl Reply {
         }
     }
 
-    fn redirect(location: &str) -> Self {
+    pub(super) fn redirect(location: &str) -> Self {
         Self {
             status: StatusCode::SEE_OTHER,
             body: None,
@@ -91,12 +92,12 @@ impl Reply {
         }
     }
 
-    fn cookie(mut self, cookie: String) -> Self {
+    pub(super) fn cookie(mut self, cookie: String) -> Self {
         self.cookies.push(cookie);
         self
     }
 
-    fn clear(self, name: &str) -> Self {
+    pub(super) fn clear(self, name: &str) -> Self {
         self.cookie(clear_cookie(name))
     }
 }
@@ -131,7 +132,7 @@ impl IntoResponse for Reply {
     }
 }
 
-fn page(status: StatusCode, rendered: askama::Result<String>) -> Reply {
+pub(super) fn page(status: StatusCode, rendered: askama::Result<String>) -> Reply {
     match rendered {
         Ok(body) => Reply::html(status, body),
         // Never show the template error: it could quote template source.
@@ -148,6 +149,7 @@ pub fn insecure_page(ui: &UiState) -> Response {
         StatusCode::BAD_REQUEST,
         InsecurePage {
             css_path: &ui.css_path,
+            nav: None,
         }
         .render(),
     )
@@ -155,7 +157,7 @@ pub fn insecure_page(ui: &UiState) -> Response {
 }
 
 impl UiState {
-    fn message(
+    pub(super) fn message(
         &self,
         status: StatusCode,
         heading: &str,
@@ -166,6 +168,7 @@ impl UiState {
             status,
             MessagePage {
                 css_path: &self.css_path,
+                nav: None,
                 heading,
                 message,
                 link: link.map(|l| l.0),
@@ -175,7 +178,7 @@ impl UiState {
         )
     }
 
-    fn internal_error(&self) -> Reply {
+    pub(super) fn internal_error(&self) -> Reply {
         self.message(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Something went wrong",
@@ -230,7 +233,12 @@ impl UiState {
     }
 
     /// A POST refused for CSRF or origin reasons (403).
-    fn rejected_event(&self, ctx: &RequestContext, endpoint: &'static str, why: &'static str) {
+    pub(super) fn rejected_event(
+        &self,
+        ctx: &RequestContext,
+        endpoint: &'static str,
+        why: &'static str,
+    ) {
         self.app.events.emit(
             SecurityEvent::new(Action::RequestRejected)
                 .request(ctx)
@@ -241,7 +249,12 @@ impl UiState {
         );
     }
 
-    fn forbidden(&self, ctx: &RequestContext, endpoint: &'static str, why: &'static str) -> Reply {
+    pub(super) fn forbidden(
+        &self,
+        ctx: &RequestContext,
+        endpoint: &'static str,
+        why: &'static str,
+    ) -> Reply {
         self.rejected_event(ctx, endpoint, why);
         self.message(
             StatusCode::FORBIDDEN,
@@ -270,6 +283,7 @@ impl UiState {
         status: StatusCode,
         error: Option<&str>,
         notice: Option<&str>,
+        next: Option<&str>,
     ) -> Reply {
         let Some(token) = Self::login_token(headers) else {
             return self.internal_error();
@@ -278,9 +292,11 @@ impl UiState {
             status,
             LoginPage {
                 css_path: &self.css_path,
+                nav: None,
                 csrf: &token,
                 error,
                 notice,
+                next,
             }
             .render(),
         )
@@ -329,6 +345,7 @@ impl UiState {
             status,
             TwoFactorPage {
                 css_path: &self.css_path,
+                nav: None,
                 csrf: &token,
                 error,
                 notice,
@@ -359,7 +376,7 @@ impl UiState {
 
     /// Who is calling? Emits `ui_session_expired` when it finds a session
     /// that ran out.
-    fn authenticate(&self, headers: &HeaderMap, ctx: &RequestContext) -> Auth {
+    pub(super) fn authenticate(&self, headers: &HeaderMap, ctx: &RequestContext) -> Auth {
         let Some(id) = cookie_value(headers, SESSION_COOKIE) else {
             return Auth::None;
         };
@@ -376,13 +393,90 @@ impl UiState {
         }
     }
 
+    /// A session, or the redirect that sends the browser to sign in.
+    pub(super) fn require_session(
+        &self,
+        headers: &HeaderMap,
+        ctx: &RequestContext,
+    ) -> Result<SessionView, Reply> {
+        match self.authenticate(headers, ctx) {
+            Auth::Session(view) => Ok(view),
+            Auth::Expired => Err(Reply::redirect("/ui/login?m=session").clear(SESSION_COOKIE)),
+            Auth::None => Err(Reply::redirect("/ui/login")),
+        }
+    }
+
+    /// The sudo window: a sensitive action needs a sign-in within the last
+    /// ten minutes. If it is stale, the redirect to sign in again, which
+    /// brings the browser back to `next` afterwards. Used on the GET of a
+    /// sensitive form and on its POST.
+    pub(super) fn require_sudo(&self, view: &SessionView, next: &str) -> Result<(), Reply> {
+        if view.sudo_active(self.now()) {
+            return Ok(());
+        }
+        // `next` is built from fixed paths and a validated key id; it goes
+        // through the same validator as one read from the query, so the
+        // redirect can never carry anything else.
+        let target = match safe_next(next) {
+            Some(next) => format!("/ui/login?m=sudo&next={next}"),
+            None => "/ui/login?m=sudo".to_string(),
+        };
+        Err(Reply::redirect(&target))
+    }
+
+    /// "Signed in N minutes ago" and the sudo state, for pages with
+    /// sensitive actions.
+    pub(super) fn sudo_info(&self, view: &SessionView) -> SudoInfo {
+        let now = self.now();
+        let minutes = view.signed_in_minutes(now);
+        SudoInfo {
+            active: view.sudo_active(now),
+            signed_in: match minutes {
+                0 => "just now".to_string(),
+                1 => "1 minute ago".to_string(),
+                n => format!("{n} minutes ago"),
+            },
+        }
+    }
+
+    /// A message page inside the signed-in frame (with the navigation).
+    pub(super) async fn message_in(
+        &self,
+        view: &SessionView,
+        status: StatusCode,
+        heading: &str,
+        message: &str,
+        link: Option<(&str, &str)>,
+    ) -> Reply {
+        let email = self.account_email().await.unwrap_or_default();
+        page(
+            status,
+            MessagePage {
+                css_path: &self.css_path,
+                nav: Some(Nav {
+                    current: "",
+                    account_email: &email,
+                    csrf: &view.csrf,
+                }),
+                heading,
+                message,
+                link: link.map(|l| l.0),
+                link_label: link.map(|l| l.1).unwrap_or(""),
+            }
+            .render(),
+        )
+    }
+
     /// Start a session after a verified sign-in: new id (rotation), the old
     /// session and any pending login are gone, the login cookie is cleared.
+    /// The browser goes to `next` if it passes `safe_next` again, else to
+    /// the status page.
     fn start_session(
         &self,
         ctx: &RequestContext,
         headers: &HeaderMap,
         provider: Option<Provider>,
+        next: Option<&str>,
     ) -> Reply {
         let now = self.now();
         let created = {
@@ -398,7 +492,10 @@ impl UiState {
         lock(&self.pending).clear();
         lock(&self.lockouts).record_success(ctx.client_ip);
         self.login_event(ctx, Outcome::Success, None, provider, StatusCode::SEE_OTHER);
-        Reply::redirect("/ui/")
+        let target = next
+            .and_then(safe_next)
+            .unwrap_or_else(|| "/ui/".to_string());
+        Reply::redirect(&target)
             .cookie(set_cookie(SESSION_COOKIE, &id, None))
             .clear(PENDING_COOKIE)
             .clear(LOGIN_COOKIE)
@@ -428,7 +525,7 @@ impl UiState {
     }
 }
 
-enum Auth {
+pub(super) enum Auth {
     Session(SessionView),
     Expired,
     None,
@@ -456,15 +553,18 @@ pub async fn fallback(
 ) -> Reply {
     let path = uri.path();
     if path == "/ui" || path.starts_with("/ui/") {
-        return match ui.authenticate(&headers, &ctx) {
-            Auth::Session(_) => ui.message(
-                StatusCode::NOT_FOUND,
-                "Not found",
-                "There is nothing here.",
-                Some(("/ui/", "Status")),
-            ),
-            Auth::Expired => Reply::redirect("/ui/login?m=session").clear(SESSION_COOKIE),
-            Auth::None => Reply::redirect("/ui/login"),
+        return match ui.require_session(&headers, &ctx) {
+            Ok(view) => {
+                ui.message_in(
+                    &view,
+                    StatusCode::NOT_FOUND,
+                    "Not found",
+                    "There is nothing here.",
+                    Some(("/ui/", "Status")),
+                )
+                .await
+            }
+            Err(redirect) => redirect,
         };
     }
     ui.message(
@@ -508,6 +608,11 @@ pub async fn index(
     };
 
     let email = ui.account_email().await.unwrap_or_default();
+    let nav = Nav {
+        current: "status",
+        account_email: &email,
+        csrf: &view.csrf,
+    };
     let vault_locked = ui.app.is_locked().await;
     let credential_count = ui.app.credentials.read().await.len();
     let (key_count, keys_without_policy) = {
@@ -530,7 +635,7 @@ pub async fn index(
         StatusCode::OK,
         StatusPage {
             css_path: &ui.css_path,
-            csrf: &view.csrf,
+            nav: Some(nav),
             account_email: &email,
             vault_locked,
             credential_count,
@@ -555,21 +660,40 @@ pub async fn login_get(
     headers: HeaderMap,
     uri: Uri,
 ) -> Reply {
+    // `?m=` picks a fixed message; `?next=` is where to go after signing in.
+    // Anything else, or a bad `next`, is ignored.
+    let (code, next) = match uri
+        .query()
+        .and_then(|q| parse_form(q.as_bytes(), &["m", "next"]).ok())
+    {
+        Some(mut f) => (f.take("m"), f.take("next").and_then(|n| safe_next(&n))),
+        None => (None, None),
+    };
     match ui.authenticate(&headers, &ctx) {
-        Auth::Session(_) => return Reply::redirect("/ui/"),
+        Auth::Session(view) => {
+            // A current sign-in needs no form. A stale one does when the
+            // browser came for a specific page that needs a recent sign-in.
+            match &next {
+                Some(next) if view.sudo_active(ui.now()) => return Reply::redirect(next),
+                Some(_) => {}
+                None => return Reply::redirect("/ui/"),
+            }
+        }
         Auth::Expired => {
             return ui
-                .login_page(&headers, StatusCode::OK, None, login_notice("session"))
+                .login_page(
+                    &headers,
+                    StatusCode::OK,
+                    None,
+                    login_notice("session"),
+                    next.as_deref(),
+                )
                 .clear(SESSION_COOKIE)
         }
         Auth::None => {}
     }
-    let notice = uri
-        .query()
-        .and_then(|q| parse_form(q.as_bytes(), &["m"]).ok())
-        .and_then(|mut f| f.take("m"))
-        .and_then(|m| login_notice(&m));
-    ui.login_page(&headers, StatusCode::OK, None, notice)
+    let notice = code.and_then(|m| login_notice(&m));
+    ui.login_page(&headers, StatusCode::OK, None, notice, next.as_deref())
 }
 
 pub async fn login_post(
@@ -584,7 +708,10 @@ pub async fn login_post(
     if !origin_ok(headers, &transport) {
         return ui.forbidden(&ctx, "/ui/login", "origin_check_failed");
     }
-    let mut form = match ui.read_form(headers, body, &["csrf", "password"]).await {
+    let mut form = match ui
+        .read_form(headers, body, &["csrf", "password", "next"])
+        .await
+    {
         Ok(form) => form,
         Err(reply) => return reply,
     };
@@ -595,6 +722,8 @@ pub async fn login_post(
     let Some(password) = form.take("password") else {
         return ui.back_to_login(StatusCode::BAD_REQUEST, "Bad request", MSG_BAD_REQUEST);
     };
+    // Validated again: the hidden field is as tamperable as a query string.
+    let next = form.take("next").and_then(|n| safe_next(&n));
     drop(form);
 
     // Lockouts come first: no key derivation, no upstream call.
@@ -616,6 +745,7 @@ pub async fn login_post(
             StatusCode::BAD_REQUEST,
             Some("Enter the master password."),
             None,
+            next.as_deref(),
         );
     }
 
@@ -683,9 +813,9 @@ pub async fn login_post(
     };
 
     match ui.vw.token(&email, &auth_hash, None).await {
-        Ok(LoginOutcome::Authenticated) => ui.start_session(&ctx, headers, None),
+        Ok(LoginOutcome::Authenticated) => ui.start_session(&ctx, headers, None, next.as_deref()),
         Ok(LoginOutcome::TwoFactorRequired(two_factor)) => {
-            begin_two_factor(&ui, &ctx, auth_hash, email, two_factor)
+            begin_two_factor(&ui, &ctx, auth_hash, email, two_factor, next)
         }
         Ok(LoginOutcome::InvalidCredentials) => {
             lock(&ui.lockouts).record_failure(ip, ui.now());
@@ -696,7 +826,13 @@ pub async fn login_post(
                 None,
                 StatusCode::UNAUTHORIZED,
             );
-            ui.login_page(headers, StatusCode::UNAUTHORIZED, Some(MSG_INVALID), None)
+            ui.login_page(
+                headers,
+                StatusCode::UNAUTHORIZED,
+                Some(MSG_INVALID),
+                None,
+                next.as_deref(),
+            )
         }
         Err(VwError::RateLimited) => upstream_limited(),
         Err(VwError::Upstream) => upstream_error(StatusCode::BAD_GATEWAY),
@@ -711,6 +847,7 @@ fn begin_two_factor(
     auth_hash: Zeroizing<String>,
     email: String,
     two_factor: TwoFactorRequired,
+    next: Option<String>,
 ) -> Reply {
     if two_factor.providers.is_empty() {
         // The password is right but nothing here can finish the login. The
@@ -728,7 +865,10 @@ fn begin_two_factor(
             MSG_NO_SUPPORTED_FACTOR,
         );
     }
-    let login = PendingLogin::new(auth_hash, email, two_factor, ctx.client_ip, ui.now());
+    // `next` stays on the server, with the pending login, until the second
+    // factor is verified.
+    let login =
+        PendingLogin::new(auth_hash, email, two_factor, ctx.client_ip, ui.now()).with_next(next);
     let Some(id) = lock(&ui.pending).set(login) else {
         return ui.internal_error();
     };
@@ -946,7 +1086,13 @@ async fn verify_code(
     drop(hash);
 
     match result {
-        Ok(LoginOutcome::Authenticated) => ui.start_session(ctx, headers, Some(provider)),
+        Ok(LoginOutcome::Authenticated) => {
+            let next = lock(&ui.pending)
+                .peek(pending_id, ip, ui.now())
+                .ok()
+                .and_then(|p| p.next.clone());
+            ui.start_session(ctx, headers, Some(provider), next.as_deref())
+        }
         // Anything but a success on the second step is a rejected code (the
         // server asking for the second factor again counts as a rejection).
         Ok(LoginOutcome::InvalidCredentials) | Ok(LoginOutcome::TwoFactorRequired(_)) => {

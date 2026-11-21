@@ -1,5 +1,6 @@
 {% extends "ui/base.html" %}
 {% block title %}HTTPS required{% endblock %}
+{% block main_class %}narrow{% endblock %}
 {% block content %}
 <h1>HTTPS is required</h1>
 <p>This page accepts the vault master password, so Ferrowarden only serves it over an encrypted connection. This request arrived over plain HTTP, so the sign-in form is not shown.</p>

@@ -15,6 +15,7 @@
 //!   upstream call;
 //! * no scripts, no external assets, strict security headers.
 
+mod admin_pages;
 pub mod crypto;
 mod handlers;
 pub mod lockout;
@@ -232,6 +233,20 @@ pub fn router(ui: Arc<UiState>) -> Router {
             get(handlers::twofa_get).post(handlers::twofa_post),
         )
         .route("/ui/logout", post(handlers::logout_post))
+        .route("/ui/keys", get(admin_pages::keys_list))
+        .route(
+            "/ui/keys/new",
+            get(admin_pages::key_new_get).post(admin_pages::key_new_post),
+        )
+        .route(
+            "/ui/keys/{id}",
+            get(admin_pages::key_get).post(admin_pages::key_post),
+        )
+        .route(
+            "/ui/keys/{id}/revoke",
+            get(admin_pages::revoke_get).post(admin_pages::revoke_post),
+        )
+        .route("/ui/audit", get(admin_pages::audit_get))
         .route("/ui/static/{file}", get(handlers::static_file))
         .fallback(handlers::fallback)
         .with_state(ui.clone())

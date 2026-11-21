@@ -103,6 +103,10 @@ Every response, including `/health`, 404s and 429s, carries an `X-Request-Id` he
 | `ui_session_expired` | authentication / end | An admin UI session that ran out (idle or absolute limit) was detected on its next request |
 | `ui_two_factor_email_sent` | authentication / info | The UI asked Vaultwarden to email a second-factor code (failure: reason `upstream_rate_limited` or `upstream_error`). Never the code |
 
+### The `via` detail
+
+The key and audit events (`key_create`, `key_list`, `key_revoke`, `key_policy_change`, `policy_preview`, `audit_read`) carry `ferrowarden.details.via`: `"api"` when the request came through the JSON admin API, `"ui"` when the operator used the [admin web UI](admin-ui.md). Both paths run the same code, so the rest of the event is identical. `audit_read` also has `details.filtered: true` when the UI filtered the list. Tokens are never part of any event.
+
 Authentication happens **before** the request body is looked at. A caller without a valid key therefore gets `401` and an `agent_auth` / `admin_auth` event, never a parse error or a `request_rejected` event.
 
 ### Rate limiting is aggregated

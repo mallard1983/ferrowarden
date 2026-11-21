@@ -3,22 +3,17 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use chrono::Utc;
-use rand::RngExt;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
-use uuid::Uuid;
 
-use crate::api::credentials::visible_details;
-use crate::api::forward::check_only;
+use crate::api::key_service::{self, AuditFilter, Caller, CreateKeyResponse, KeySummary, Via};
 use crate::api::strict_json::StrictJson;
 use crate::error::{FerroError, FerroResult};
 use crate::events::{emit_rejected, truncate, Action, Reason, SecurityEvent};
-use crate::keys::{hash_token, load, save, StoredKey};
 use crate::middleware::request_context::RequestContext;
-use crate::policy::{self, KeyPolicy, Patch};
+use crate::policy::{self, Patch};
 use crate::proxy::forward::ProxyRequest;
-use crate::state::{AgentKey, AppState};
+use crate::state::AppState;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -60,45 +55,6 @@ pub struct PreviewRequest {
     pub request: Option<ProxyRequest>,
 }
 
-#[derive(Serialize)]
-pub struct CreateKeyResponse {
-    pub id: String,
-    pub name: String,
-    /// The token value — shown only once at creation, never stored in plaintext.
-    pub token: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub credentials: Vec<String>,
-    pub methods: Vec<String>,
-    pub policy_set: bool,
-}
-
-#[derive(Serialize)]
-pub struct KeySummary {
-    pub id: String,
-    pub name: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    /// Credential patterns the key may use (`["*"]` = all, `[]` = none).
-    pub credentials: Vec<String>,
-    /// Methods the key may use (`["*"]` = all, `[]` = none).
-    pub methods: Vec<String>,
-    /// False for a key created with 0.1.0 that has no policy yet: it is
-    /// deny-all until one is set with PATCH.
-    pub policy_set: bool,
-}
-
-impl KeySummary {
-    fn new(k: &AgentKey) -> Self {
-        Self {
-            id: k.id.clone(),
-            name: k.name.clone(),
-            created_at: k.created_at,
-            credentials: k.policy.credentials.clone(),
-            methods: k.policy.methods.clone(),
-            policy_set: k.policy_set,
-        }
-    }
-}
-
 /// POST /v1/admin/keys
 ///
 /// Create a new agent API key. Returns the token once — only its SHA-256 hash
@@ -121,94 +77,13 @@ pub async fn create_key(
         }
     };
 
-    match create_key_inner(&state, req).await {
-        Ok(created) => {
-            // The token itself never leaves the response body: only id + name.
-            state.events.emit(
-                SecurityEvent::new(Action::KeyCreate)
-                    .request(&ctx)
-                    .status(StatusCode::CREATED.as_u16())
-                    .detail("key_id", created.id.as_str())
-                    .detail_str("key_name", &created.name)
-                    .detail("credentials", created.credentials.clone())
-                    .detail("methods", created.methods.clone()),
-            );
-            Ok((StatusCode::CREATED, Json(created)))
-        }
-        Err(e) => {
-            state.events.emit(
-                SecurityEvent::new(Action::KeyCreate)
-                    .request(&ctx)
-                    .failed_with(&e)
-                    .status(e.status_code().as_u16()),
-            );
-            Err(e)
-        }
-    }
-}
-
-async fn create_key_inner(
-    state: &Arc<AppState>,
-    req: CreateKeyRequest,
-) -> FerroResult<CreateKeyResponse> {
-    let id = Uuid::new_v4().to_string();
-    let token = generate_token();
-    let token_hash = hash_token(&token);
-    let now = Utc::now();
-
-    let name = req.name.trim().to_string();
-    if name.is_empty() || name.len() > 128 {
-        return Err(FerroError::InvalidRequest(
-            "name must be 1-128 characters".to_string(),
-        ));
-    }
-
-    let policy = KeyPolicy::from_raw(req.credentials, req.methods)?;
-
-    // Serialize key-file updates: without this, two concurrent creates (or a
-    // create and a revoke) can each read the old file and drop the other's change.
-    let _guard = state.keys_file_lock.lock().await;
-
-    // Persist first. If the write fails, the key is never activated, so the
-    // caller is not left with an error response for a token that still works.
-    if let Some(ref path) = state.config.keys_file {
-        let mut stored = load(path)
-            .map_err(|e| FerroError::Internal(format!("Failed to read key file: {e}")))?;
-        stored.push(StoredKey::new(
-            id.clone(),
-            name.clone(),
-            token_hash.clone(),
-            now,
-            &policy,
-        ));
-        save(path, &stored)
-            .map_err(|e| FerroError::Internal(format!("Failed to write key file: {e}")))?;
-    }
-
-    // Insert into in-memory map keyed by hash — plaintext never stored
-    state.agent_keys.write().await.insert(
-        token_hash,
-        AgentKey {
-            id: id.clone(),
-            name: name.clone(),
-            created_at: now,
-            policy: policy.clone(),
-            policy_set: true,
-        },
-    );
-
-    tracing::info!(agent_id = %id, agent_name = %name, "Agent key created");
-
-    Ok(CreateKeyResponse {
-        id,
-        name,
-        // Return the raw token once — the caller must store it
-        token,
-        created_at: now,
-        credentials: policy.credentials,
-        methods: policy.methods,
-        policy_set: true,
-    })
+    let caller = Caller {
+        ctx: &ctx,
+        via: Via::Api,
+    };
+    let created =
+        key_service::create_key(&state, caller, &req.name, req.credentials, req.methods).await?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 /// GET /v1/admin/keys
@@ -221,17 +96,11 @@ pub async fn list_keys(
     headers: HeaderMap,
 ) -> FerroResult<Json<Vec<KeySummary>>> {
     authenticate_admin(&state, &ctx, &headers, "/v1/admin/keys")?;
-
-    let keys = state.agent_keys.read().await;
-    let summaries: Vec<KeySummary> = keys.values().map(KeySummary::new).collect();
-
-    state.events.emit(
-        SecurityEvent::new(Action::KeyList)
-            .request(&ctx)
-            .status(200)
-            .detail("count", summaries.len()),
-    );
-    Ok(Json(summaries))
+    let caller = Caller {
+        ctx: &ctx,
+        via: Via::Api,
+    };
+    Ok(Json(key_service::list_keys(&state, caller).await))
 }
 
 /// DELETE /v1/admin/keys/{id}
@@ -245,69 +114,12 @@ pub async fn revoke_key(
     Path(id): Path<String>,
 ) -> FerroResult<Json<serde_json::Value>> {
     authenticate_admin(&state, &ctx, &headers, "/v1/admin/keys/{id}")?;
-
-    match revoke_key_inner(&state, &id).await {
-        Ok(name) => {
-            state.events.emit(
-                SecurityEvent::new(Action::KeyRevoke)
-                    .request(&ctx)
-                    .status(200)
-                    .detail_str("key_id", &id)
-                    .detail_str("key_name", &name),
-            );
-            Ok(Json(serde_json::json!({ "status": "revoked", "id": id })))
-        }
-        Err(e) => {
-            state.events.emit(
-                SecurityEvent::new(Action::KeyRevoke)
-                    .request(&ctx)
-                    // AgentKeyNotFound maps to reason `key_not_found`.
-                    .failed_with(&e)
-                    .status(e.status_code().as_u16())
-                    .detail_str("key_id", &id),
-            );
-            Err(e)
-        }
-    }
-}
-
-/// Revoke the key; returns its name.
-async fn revoke_key_inner(state: &Arc<AppState>, id: &str) -> FerroResult<String> {
-    let _guard = state.keys_file_lock.lock().await;
-
-    let name = state
-        .agent_keys
-        .read()
-        .await
-        .values()
-        .find(|k| k.id == id)
-        .map(|k| k.name.clone())
-        .ok_or(FerroError::AgentKeyNotFound)?;
-
-    // Rewrite the key file without the revoked entry first, so a failed write
-    // is reported before the in-memory state diverges from disk.
-    if let Some(ref path) = state.config.keys_file {
-        let stored = load(path)
-            .map_err(|e| FerroError::Internal(format!("Failed to read key file: {e}")))?;
-        let remaining: Vec<_> = stored.into_iter().filter(|k| k.id != id).collect();
-        save(path, &remaining)
-            .map_err(|e| FerroError::Internal(format!("Failed to write key file: {e}")))?;
-    }
-
-    // Revoke in memory — takes effect for the very next request.
-    state.agent_keys.write().await.retain(|_, k| k.id != id);
-
-    tracing::info!(agent_id = %id, "Agent key revoked");
-
-    Ok(name)
-}
-
-/// What a policy change did, for the response and the audit event.
-struct PolicyChange {
-    summary: KeySummary,
-    name: String,
-    before: KeyPolicy,
-    after: KeyPolicy,
+    let caller = Caller {
+        ctx: &ctx,
+        via: Via::Api,
+    };
+    key_service::revoke_key(&state, caller, &id).await?;
+    Ok(Json(serde_json::json!({ "status": "revoked", "id": id })))
 }
 
 /// PATCH /v1/admin/keys/{id}
@@ -332,93 +144,12 @@ pub async fn patch_key(
         }
     };
 
-    match patch_key_inner(&state, &id, req).await {
-        Ok(change) => {
-            state.events.emit(
-                SecurityEvent::new(Action::KeyPolicyChange)
-                    .request(&ctx)
-                    .status(200)
-                    .detail_str("key_id", &id)
-                    .detail_str("key_name", &change.name)
-                    .detail("before", change.before.to_json())
-                    .detail("after", change.after.to_json()),
-            );
-            Ok(Json(change.summary))
-        }
-        Err(e) => {
-            state.events.emit(
-                SecurityEvent::new(Action::KeyPolicyChange)
-                    .request(&ctx)
-                    .failed_with(&e)
-                    .status(e.status_code().as_u16())
-                    .detail_str("key_id", &id),
-            );
-            Err(e)
-        }
-    }
-}
-
-async fn patch_key_inner(
-    state: &Arc<AppState>,
-    id: &str,
-    req: PatchKeyRequest,
-) -> FerroResult<PolicyChange> {
-    if req.credentials.is_absent() && req.methods.is_absent() {
-        return Err(FerroError::InvalidRequest(
-            "nothing to change: send `credentials` and/or `methods`".to_string(),
-        ));
-    }
-
-    let _guard = state.keys_file_lock.lock().await;
-
-    let (name, before) = state
-        .agent_keys
-        .read()
-        .await
-        .values()
-        .find(|k| k.id == id)
-        .map(|k| (k.name.clone(), k.policy.clone()))
-        .ok_or(FerroError::AgentKeyNotFound)?;
-    // Absent fields keep the current value; on a legacy key that is deny-all.
-    let after = before.patched(req.credentials, req.methods)?;
-
-    // Persist first, so a failed write leaves memory and disk consistent. The
-    // entry is saved with both fields explicit, which also marks a legacy key
-    // as having a policy.
-    if let Some(ref path) = state.config.keys_file {
-        let mut stored = load(path)
-            .map_err(|e| FerroError::Internal(format!("Failed to read key file: {e}")))?;
-        let entry = stored
-            .iter_mut()
-            .find(|k| k.id == id)
-            // The key is in memory but not on disk: the two have diverged
-            // (e.g. the file was edited by hand). Fail loudly rather than
-            // report "not found" for a key that is in use.
-            .ok_or_else(|| {
-                FerroError::Internal("Agent key is loaded but missing from the key file".into())
-            })?;
-        entry.set_policy(&after);
-        save(path, &stored)
-            .map_err(|e| FerroError::Internal(format!("Failed to write key file: {e}")))?;
-    }
-
-    let mut keys = state.agent_keys.write().await;
-    let mut summary = None;
-    for key in keys.values_mut().filter(|k| k.id == id) {
-        key.policy = after.clone();
-        key.policy_set = true;
-        summary.get_or_insert_with(|| KeySummary::new(key));
-    }
-    drop(keys);
-
-    tracing::info!(agent_id = %id, "Agent key policy changed");
-
-    Ok(PolicyChange {
-        summary: summary.ok_or(FerroError::AgentKeyNotFound)?,
-        name,
-        before,
-        after,
-    })
+    let caller = Caller {
+        ctx: &ctx,
+        via: Via::Api,
+    };
+    let change = key_service::patch_key(&state, caller, &id, req.credentials, req.methods).await?;
+    Ok(Json(change.summary))
 }
 
 /// POST /v1/admin/keys/{id}/preview
@@ -444,101 +175,21 @@ pub async fn preview_key(
         }
     };
 
-    match preview_inner(&state, &id, req).await {
-        Ok((body, name, checked)) => {
-            state.events.emit(
-                SecurityEvent::new(Action::PolicyPreview)
-                    .request(&ctx)
-                    .status(200)
-                    .detail_str("key_id", &id)
-                    .detail_str("key_name", &name)
-                    .detail("request_checked", checked),
-            );
-            Ok(Json(body))
-        }
-        Err(e) => {
-            state.events.emit(
-                SecurityEvent::new(Action::PolicyPreview)
-                    .request(&ctx)
-                    .failed_with(&e)
-                    .status(e.status_code().as_u16())
-                    .detail_str("key_id", &id),
-            );
-            Err(e)
-        }
-    }
-}
-
-/// Returns the response body, the key name and whether a request was checked.
-async fn preview_inner(
-    state: &Arc<AppState>,
-    id: &str,
-    req: PreviewRequest,
-) -> FerroResult<(serde_json::Value, String, bool)> {
-    let key = state
-        .agent_keys
-        .read()
-        .await
-        .values()
-        .find(|k| k.id == id)
-        .cloned()
-        .ok_or(FerroError::AgentKeyNotFound)?;
-    let saved = key.policy.clone();
-    // Absent fields fall back to the saved value.
-    let draft = saved.patched(req.credentials, req.methods)?;
-
-    // Like GET /v1/credentials, but a locked vault is fine while a credential
-    // cache exists: only names and metadata are used, never values.
-    if state.is_locked().await
-        && state.credentials.read().await.is_empty()
-        && !crate::vault::refresh::reunlock_if_possible(state).await
-    {
-        return Err(FerroError::VaultLocked);
-    }
-    let credentials = state.credentials.read().await.clone();
-
-    let details = visible_details(&credentials, &draft);
-    let mut gained = Vec::new();
-    let mut lost = Vec::new();
-    for name in credentials.keys() {
-        match (saved.allows_credential(name), draft.allows_credential(name)) {
-            (false, true) => gained.push(name.clone()),
-            (true, false) => lost.push(name.clone()),
-            _ => {}
-        }
-    }
-
-    let checked = req.request.is_some();
-    let request_check = match &req.request {
-        None => None,
-        Some(request) => Some(match check_only(state, &draft, request).await {
-            Ok(()) => serde_json::json!({ "allowed": true, "note": DNS_NOTE }),
-            Err(e) => serde_json::json!({
-                "allowed": false,
-                "status": e.status_code().as_u16(),
-                "reason": Reason::from(&e),
-                "message": e.to_string(),
-                "note": DNS_NOTE,
-            }),
-        }),
+    let caller = Caller {
+        ctx: &ctx,
+        via: Via::Api,
     };
-
-    let mut body = serde_json::json!({
-        "key": { "id": key.id, "name": key.name, "policy_set": key.policy_set },
-        "saved_policy": saved.to_json(),
-        "draft_policy": draft.to_json(),
-        "credentials": details,
-        "gained": gained,
-        "lost": lost,
-    });
-    if let Some(check) = request_check {
-        body["request_check"] = check;
-    }
-    Ok((body, key.name, checked))
+    let preview = key_service::preview_key(
+        &state,
+        caller,
+        &id,
+        req.credentials,
+        req.methods,
+        req.request.as_ref(),
+    )
+    .await?;
+    Ok(Json(preview.to_json()))
 }
-
-/// The one check a preview cannot run: it never resolves or connects.
-const DNS_NOTE: &str = "The target host is checked against the outbound policy by name and IP literal only; private-address checks on resolved DNS names happen when a request is actually forwarded.";
 
 /// Default number of events returned by `GET /v1/admin/audit`.
 const DEFAULT_AUDIT_LIMIT: usize = 100;
@@ -592,22 +243,16 @@ pub async fn get_audit(
         }
     };
 
-    let events: Vec<serde_json::Value> = state
-        .events
-        .recent(limit)
-        .iter()
-        .map(|e| serde_json::to_value(&**e))
-        .collect::<Result<_, _>>()
-        .map_err(|e| FerroError::Internal(e.to_string()))?;
-
-    // Emitted after the snapshot, so a read does not list itself.
-    state.events.emit(
-        SecurityEvent::new(Action::AuditRead)
-            .request(&ctx)
-            .status(200)
-            .detail("limit", limit)
-            .detail("count", events.len()),
-    );
+    let caller = Caller {
+        ctx: &ctx,
+        via: Via::Api,
+    };
+    let events: Vec<serde_json::Value> =
+        key_service::read_audit(&state, caller, limit, &AuditFilter::default())
+            .iter()
+            .map(|e| serde_json::to_value(&**e))
+            .collect::<Result<_, _>>()
+            .map_err(|e| FerroError::Internal(e.to_string()))?;
     Ok(Json(events))
 }
 
@@ -673,18 +318,6 @@ pub(crate) fn authenticate_admin(
             .detail("endpoint", endpoint),
     );
     Err(FerroError::Unauthorized)
-}
-
-/// Generate a cryptographically random 48-character alphanumeric token.
-fn generate_token() -> String {
-    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut rng = rand::rng();
-    (0..48)
-        .map(|_| {
-            let idx = rng.random_range(0..CHARSET.len());
-            CHARSET[idx] as char
-        })
-        .collect()
 }
 
 #[cfg(test)]

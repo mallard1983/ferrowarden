@@ -12,8 +12,20 @@
 <header class="top">
 <span class="brand">Ferrowarden</span>
 <span class="sub">Admin</span>
+{% if let Some(nav) = nav %}
+<nav class="mainnav" aria-label="Main">
+<a href="/ui/"{% if nav.current == "status" %} aria-current="page"{% endif %}>Status</a>
+<a href="/ui/keys"{% if nav.current == "keys" %} aria-current="page"{% endif %}>Keys</a>
+<a href="/ui/audit"{% if nav.current == "audit" %} aria-current="page"{% endif %}>Audit</a>
+</nav>
+<span class="account">{{ nav.account_email }}</span>
+<form method="post" action="/ui/logout" class="signout">
+<input type="hidden" name="csrf" value="{{ nav.csrf }}">
+<button type="submit" class="secondary">Sign out</button>
+</form>
+{% endif %}
 </header>
-<main>
+<main class="{% block main_class %}{% endblock %}">
 {% block content %}{% endblock %}
 </main>
 </body>

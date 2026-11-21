@@ -25,8 +25,4 @@
 <dt>Session expires</dt>
 <dd>{{ session_expires }}</dd>
 </dl>
-<form method="post" action="/ui/logout">
-<input type="hidden" name="csrf" value="{{ csrf }}">
-<button type="submit" class="secondary">Sign out</button>
-</form>
 {% endblock %}

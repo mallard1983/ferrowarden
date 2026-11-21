@@ -130,6 +130,10 @@ curl https://<ferrowarden-host>:3000/v1/admin/keys \
 
 Token values are never returned: only the ID, name, creation time and policy (`credentials`, `methods`, and `policy_set`).
 
+### Using the admin UI instead
+
+The same operations are available in the [admin web UI](admin-ui.md#managing-keys) (when `ui.bind` is set): create a key and copy its token from the page that is shown once, edit a policy with **Check policy** (what it gains and loses, which placeholders it reaches) before saving, check a sample request, and revoke. Creating, revoking and saving need a sign-in within the last 10 minutes. Events carry `via: "ui"`.
+
 ### Changing a Key's Policy
 
 ```sh
@@ -157,6 +161,8 @@ Better: narrow it. Set **both** fields: on a key without a policy, a field you d
 ### Staged Rollout with Scoped Keys
 
 Give every agent its own key and only the access it needs, then widen on demand. The preview endpoint shows the effect of a policy before you save it, without touching the vault values or the network.
+
+**In the admin UI** (see [Managing keys](admin-ui.md#managing-keys)): create the key on `/ui/keys/new`, then open it and use **Check policy** (what the draft gains and loses, the placeholders it reaches) and **Check request** (would this exact call be allowed) before **Save policy**; a change that widens access asks for confirmation. The curl examples below do the same through the API.
 
 **A read-only monitoring key.**
 
