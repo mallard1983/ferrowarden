@@ -196,7 +196,7 @@ All errors return `{"error": "message"}` with an appropriate HTTP status.
 
 | Status | Meaning | What to do |
 |---|---|---|
-| `400 Bad Request` | Invalid target URL or HTTP method, or a placeholder in the URL host/port | Check the URL scheme (must be http/https) and method spelling; put placeholders only in the path, query, headers or body |
+| `400 Bad Request` | Invalid target URL or HTTP method, a placeholder in the URL host/port, or invalid request JSON (extra fields, duplicate keys, header names differing only by case) | Check the URL scheme (must be http/https) and method spelling; put placeholders only in the path, query, headers or body; fix the request JSON and don't send extra fields or repeated keys |
 | `401 Unauthorized` | Missing or invalid `X-Agent-Key` | Your token is wrong or has been revoked; contact the operator |
 | `403 Forbidden` | The credential is not allowed for this host, or the target is blocked (internal address, the vault backend) | Do not retry with another host. Tell the user which credential and host were refused; the operator must add the host to the vault item's URIs or to `allowed_targets` |
 | `409 Conflict` | The credential name matches more than one vault item, or the field name appears twice on the item | Tell the user; the operator must rename one of them |

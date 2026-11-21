@@ -21,6 +21,7 @@ pub type ZeroizingHeaders = HashMap<String, Zeroizing<String>>;
 /// The inner request the agent wants forwarded, with placeholders in place of
 /// real credential values. Ferrowarden substitutes credentials before sending.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProxyRequest {
     pub method: String,
     pub url: String,
@@ -29,6 +30,24 @@ pub struct ProxyRequest {
     /// A JSON string is sent as-is (raw text body). Any other JSON value is
     /// serialized and sent as JSON.
     pub body: Option<Value>,
+}
+
+impl ProxyRequest {
+    /// Reject requests that are ambiguous even though they parsed: header names
+    /// that differ only by case are distinct JSON keys but the same HTTP header,
+    /// so the agent could be stacking values the target resolves differently.
+    pub fn validate(&self) -> FerroResult<()> {
+        let mut seen = std::collections::HashSet::new();
+        for name in self.headers.keys() {
+            if !seen.insert(name.to_ascii_lowercase()) {
+                return Err(FerroError::InvalidRequest(format!(
+                    "header {:?} appears more than once (header names are case-insensitive)",
+                    name.chars().take(64).collect::<String>()
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The response returned to the agent after scrubbing.
@@ -283,5 +302,42 @@ mod tests {
         let text = err.to_string();
         assert!(!text.contains("SUPERSECRETVALUE"), "{text}");
         assert!(!text.contains("localhost"), "{text}");
+    }
+
+    fn parse(json: &str) -> Result<ProxyRequest, String> {
+        crate::api::strict_json::parse_strict(json.as_bytes())
+    }
+
+    #[test]
+    fn validate_rejects_case_insensitive_duplicate_headers() {
+        let r = parse(r#"{"method":"GET","url":"http://x","headers":{"Authorization":"a","authorization":"b"}}"#)
+            .unwrap();
+        let e = r.validate().unwrap_err().to_string();
+        assert!(e.contains("more than once"), "{e}");
+
+        let r =
+            parse(r#"{"method":"GET","url":"http://x","headers":{"X-A":"1","x-a":"1","X-B":"2"}}"#)
+                .unwrap();
+        assert!(r.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_distinct_headers() {
+        let r = parse(
+            r#"{"method":"GET","url":"http://x","headers":{"Authorization":"a","X-Other":"a"}}"#,
+        )
+        .unwrap();
+        assert!(r.validate().is_ok());
+        let r = parse(r#"{"method":"GET","url":"http://x"}"#).unwrap();
+        assert!(r.validate().is_ok());
+    }
+
+    #[test]
+    fn proxy_request_rejects_unknown_fields_and_duplicate_keys() {
+        let e = parse(r#"{"method":"GET","url":"http://x","extra":1}"#).unwrap_err();
+        assert!(e.contains("unknown field `extra`"), "{e}");
+        assert!(parse(r#"{"method":"GET","method":"POST","url":"http://x"}"#).is_err());
+        assert!(parse(r#"{"method":"GET","url":"http://x","headers":{"a":"1","a":"2"}}"#).is_err());
+        assert!(parse(r#"{"method":"GET","url":"http://x","body":{"k":{"a":1,"a":2}}}"#).is_err());
     }
 }

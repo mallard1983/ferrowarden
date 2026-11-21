@@ -15,6 +15,8 @@ Responses are JSON. Errors follow a consistent shape:
 { "error": "human-readable description" }
 ```
 
+**Strict JSON input.** Request bodies are parsed strictly. A body is rejected with `400` if it has a duplicate object key at any depth (keys are compared after unescaping, so `"a"` and `"a"` clash), an unknown field, trailing data, invalid UTF-8, nesting deeper than 64 levels, or a content type other than `application/json`. In `headers`, names that differ only by case (`Authorization` and `authorization`) count as duplicates. Error messages name the offending key or field and the line and column, never a value from the body. Query parameters are strict too: see `GET /v1/credentials`.
+
 ---
 
 ## Agent Endpoints
@@ -67,6 +69,7 @@ Each key is present only when that value exists on the item. `bound_to` lists th
 **Errors**
 | Status | Condition |
 |---|---|
+| `400 Bad Request` | Unknown query parameter (only `detail` is accepted), or `detail` given more than once |
 | `401 Unauthorized` | Missing or invalid agent key |
 | `503 Service Unavailable` | Vault is locked |
 
@@ -132,7 +135,7 @@ Every credential value used in the request is redacted (`[REDACTED]`) wherever i
 **Errors**
 | Status | Condition |
 |---|---|
-| `400 Bad Request` | Malformed request JSON; unparseable URL; scheme not http/https; invalid HTTP method; placeholder in the URL host/port |
+| `400 Bad Request` | Malformed request JSON; duplicate or unknown JSON fields; header names that differ only by case; unparseable URL; scheme not http/https; invalid HTTP method; placeholder in the URL host/port |
 | `401 Unauthorized` | Missing or invalid agent key |
 | `403 Forbidden` | Credential not bound to the target host, or target refused by the outbound policy (bw serve, private/internal address not in `allowed_targets`) |
 | `403 Forbidden` (re-prompt) | The item has master password re-prompt enabled |
@@ -172,6 +175,7 @@ On success Ferrowarden also syncs bw serve with Vaultwarden and reloads the cred
 **Errors**
 | Status | Condition |
 |---|---|
+| `400 Bad Request` | Malformed JSON, duplicate or unknown fields, or missing `password` |
 | `401 Unauthorized` | Invalid admin key, or bw serve rejected the master password |
 | `404 Not Found` | Unlock mode is `file` |
 | `503 Service Unavailable` | bw serve unreachable |
@@ -231,6 +235,8 @@ Revoke an agent key. The token is immediately removed from in-memory state and, 
 | Status | Condition |
 |---|---|
 | `404 Not Found` | No key with that ID exists |
+
+(`POST /v1/admin/keys` also returns `400` for malformed JSON, duplicate or unknown fields, or a `name` outside 1-128 characters.)
 
 ---
 

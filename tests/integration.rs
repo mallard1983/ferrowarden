@@ -1220,3 +1220,166 @@ async fn test_detailed_listing_placeholders_work() {
     assert!(captured_header(&c, "X-B") == Some(FIELD_TEXT));
     assert_eq!(captured_header(&c, "X-C"), Some(FULL_USERNAME));
 }
+
+// ── Strict JSON input (#23) ───────────────────────────────────────────────────
+
+impl TestEnv {
+    /// POST a raw string body to /v1/forward, so tests can express documents
+    /// `json!` cannot (duplicate keys).
+    async fn forward_raw(&self, body: String) -> reqwest::Response {
+        self.client
+            .post(format!("{}/v1/forward", self.fw_url))
+            .header("X-Agent-Key", &self.agent_key)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .expect("forward request failed")
+    }
+
+    /// Assert a 400 whose JSON error mentions `needle`, and that nothing
+    /// reached the mock API.
+    async fn assert_rejected_400(&self, resp: reqwest::Response, needle: &str) {
+        assert_eq!(resp.status(), 400, "expected 400");
+        let err: Value = resp.json().await.expect("error was not JSON");
+        let msg = err["error"].as_str().unwrap_or_default().to_string();
+        assert!(
+            msg.contains(needle),
+            "error {msg:?} should mention {needle:?}"
+        );
+        assert!(
+            self.all_captured_requests().await.is_empty(),
+            "a rejected request must not be forwarded"
+        );
+    }
+}
+
+/// Security property: a duplicate top-level key is ambiguous and is rejected.
+#[tokio::test]
+async fn test_duplicate_top_level_key_is_rejected() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+    let url = format!("{}/mock-api/api/secret", env.mock_url_via_ferrowarden());
+    let resp = env
+        .forward_raw(format!(
+            r#"{{"request":{{"method":"GET","url":"{url}"}},"request":{{"method":"GET","url":"{url}"}}}}"#
+        ))
+        .await;
+    env.assert_rejected_400(resp, "duplicate key").await;
+}
+
+/// A duplicate key inside `body` could hide a value from a future policy check.
+#[tokio::test]
+async fn test_duplicate_key_in_body_is_rejected() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+    let url = format!("{}/mock-api/api/echo", env.mock_url_via_ferrowarden());
+    let resp = env
+        .forward_raw(format!(
+            r#"{{"request":{{"method":"POST","url":"{url}","body":{{"a":1,"n":{{"k":"x","k":"y"}}}}}}}}"#
+        ))
+        .await;
+    env.assert_rejected_400(resp, "duplicate key").await;
+}
+
+#[tokio::test]
+async fn test_duplicate_key_in_headers_is_rejected() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+    let url = format!("{}/mock-api/api/secret", env.mock_url_via_ferrowarden());
+    let resp = env
+        .forward_raw(format!(
+            r#"{{"request":{{"method":"GET","url":"{url}","headers":{{"X-A":"1","X-A":"2"}}}}}}"#
+        ))
+        .await;
+    env.assert_rejected_400(resp, "duplicate key").await;
+}
+
+/// `Authorization` and `authorization` are distinct JSON keys but one HTTP
+/// header, so the request is ambiguous.
+#[tokio::test]
+async fn test_case_insensitive_duplicate_header_is_rejected() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+    let resp = env
+        .forward(
+            "GET",
+            "/api/secret",
+            json!({ "Authorization": "Bearer one", "authorization": "Bearer two" }),
+            None,
+        )
+        .await;
+    env.assert_rejected_400(resp, "more than once").await;
+}
+
+#[tokio::test]
+async fn test_unknown_field_in_forward_request_is_rejected() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+    let url = format!("{}/mock-api/api/secret", env.mock_url_via_ferrowarden());
+    let resp = env
+        .forward_raw(format!(
+            r#"{{"request":{{"method":"GET","url":"{url}","policy":"allow"}}}}"#
+        ))
+        .await;
+    env.assert_rejected_400(resp, "unknown field `policy`")
+        .await;
+}
+
+#[tokio::test]
+async fn test_type_error_does_not_echo_body_values() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+    let resp = env
+        .forward_raw(
+            r#"{"request":{"method":"GET","url":5,"body":{"pw":"SECRETVAL"}}}"#.to_string(),
+        )
+        .await;
+    assert_eq!(resp.status(), 400);
+    let text = resp.text().await.unwrap();
+    assert!(!text.contains("SECRETVAL"), "error echoed a body value");
+}
+
+#[tokio::test]
+async fn test_credentials_query_is_strict() {
+    let Some(env) = TestEnv::load() else { return };
+    for q in ["?bogus=1", "?detail=true&detail=false", "?detail=true&x=1"] {
+        let resp = env
+            .client
+            .get(format!("{}/v1/credentials{q}", env.fw_url))
+            .header("X-Agent-Key", &env.agent_key)
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status(), 400, "query {q}");
+    }
+    for q in ["", "?detail=true", "?detail=false"] {
+        let resp = env
+            .client
+            .get(format!("{}/v1/credentials{q}", env.fw_url))
+            .header("X-Agent-Key", &env.agent_key)
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status(), 200, "query {q}");
+    }
+}
+
+#[tokio::test]
+async fn test_unknown_field_in_create_key_is_rejected() {
+    let Some(env) = TestEnv::load() else { return };
+    let resp = env
+        .client
+        .post(format!("{}/v1/admin/keys", env.fw_url))
+        .header("X-Admin-Key", &env.admin_key)
+        .json(&json!({ "name": "strict-test-key", "role": "admin" }))
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status(), 400);
+    let err: Value = resp.json().await.unwrap();
+    assert!(err["error"]
+        .as_str()
+        .unwrap()
+        .contains("unknown field `role`"));
+}

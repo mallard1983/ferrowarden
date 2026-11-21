@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::error::{FerroError, FerroResult};
@@ -125,6 +125,30 @@ fn detail(name: &str, entries: &[CredentialEntry]) -> CredentialDetail {
     d
 }
 
+/// Query parameters of `GET /v1/credentials`: only `detail`, at most once.
+/// Unknown or repeated parameters are rejected rather than resolved
+/// first-wins or last-wins. Returns whether the detailed listing was asked for.
+fn parse_detail(params: &[(String, String)]) -> FerroResult<bool> {
+    let mut detail = None;
+    for (k, v) in params {
+        if k != "detail" {
+            return Err(FerroError::InvalidRequest(format!(
+                "unknown query parameter {:?}; only `detail` is allowed",
+                k.chars().take(64).collect::<String>()
+            )));
+        }
+        if detail.replace(v).is_some() {
+            return Err(FerroError::InvalidRequest(
+                "query parameter `detail` may be given only once".to_string(),
+            ));
+        }
+    }
+    Ok(
+        detail
+            .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "" | "1" | "true" | "yes")),
+    )
+}
+
 /// GET /v1/credentials
 ///
 /// Returns the credentials available in the vault — names only, never
@@ -134,9 +158,10 @@ fn detail(name: &str, entries: &[CredentialEntry]) -> CredentialDetail {
 pub async fn list_credentials(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(params): Query<HashMap<String, String>>,
+    Query(params): Query<Vec<(String, String)>>,
 ) -> FerroResult<Json<Value>> {
     authenticate_agent(&state, &headers).await?;
+    let detailed = parse_detail(&params)?;
 
     // In file mode, try to unlock again right away (e.g. after a bw serve
     // restart) instead of failing until the next refresh.
@@ -145,10 +170,6 @@ pub async fn list_credentials(
     }
 
     let credentials = state.credentials.read().await;
-    let detailed = params
-        .get("detail")
-        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "" | "1" | "true" | "yes"));
-
     let body = if detailed {
         let list: Vec<CredentialDetail> = credentials
             .iter()
@@ -246,6 +267,33 @@ mod tests {
         let d = detail("guarded", &[rp]);
         assert!(d.unavailable.unwrap().contains("re-prompt"));
         assert!(d.placeholder.is_none());
+    }
+
+    fn q(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn detail_param_accepts_existing_values() {
+        assert!(!parse_detail(&[]).unwrap());
+        for v in ["", "1", "true", "TRUE", "yes"] {
+            assert!(parse_detail(&q(&[("detail", v)])).unwrap(), "{v}");
+        }
+        for v in ["false", "0", "no", "bogus"] {
+            assert!(!parse_detail(&q(&[("detail", v)])).unwrap(), "{v}");
+        }
+    }
+
+    #[test]
+    fn detail_param_rejects_unknown_and_repeated() {
+        assert!(parse_detail(&q(&[("detial", "true")])).is_err());
+        assert!(parse_detail(&q(&[("detail", "true"), ("x", "1")])).is_err());
+        assert!(parse_detail(&q(&[("detail", "true"), ("detail", "false")])).is_err());
+        assert!(parse_detail(&q(&[("detail", "true"), ("detail", "true")])).is_err());
+        assert!(parse_detail(&q(&[("Detail", "true")])).is_err());
     }
 
     #[test]

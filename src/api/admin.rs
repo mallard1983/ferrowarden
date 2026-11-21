@@ -9,11 +9,13 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::api::strict_json::StrictJson;
 use crate::error::{FerroError, FerroResult};
 use crate::keys::{hash_token, load, save, StoredKey};
 use crate::state::{AgentKey, AppState};
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateKeyRequest {
     /// Human-readable name for this agent (e.g. "homelab-claude")
     pub name: String,
@@ -42,7 +44,7 @@ pub struct KeySummary {
 pub async fn create_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(req): Json<CreateKeyRequest>,
+    StrictJson(req): StrictJson<CreateKeyRequest>,
 ) -> FerroResult<(StatusCode, Json<CreateKeyResponse>)> {
     authenticate_admin(&state, &headers)?;
 

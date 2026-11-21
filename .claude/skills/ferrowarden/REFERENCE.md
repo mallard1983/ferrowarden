@@ -53,7 +53,7 @@ Returns `200 OK` with no body. No authentication required. Used by health checks
 
 | Status | Error | Cause | Action |
 |---|---|---|---|
-| 400 | Bad Request | Invalid URL scheme or HTTP method; placeholder in URL host/port | Use `http://` or `https://`; check method; keep placeholders out of the host |
+| 400 | Bad Request | Invalid URL scheme or HTTP method; placeholder in URL host/port; invalid request JSON (extra fields, duplicate keys, header names differing only by case) | Use `http://` or `https://`; check method; keep placeholders out of the host; fix the request JSON and don't send extra fields |
 | 401 | Unauthorized | Missing or invalid `X-Agent-Key` | Token is wrong or revoked; notify the operator |
 | 403 | Forbidden | Credential not bound to this host, or target blocked (internal address / vault backend) | Do not try other hosts. Tell the user which credential/host was refused |
 | 409 | Conflict | Credential name matches several vault items | Tell the user; the operator must rename one |

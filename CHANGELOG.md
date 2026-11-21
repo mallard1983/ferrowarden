@@ -15,11 +15,13 @@ All notable changes to this project are documented here. The format is based on 
 
 - Malformed placeholders (anything starting with `{{vault:` that does not parse) are rejected with `422` instead of being forwarded as literal text.
 - `GET /v1/credentials` also lists secure notes, and names that previously could not be referenced.
+- **Strict JSON input** (#23): request bodies and the key file are rejected if they contain duplicate object keys (at any depth), unknown fields, trailing data or nesting deeper than 64 levels; header names that differ only by case are treated as duplicates; `GET /v1/credentials` rejects unknown and repeated query parameters. Error messages name the problem but never echo values from the body.
 
 ### Upgrading
 
 - **Items with master password re-prompt are now refused (`403`).** Previously they were usable. Turn re-prompt off on items agents should use.
 - **URIs with match type *regex* or *never* no longer act as host bindings.** Add a normal URI (or a `ferrowarden_uris` field) if a credential relied on one.
+- **Stricter request parsing.** Requests with unknown fields, duplicate JSON keys, case-insensitively duplicated header names, or unknown/repeated query parameters on `/v1/credentials` now get `400`. A key file with duplicate keys or unknown fields fails to load at startup.
 
 ## [0.1.0] — 2026-11-21 (preview)
 
