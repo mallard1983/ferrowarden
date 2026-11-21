@@ -1,4 +1,4 @@
-FROM node:22-slim
+FROM node:26-slim
 
 # The entrypoint scripts use curl, wget, and python3 for Vaultwarden API calls
 # and health checks; openssl generates the internal CA and Vaultwarden
