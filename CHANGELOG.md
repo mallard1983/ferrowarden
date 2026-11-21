@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+### Added
+
+- **Field placeholders** (#8): `{{vault:NAME:username}}`, `:totp`, `:notes` and `:field:FIELD` for custom fields (text, hidden, boolean, and linked to the username or password). **Secure notes** are now supported.
+- **Any item or field name**: names with spaces, colons or other characters are referenced with single quotes, e.g. `{{vault:'Proxmox (prod)':field:'api secret'}}`.
+- `GET /v1/credentials?detail=true` returns ready-made placeholders for every available value, unavailable values with the reason, and each credential's `bound_to` hosts.
+- Reserved custom field `ferrowarden_uris` sets an item's host bindings (needed for secure notes; overrides a login's URIs).
+
+### Changed
+
+- Malformed placeholders (anything starting with `{{vault:` that does not parse) are rejected with `422` instead of being forwarded as literal text.
+- `GET /v1/credentials` also lists secure notes, and names that previously could not be referenced.
+
+### Upgrading
+
+- **Items with master password re-prompt are now refused (`403`).** Previously they were usable. Turn re-prompt off on items agents should use.
+- **URIs with match type *regex* or *never* no longer act as host bindings.** Add a normal URI (or a `ferrowarden_uris` field) if a credential relied on one.
+
 ## [0.1.0] — 2026-11-21 (preview)
 
 First public release. Ferrowarden is a credential proxy for AI agents: credentials live in a self-hosted Vaultwarden password manager, agents call APIs through Ferrowarden with `{{vault:name}}` placeholders, and credential values never reach the agent.

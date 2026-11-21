@@ -57,8 +57,17 @@ pub enum FerroError {
     ResponseTooLarge(usize),
 
     // Placeholder errors
-    #[error("Placeholder references unknown credential: {0}")]
+    #[error("Placeholder references an unknown credential or field: {0}")]
     UnknownPlaceholder(String),
+
+    #[error("Malformed placeholder: {0}")]
+    MalformedPlaceholder(String),
+
+    #[error("Field {field} of credential {item} is ambiguous: the vault item has more than one field with that name")]
+    AmbiguousField { item: String, field: String },
+
+    #[error("Credential {0} has master password re-prompt enabled; it cannot be used by agents until approvals are supported")]
+    RepromptRequired(String),
 
     // Config errors
     #[error("Configuration error: {0}")]
@@ -99,9 +108,11 @@ impl IntoResponse for FerroError {
             FerroError::AgentKeyNotFound => (StatusCode::UNAUTHORIZED, self.to_string()),
             FerroError::ForwardFailed(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             FerroError::InvalidTargetUrl(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            FerroError::UnknownPlaceholder(_) => {
+            FerroError::UnknownPlaceholder(_) | FerroError::MalformedPlaceholder(_) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
             }
+            FerroError::AmbiguousField { .. } => (StatusCode::CONFLICT, self.to_string()),
+            FerroError::RepromptRequired(_) => (StatusCode::FORBIDDEN, self.to_string()),
             FerroError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             FerroError::UnlockEndpointDisabled => (StatusCode::NOT_FOUND, self.to_string()),
             FerroError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),

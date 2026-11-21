@@ -57,7 +57,7 @@ Returns `200 OK` with no body. No authentication required. Used by health checks
 | 401 | Unauthorized | Missing or invalid `X-Agent-Key` | Token is wrong or revoked; notify the operator |
 | 403 | Forbidden | Credential not bound to this host, or target blocked (internal address / vault backend) | Do not try other hosts. Tell the user which credential/host was refused |
 | 409 | Conflict | Credential name matches several vault items | Tell the user; the operator must rename one |
-| 422 | Unprocessable Entity | Placeholder references unknown name | List credentials; use an exact name from the response |
+| 422 | Unprocessable Entity | Malformed placeholder, unknown name, or value/field the item lacks | Copy a placeholder from `GET /v1/credentials?detail=true` |
 | 429 | Too Many Requests | Rate limit exceeded | Wait `Retry-After` seconds; retry once |
 | 502 | Bad Gateway | Target unreachable, timed out, or response too large | Check URL; notify the operator if it persists |
 | 503 | Service Unavailable | Vault is locked or vault backend unreachable | Notify the operator to unlock the vault |
@@ -68,7 +68,9 @@ All error responses: `{ "error": "message" }`
 
 ## Placeholder rules
 
-- Syntax: `{{vault:name}}` -- double braces, `vault:`, then the name. No spaces.
+- Syntax: `{{vault:NAME}}` (password), `{{vault:NAME:username}}`, `{{vault:NAME:totp}}`, `{{vault:NAME:notes}}`, `{{vault:NAME:field:FIELD}}`.
+- NAME/FIELD: a plain word (letters, digits, `_ - .`) or a single-quoted string for anything else: `{{vault:'Proxmox (prod)':field:'api secret'}}` (escape `\'` and `\\`).
+- Easiest: `GET /v1/credentials?detail=true` returns every placeholder ready to copy, plus `bound_to` hosts.
 - Names are case-sensitive. `proxmox_api_token` != `Proxmox_API_Token`.
 - Placeholders are valid in the path, query or user info of `request.url` (never the scheme, host or port), any header value in `request.headers`, and anywhere in `request.body` (inside JSON strings/keys or a plain string body).
 - Each credential only works for the host(s) the operator bound it to; any other host returns 403.

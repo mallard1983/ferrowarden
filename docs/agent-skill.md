@@ -76,7 +76,33 @@ The `status` and `headers` are from the target service. The `body` is the target
 
 ## Placeholder Syntax
 
-Use `{{vault:name}}` anywhere inside the `url`, header values, or `body` field:
+Use placeholders anywhere inside the `url` (path/query), header values, or `body` field. The simplest way to get them right: call `GET /v1/credentials?detail=true` and **copy the placeholder strings it returns** — they are already correctly quoted.
+
+Placeholders select a value of a Vaultwarden **Login** or **Secure note** item:
+
+| Placeholder | Substitutes |
+|---|---|
+| `{{vault:NAME}}` | the item's password |
+| `{{vault:NAME:password}}` | the password (explicit) |
+| `{{vault:NAME:username}}` | the login username |
+| `{{vault:NAME:totp}}` | the current TOTP code |
+| `{{vault:NAME:notes}}` | the item's notes |
+| `{{vault:NAME:field:FIELD}}` | a custom field (text, hidden, boolean, or linked to the username/password) |
+
+`NAME` and `FIELD` are either a plain word of letters, digits, `_`, `-` and `.` — or a **single-quoted string**, which allows any characters (spaces, colons, anything). Inside quotes, write `\'` for a quote and `\\` for a backslash:
+
+```
+{{vault:proxmox_api_token}}
+{{vault:'Proxmox (prod)':username}}
+{{vault:'Proxmox (prod)':field:'api secret'}}
+{{vault:'it\'s here'}}
+```
+
+Single quotes are used because placeholders usually sit inside JSON strings, where double quotes would need escaping. Names are case-sensitive and must match the vault exactly. **You rarely need to write quoting yourself:** `GET /v1/credentials?detail=true` returns the exact placeholder for every available value.
+
+Anything starting with `{{vault:` that does not parse is rejected with `422` — malformed placeholders are never forwarded.
+
+Examples:
 
 ```json
 {
@@ -108,7 +134,8 @@ Use `{{vault:name}}` anywhere inside the `url`, header values, or `body` field:
 ```
 
 **Placeholder rules:**
-- Must match a name from `/v1/credentials` exactly
+- Must match a name from `/v1/credentials` exactly — prefer copying from `?detail=true`
+- Each credential only works for the hosts in its `bound_to` list
 - Multiple placeholders in one request are fine
 - One placeholder can appear multiple times
 - Placeholders work in URL, header values, and body — in any combination
@@ -172,8 +199,8 @@ All errors return `{"error": "message"}` with an appropriate HTTP status.
 | `400 Bad Request` | Invalid target URL or HTTP method, or a placeholder in the URL host/port | Check the URL scheme (must be http/https) and method spelling; put placeholders only in the path, query, headers or body |
 | `401 Unauthorized` | Missing or invalid `X-Agent-Key` | Your token is wrong or has been revoked; contact the operator |
 | `403 Forbidden` | The credential is not allowed for this host, or the target is blocked (internal address, the vault backend) | Do not retry with another host. Tell the user which credential and host were refused; the operator must add the host to the vault item's URIs or to `allowed_targets` |
-| `409 Conflict` | The credential name matches more than one vault item | Tell the user; the operator must rename one of the items |
-| `422 Unprocessable Entity` | Placeholder references an unknown credential name | Call `GET /v1/credentials` and use an exact name from the list |
+| `409 Conflict` | The credential name matches more than one vault item, or the field name appears twice on the item | Tell the user; the operator must rename one of them |
+| `422 Unprocessable Entity` | Malformed placeholder, unknown credential, or a value/field the item doesn't have | Call `GET /v1/credentials?detail=true` and copy a placeholder from it |
 | `429 Too Many Requests` | Rate limit exceeded | Wait the number of seconds in the `Retry-After` header, then retry |
 | `502 Bad Gateway` | Could not reach the target service, timeout, or response too large | The target URL is unreachable; check the URL and network |
 | `503 Service Unavailable` | Vault is locked | Ferrowarden needs to be unlocked by the operator; wait and retry |

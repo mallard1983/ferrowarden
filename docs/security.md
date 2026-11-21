@@ -187,6 +187,15 @@ With `enforce_credential_hosts = true` (the default), each credential may only b
 
 Host matching is exact and case-insensitive (`api.example.com.evil.net` does not match). An item with no URIs cannot be used until a URI is added. The check runs before any value is fetched, and a refused request is never sent (`403`).
 
+Binding applies to every value of an item — username, TOTP, notes and custom fields as well as the password. Where the bindings come from:
+
+- A reserved custom field **`ferrowarden_uris`** (comma- or newline-separated URIs), if present. It gives **secure notes** a binding and overrides a login's URIs, so autofill URIs and agent bindings can differ.
+- Otherwise the login's URIs, **excluding** those whose Bitwarden match type is *regex* or *never*.
+
+Items with **master password re-prompt** enabled are refused (`403`) — Vaultwarden's API does not enforce re-prompt itself, so Ferrowarden treats it as "never hand this to an agent" until human approval (#14) is available.
+
+**What is scrubbed:** passwords, notes and text/hidden custom fields. Usernames, TOTP codes and boolean fields are **not** treated as secret and are not scrubbed from responses — redacting values such as `admin`, `true` or six-digit numbers would corrupt ordinary output.
+
 Placeholders may not appear in the URL's scheme, host, or port: the host is fixed before substitution, and the request is refused if substitution would change it. This prevents a credential leaking through a DNS lookup of `{{vault:x}}.attacker.example`.
 
 **Why this matters:** Without binding, any agent can send any credential to any host it can reach — including one that simply echoes the request back (`httpbin.org/anything`), defeating every other control.

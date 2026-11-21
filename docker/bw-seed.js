@@ -257,8 +257,20 @@ async function seed() {
   let skipped = 0;
   let failed  = 0;
 
+  // Seed entry format (tests/seed/credentials.json):
+  //   name, value (password), note, uris        — as before
+  //   type: "login" (default) | "secure_note"
+  //   username, totp                            — login only
+  //   reprompt: true                            — master password re-prompt
+  //   fields: [{ name, value, type: "text"|"hidden"|"boolean"|"linked", linked: "username"|"password" }]
+  const enc = (s) => (s === undefined || s === null || s === ''
+    ? null
+    : encryptCipherString(symKey, Buffer.from(String(s), 'utf8')));
+  const FIELD_TYPES = { text: 0, hidden: 1, boolean: 2, linked: 3 };
+  const LINKED_IDS  = { username: 100, password: 101 };
+
   for (const cred of credentials) {
-    const { name, value, note = '', uris = [] } = cred;
+    const { name, value, note = '', uris = [], type = 'login', username, totp, reprompt, fields = [] } = cred;
     const current = existing.get(name);
 
     if (current && sameUris(current.uris, uris)) {
@@ -267,30 +279,36 @@ async function seed() {
       continue;
     }
 
-    const encName     = encryptCipherString(symKey, Buffer.from(name,  'utf8'));
-    const encPassword = encryptCipherString(symKey, Buffer.from(value, 'utf8'));
-    const encNotes    = note
-      ? encryptCipherString(symKey, Buffer.from(note, 'utf8'))
+    const encUris = uris.length
+      ? uris.map((u) => ({ uri: enc(u), match: null }))
       : null;
-    const encUris     = uris.length
-      ? uris.map((u) => ({ uri: encryptCipherString(symKey, Buffer.from(u, 'utf8')), match: null }))
-      : null;
+    const encFields = fields.map((f) => {
+      const t = FIELD_TYPES[f.type || 'text'];
+      return t === 3
+        ? { type: 3, name: enc(f.name), value: null, linkedId: LINKED_IDS[f.linked] }
+        : { type: t, name: enc(f.name), value: enc(f.value), linkedId: null };
+    });
 
     const cipher = {
-      type: 1,
-      name: encName,
-      notes: encNotes,
-      reprompt: 0,
+      type: type === 'secure_note' ? 2 : 1,
+      name: enc(name),
+      notes: enc(note),
+      reprompt: reprompt ? 1 : 0,
       encryptedFor: userUuid,
-      login: {
-        uris: encUris,
-        username: null,
-        password: encPassword,
-        passwordRevisionDate: null,
-        totp: null,
-        autofillOnPageLoad: null,
-      },
+      fields: encFields.length ? encFields : null,
     };
+    if (type === 'secure_note') {
+      cipher.secureNote = { type: 0 };
+    } else {
+      cipher.login = {
+        uris: encUris,
+        username: enc(username),
+        password: enc(value),
+        passwordRevisionDate: null,
+        totp: enc(totp),
+        autofillOnPageLoad: null,
+      };
+    }
 
     if (current) {
       const res = await request('PUT', `/api/ciphers/${current.id}`, JSON.stringify(cipher), {

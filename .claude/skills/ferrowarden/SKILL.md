@@ -33,9 +33,9 @@ Credential values never enter the agent context. Ferrowarden substitutes `{{vaul
 
 ## Workflow
 
-1. Call `GET /v1/credentials` to retrieve the list of available names.
+1. Call `GET /v1/credentials?detail=true` to get the available credentials, a ready-made placeholder for each value (password, username, totp, notes, custom fields), and the hosts each may be sent to (`bound_to`).
 2. Identify which name the target service needs. If the needed credential is not listed, stop and tell the user which name to add to the vault.
-3. Build the `POST /v1/forward` body. Put `{{vault:name}}` in the `url`, header values, or `body` field wherever the credential belongs.
+3. Build the `POST /v1/forward` body. Copy the placeholder strings verbatim into the `url`, header values, or `body` wherever each value belongs — do not construct or re-quote them.
 4. Send the request. Use the returned `status`, `headers`, and `body` as a normal HTTP response.
 5. On `429 Too Many Requests`, wait the number of seconds in the `Retry-After` header and retry once.
 6. On `503 Service Unavailable`, the vault is locked. Inform the user; do not retry automatically.

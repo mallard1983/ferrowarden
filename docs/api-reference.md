@@ -21,15 +21,48 @@ Responses are JSON. Errors follow a consistent shape:
 
 ### `GET /v1/credentials`
 
-List the names of credentials available in the vault. This is the only way for an agent to discover what credentials exist — values are never included.
+List the credentials available in the vault — Login and Secure note items. This is the only way for an agent to discover what credentials exist — values are never included.
 
 **Headers**
 - `X-Agent-Key: <token>` — required
 
+**Query parameters**
+- `detail=true` — return objects with ready-made placeholders instead of plain names
+
 **Response `200 OK`**
 ```json
-["proxmox_api_token", "nas_key", "plex_token", "grafana_service_account"]
+["Proxmox (prod)", "grafana_service_account", "nas_key"]
 ```
+
+**Response `200 OK` with `?detail=true`**
+```json
+[
+  {
+    "name": "Proxmox (prod)",
+    "type": "login",
+    "placeholder": "{{vault:'Proxmox (prod)'}}",
+    "username": "{{vault:'Proxmox (prod)':username}}",
+    "totp": "{{vault:'Proxmox (prod)':totp}}",
+    "fields": { "api secret": "{{vault:'Proxmox (prod)':field:'api secret'}}" },
+    "unavailable_fields": { "dup": "ambiguous: the item has more than one field with this name" },
+    "bound_to": ["https://pve.lan:8006"]
+  },
+  {
+    "name": "nas_key",
+    "type": "secure_note",
+    "notes": "{{vault:nas_key:notes}}",
+    "bound_to": ["https://nas.lan"]
+  },
+  {
+    "name": "root_token",
+    "type": "login",
+    "bound_to": ["https://pve.lan:8006"],
+    "unavailable": "master password re-prompt is enabled on this item; agents cannot use it until approvals are supported"
+  }
+]
+```
+
+Each key is present only when that value exists on the item. `bound_to` lists the hosts the credential may be sent to. Copy placeholders verbatim rather than constructing them.
 
 **Errors**
 | Status | Condition |
@@ -102,8 +135,9 @@ Every credential value used in the request is redacted (`[REDACTED]`) wherever i
 | `400 Bad Request` | Malformed request JSON; unparseable URL; scheme not http/https; invalid HTTP method; placeholder in the URL host/port |
 | `401 Unauthorized` | Missing or invalid agent key |
 | `403 Forbidden` | Credential not bound to the target host, or target refused by the outbound policy (bw serve, private/internal address not in `allowed_targets`) |
-| `409 Conflict` | Placeholder name matches more than one vault item |
-| `422 Unprocessable Entity` | Placeholder references an unknown credential name |
+| `403 Forbidden` (re-prompt) | The item has master password re-prompt enabled |
+| `409 Conflict` | Placeholder name matches more than one vault item, or a field name appears more than once on the item |
+| `422 Unprocessable Entity` | Malformed placeholder, unknown credential, or a value/field the item does not have |
 | `502 Bad Gateway` | Forward to target failed (connection error, timeout) or response exceeded `max_response_bytes`. The message never includes the target URL. |
 | `503 Service Unavailable` | Vault is locked, or bw serve is unreachable |
 
@@ -249,16 +283,29 @@ Current operational status.
 
 ## Placeholder Syntax
 
-Placeholders use the format `{{vault:name}}` where `name` matches the pattern `[a-zA-Z0-9_\-\.]+`.
+Placeholders select a value of a Vaultwarden **Login** or **Secure note** item:
 
-Names are case-sensitive and must exactly match the credential name in Vaultwarden.
+| Placeholder | Substitutes |
+|---|---|
+| `{{vault:NAME}}` | the item's password |
+| `{{vault:NAME:password}}` | the password (explicit) |
+| `{{vault:NAME:username}}` | the login username |
+| `{{vault:NAME:totp}}` | the current TOTP code |
+| `{{vault:NAME:notes}}` | the item's notes |
+| `{{vault:NAME:field:FIELD}}` | a custom field (text, hidden, boolean, or linked to the username/password) |
 
-**Examples**
+`NAME` and `FIELD` are either a plain word of letters, digits, `_`, `-` and `.` — or a **single-quoted string**, which allows any characters (spaces, colons, anything). Inside quotes, write `\'` for a quote and `\\` for a backslash:
+
 ```
 {{vault:proxmox_api_token}}
-{{vault:nas-key}}
-{{vault:service.account.password}}
+{{vault:'Proxmox (prod)':username}}
+{{vault:'Proxmox (prod)':field:'api secret'}}
+{{vault:'it\'s here'}}
 ```
+
+Single quotes are used because placeholders usually sit inside JSON strings, where double quotes would need escaping. Names are case-sensitive and must match the vault exactly. **You rarely need to write quoting yourself:** `GET /v1/credentials?detail=true` returns the exact placeholder for every available value.
+
+Anything starting with `{{vault:` that does not parse is rejected with `422` — malformed placeholders are never forwarded.
 
 **Placement**
 Placeholders may appear anywhere in:
