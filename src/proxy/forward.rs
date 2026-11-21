@@ -233,6 +233,8 @@ mod tests {
             forward_timeout_secs: 5,
             trusted_proxies: String::new(),
             api_prefix: String::new(),
+            agent_rate_limit_per_minute: 120,
+            agent_rate_limit_burst: 20,
         }))
     }
 

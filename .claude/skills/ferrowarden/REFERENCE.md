@@ -82,7 +82,7 @@ All error responses: `{ "error": "message" }`
 
 | Route group | Sustained rate | Burst |
 |---|---|---|
-| Agent endpoints (`/v1/credentials`, `/v1/forward`) | 120 req/min | 20 |
+| Agent endpoints (`/v1/credentials`, `/v1/forward`) | 120 req/min (operator-configurable) | 20 (operator-configurable) |
 | Admin endpoints (`/v1/admin/*`, `/v1/unlock`) | 30 req/min | 5 |
 
 Limits are per source IP. `Retry-After` header on 429 gives seconds until the next token is available.

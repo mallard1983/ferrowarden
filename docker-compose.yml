@@ -194,6 +194,9 @@ services:
       FERROWARDEN_API_PREFIX: "${FERROWARDEN_API_PREFIX:-}"
       # How often new/changed vault items are picked up (seconds).
       FERROWARDEN_REFRESH_INTERVAL_SECS: "${FERROWARDEN_REFRESH_INTERVAL_SECS:-}"
+      # Agent endpoint rate limit per client IP (defaults 120/min, burst 20).
+      FERROWARDEN_AGENT_RATE_LIMIT_PER_MINUTE: "${FERROWARDEN_AGENT_RATE_LIMIT_PER_MINUTE:-}"
+      FERROWARDEN_AGENT_RATE_LIMIT_BURST: "${FERROWARDEN_AGENT_RATE_LIMIT_BURST:-}"
     networks:
       - vault-internal
       - agent-facing

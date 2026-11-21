@@ -17,10 +17,13 @@ use crate::net::Cidr;
 use crate::state::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    // Agent endpoints: 120 requests/min sustained, burst of 20.
-    // Sized for high-frequency automation — a single agent making one call per
-    // second (60/min) fits within the sustained rate with headroom.
-    let agent_limiter = new_limiter(120, 20);
+    // Agent endpoints: configurable, default 120 requests/min sustained with a
+    // burst of 20 — a single agent making one call per second (60/min) fits
+    // with headroom. Validated > 0 in Config::validate.
+    let agent_limiter = new_limiter(
+        state.config.agent_rate_limit_per_minute,
+        state.config.agent_rate_limit_burst,
+    );
 
     // Admin endpoints: 30 requests/min sustained, burst of 5.
     // Admin actions (unlock, key management, audit queries) are infrequent by
@@ -100,6 +103,8 @@ mod tests {
             forward_timeout_secs: 5,
             trusted_proxies: String::new(),
             api_prefix: prefix.to_string(),
+            agent_rate_limit_per_minute: 120,
+            agent_rate_limit_burst: 20,
         };
         router(Arc::new(AppState::new_with_audit(cfg, Arc::new(AuditLog::new(10)))))
     }

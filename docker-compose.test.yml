@@ -118,6 +118,10 @@ services:
       FERROWARDEN_ALLOWED_TARGETS: "mock-api"
       # Short refresh so tests see vault changes quickly.
       FERROWARDEN_REFRESH_INTERVAL_SECS: "30"
+      # The integration suite fires all its requests from one IP within a
+      # fraction of a second on fast CI runners; the default burst (20)
+      # would turn later tests into 429s.
+      FERROWARDEN_AGENT_RATE_LIMIT_BURST: "1000"
     networks:
       - vault-internal
       - test-net

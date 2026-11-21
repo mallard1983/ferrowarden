@@ -113,6 +113,16 @@ pub struct Config {
     /// authentication: the agent and admin keys remain the real controls.
     #[serde(default)]
     pub api_prefix: String,
+
+    /// Sustained request rate allowed per client IP on the agent endpoints
+    /// (`/v1/forward`, `/v1/credentials`), in requests per minute. Default 120.
+    #[serde(default = "default_agent_rate_limit_per_minute")]
+    pub agent_rate_limit_per_minute: u32,
+
+    /// Burst size for the agent endpoints: how many requests a client may
+    /// make back-to-back before the sustained rate applies. Default 20.
+    #[serde(default = "default_agent_rate_limit_burst")]
+    pub agent_rate_limit_burst: u32,
 }
 
 fn default_bind_addr() -> String {
@@ -137,6 +147,14 @@ fn default_refresh_interval_secs() -> u64 {
 
 fn default_max_response_bytes() -> usize {
     10 * 1024 * 1024
+}
+
+fn default_agent_rate_limit_per_minute() -> u32 {
+    120
+}
+
+fn default_agent_rate_limit_burst() -> u32 {
+    20
 }
 
 fn default_forward_timeout_secs() -> u64 {
@@ -230,6 +248,12 @@ impl Config {
             ));
         }
 
+        if self.agent_rate_limit_per_minute == 0 || self.agent_rate_limit_burst == 0 {
+            return Err(FerroError::Config(
+                "agent_rate_limit_per_minute and agent_rate_limit_burst must be greater than 0".to_string(),
+            ));
+        }
+
         if self.forward_timeout_secs == 0 {
             return Err(FerroError::Config(
                 "forward_timeout_secs must be greater than 0".to_string(),
@@ -284,7 +308,16 @@ mod tests {
             forward_timeout_secs: 30,
             trusted_proxies: String::new(),
             api_prefix: String::new(),
+            agent_rate_limit_per_minute: 120,
+            agent_rate_limit_burst: 20,
         }
+    }
+
+    #[test]
+    fn zero_rate_limit_fails() {
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.agent_rate_limit_burst = 0;
+        assert!(cfg.validate().unwrap_err().to_string().contains("rate_limit"));
     }
 
     #[test]

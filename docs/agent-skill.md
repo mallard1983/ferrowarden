@@ -194,7 +194,7 @@ All errors return `{"error": "message"}` with an appropriate HTTP status.
 
 **Internal targets are blocked unless the operator allows them.** Private and loopback addresses return `403` unless listed in the operator's `allowed_targets`. The vault backend itself is always blocked.
 
-**Rate limits apply per source IP.** You have 120 requests per minute with a burst of 20. Respect `Retry-After` headers on `429` responses.
+**Rate limits apply per source IP.** By default you have 120 requests per minute with a burst of 20 (the operator may configure different limits). Respect `Retry-After` headers on `429` responses.
 
 ---
 
