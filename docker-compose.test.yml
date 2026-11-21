@@ -20,19 +20,45 @@
 
 services:
 
+  # ── Internal PKI (one-shot) ──────────────────────────────────────────────────
+  # Creates a private CA and a certificate for "vaultwarden" in the
+  # internal-pki volume. The Bitwarden CLI refuses plain-HTTP servers, so
+  # Vaultwarden serves HTTPS on the internal network and bw serve trusts this
+  # CA. Idempotent: re-issues the server cert only when missing or expiring.
+  internal-certs:
+    build:
+      context: ./docker
+      dockerfile: bw-cli.Dockerfile
+    user: "0"
+    entrypoint: ["/bin/sh", "/usr/local/bin/gen-internal-certs.sh"]
+    volumes:
+      - internal-pki:/pki
+    environment:
+      VW_HOSTNAME: "vaultwarden"
+    network_mode: none
+    restart: "no"
+
   # ── Vaultwarden (test override) ──────────────────────────────────────────────
   # Allow signups during the initial setup run. The dev-setup script disables
   # this after account creation.
   vaultwarden:
-    # Pinned: bw CLI 2023.12.1 (see docker/bw-cli.Dockerfile) is verified
+    # Pinned: bw CLI 2026.11.0 (see docker/bw-cli.Dockerfile) is verified
     # against this release. Upgrade both deliberately and re-run the tests.
     image: vaultwarden/server:1.37.5
     restart: unless-stopped
+    environment:
+      DOMAIN: "https://vaultwarden"
+      SIGNUPS_ALLOWED: "${VAULTWARDEN_SIGNUPS_ALLOWED:-false}"
+      # HTTPS on the internal network, using the internal CA's certificate.
+      # Required because current Bitwarden CLI releases refuse plain HTTP.
+      ROCKET_TLS: '{certs="/pki/vaultwarden.crt",key="/pki/vaultwarden.key"}'
+      ROCKET_PORT: "443"
     volumes:
       - vaultwarden-test-data:/data
-    environment:
-      DOMAIN: "http://vaultwarden:80"
-      SIGNUPS_ALLOWED: "${VAULTWARDEN_SIGNUPS_ALLOWED:-false}"
+      - internal-pki:/pki:ro
+    depends_on:
+      internal-certs:
+        condition: service_completed_successfully
     networks:
       - vault-internal
 
@@ -45,6 +71,7 @@ services:
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     volumes:
       - ./docker/bw-entrypoint.sh:/entrypoint.sh:ro
+      - internal-pki:/pki:ro
       # Note: bw-test-data volume removed — the node user cannot write to a
       # Docker named volume (initially root-owned). bw re-logs in on each
       # container start using the API key secrets, which is fast enough for
@@ -53,8 +80,12 @@ services:
       - bw_client_id
       - bw_client_secret
     environment:
-      BW_SERVER_URL: "http://vaultwarden:80"
-      BW_SERVE_HOSTNAME: "0.0.0.0"
+      BW_SERVER_URL: "https://vaultwarden"
+      # bw serve only accepts requests whose Host header is localhost or the
+      # --hostname it was started with, so this must be the name ferrowarden
+      # uses in FERROWARDEN_BW_SERVE_URL. It binds to this container's address
+      # on vault-internal.
+      BW_SERVE_HOSTNAME: "bw-serve"
       BW_SERVE_PORT: "8087"
     networks:
       - vault-internal
@@ -91,7 +122,9 @@ services:
       - vault-internal
       - test-net
     ports:
-      - "127.0.0.1:3000:3000"
+      # Loopback only by default. To test through a reverse proxy on another
+      # machine (e.g. Pangolin/newt), set FERROWARDEN_TEST_PUBLISH=0.0.0.0.
+      - "${FERROWARDEN_TEST_PUBLISH:-127.0.0.1}:3000:3000"
     depends_on:
       - bw-serve
 
@@ -138,8 +171,9 @@ services:
     volumes:
       - ./docker/setup-entrypoint.sh:/setup-entrypoint.sh:ro
       - ./secrets:/secrets
+      - internal-pki:/pki:ro
     environment:
-      BW_SERVER_URL: "http://vaultwarden:80"
+      BW_SERVER_URL: "https://vaultwarden"
       SETUP_EMAIL: "${SETUP_EMAIL:-admin@ferrowarden.test}"
       SETUP_MASTER_PASSWORD: "${SETUP_MASTER_PASSWORD:-ferrowarden-test-master-pw}"
       SECRETS_DIR: "/secrets"
@@ -163,10 +197,11 @@ services:
     volumes:
       - ./docker/seed-entrypoint.sh:/seed-entrypoint.sh:ro
       - ./tests/seed/credentials.json:/seed/credentials.json:ro
+      - internal-pki:/pki:ro
     secrets:
       - bw_master_password
     environment:
-      BW_SERVER_URL: "http://vaultwarden:80"
+      BW_SERVER_URL: "https://vaultwarden"
       SETUP_EMAIL: "${SETUP_EMAIL:-admin@ferrowarden.test}"
     networks:
       - vault-internal
@@ -184,6 +219,7 @@ networks:
 
 volumes:
   vaultwarden-test-data:
+  internal-pki:
   ferrowarden-keys:
 
 secrets:

@@ -29,7 +29,19 @@ pub async fn refresh_credentials(state: &AppState) -> FerroResult<()> {
         tracing::warn!(error = %e, "bw serve sync failed; using its cached vault copy");
     }
 
-    match vault.list_credentials().await {
+    // The first list after a fresh login/unlock can fail transiently while the
+    // CLI finishes one-time state migrations (observed once with CLI
+    // 2026.11.0 as a 500). Retry once before reporting an error.
+    let listed = match vault.list_credentials().await {
+        Err(FerroError::Internal(msg)) => {
+            tracing::warn!(error = %msg, "Listing vault items failed; retrying once");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            vault.list_credentials().await
+        }
+        other => other,
+    };
+
+    match listed {
         Ok(map) => {
             let count = map.len();
             *state.credentials.write().await = map;

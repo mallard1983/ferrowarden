@@ -30,8 +30,6 @@ Agent  ──HTTPS──►  Pangolin (Let's Encrypt cert)  ──HTTP──► 
 ```
 
 **When this is safe without internal TLS:**
-With a reverse proxy in front, every request reaches Ferrowarden from the proxy's IP, so all agents would share one rate-limit bucket. Set `FERROWARDEN_TRUSTED_PROXIES` to the proxy's address (e.g. its Docker network CIDR) and Ferrowarden will rate-limit by the client IP in `X-Forwarded-For`. Only list the proxy itself — any client in that range could otherwise forge the header.
-
 Pangolin and Ferrowarden must run on the same host (same Docker Compose stack or same machine). The HTTP hop between Pangolin and Ferrowarden is then on `localhost` or an internal bridge network — it never crosses a physical network segment. If they are on different hosts, that internal segment must also be encrypted (use a WireGuard tunnel, which Pangolin can provide).
 
 **Ferrowarden configuration (`docker-compose.yml`):**
@@ -51,6 +49,14 @@ ferrowarden:
 ```
 
 Point Pangolin at `http://ferrowarden:3000` as the upstream. Pangolin provides the public HTTPS endpoint; your agent connects to Pangolin's URL.
+
+**Match the target scheme to Ferrowarden.** If the Pangolin target (site resource) is configured as `https://…:3000`, Pangolin opens a TLS connection to Ferrowarden. A plaintext Ferrowarden then answers with garbage and Pangolin returns a bare `500 Internal Server Error`. Either set the target to `http://`, or keep it `https://` and enable Ferrowarden's built-in TLS (`FERROWARDEN_TLS_ENABLED=true` with a certificate — a self-signed/local-CA certificate is accepted by Pangolin). The second option encrypts the Pangolin → Ferrowarden hop too, which is what you want whenever that hop crosses a network. Both setups were tested end to end with a Let's Encrypt certificate at Pangolin.
+
+A `504 Gateway Timeout` from Pangolin usually means it cannot reach the port at all — e.g. Ferrowarden is published on `127.0.0.1` only while Pangolin's connector reaches the host on another interface.
+
+**Rate limiting behind Pangolin.** Every request reaches Ferrowarden from Pangolin's connector address, so all agents would share one rate-limit bucket. Set `FERROWARDEN_TRUSTED_PROXIES` to that address (for a connector running on the Docker host and reaching a published port, typically the Docker bridge gateway, e.g. `172.17.0.1`) and Ferrowarden will rate-limit by the client IP in `X-Forwarded-For`. Only list the proxy itself — any client in that range could otherwise forge the header.
+
+**Testing through Pangolin with the test stack:** `docker-compose.test-tls.yml` serves the test stack's Ferrowarden over TLS on all interfaces; see the comments in that file.
 
 ### Generic proxy (Caddy, Nginx, Traefik)
 

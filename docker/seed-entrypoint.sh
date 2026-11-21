@@ -5,16 +5,16 @@
 # Idempotent: credentials that already exist by name are skipped.
 #
 # Uses bw-seed.js (Node.js, built-in modules only) for direct Vaultwarden API
-# calls. The Bitwarden CLI 2023.12.1 is incompatible with Vaultwarden 2026.x
-# for item creation (missing 'encryptedFor' field); the Node.js script bypasses
-# the CLI and handles the cipher crypto and API calls directly.
+# calls, handling the cipher crypto itself. It was written when the pinned
+# CLI (2023.12.1) could not create items on current Vaultwarden; it is kept so
+# test fixtures do not depend on CLI item-creation behaviour.
 #
 # Requires:
 #   /run/secrets/bw_master_password — Vault master password
 #   /seed/credentials.json          — Credential definitions to seed
 #
 # Environment:
-#   BW_SERVER_URL  — Vaultwarden base URL (e.g. http://vaultwarden:80)
+#   BW_SERVER_URL  — Vaultwarden base URL (e.g. https://vaultwarden)
 #   SETUP_EMAIL    — Vault account email (default: admin@ferrowarden.test)
 
 set -e
@@ -39,7 +39,10 @@ fi
 
 echo "Waiting for Vaultwarden at $BW_SERVER_URL ..."
 elapsed=0
-until wget -q --spider "$BW_SERVER_URL" 2>/dev/null; do
+CA_CERT="${BW_CA_CERT:-${NODE_EXTRA_CA_CERTS:-/pki/ca.crt}}"
+WGET_CA=""
+[ -f "$CA_CERT" ] && WGET_CA="--ca-certificate=$CA_CERT"
+until wget -q $WGET_CA --spider "$BW_SERVER_URL" 2>/dev/null; do
     if [ "$elapsed" -ge "$MAX_WAIT" ]; then
         echo "ERROR: Vaultwarden did not become ready within ${MAX_WAIT}s" >&2
         exit 1

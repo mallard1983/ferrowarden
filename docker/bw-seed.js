@@ -5,10 +5,11 @@
  * Idempotent Vaultwarden credential seeder using direct API calls.
  * Uses only Node.js built-in modules (crypto, https, http, fs) — no extra deps.
  *
- * The Bitwarden CLI 2023.12.1 is incompatible with Vaultwarden 2026.x:
- * the new API requires an `encryptedFor` field on every cipher, which the
- * old CLI does not send. This script implements seeding entirely via HTTP,
- * performing the crypto itself.
+ * Written when the pinned Bitwarden CLI (2023.12.1) could not create items on
+ * current Vaultwarden (the API requires an `encryptedFor` field on every
+ * cipher). Kept so test fixtures do not depend on CLI item-creation
+ * behaviour. This script implements seeding entirely via HTTP, performing
+ * the crypto itself. HTTPS targets trust NODE_EXTRA_CA_CERTS.
  *
  * Flow:
  *   1. Derive master key and hash (PBKDF2)
@@ -135,8 +136,22 @@ function get(path, token) {
 async function seed() {
   const credentials = JSON.parse(fs.readFileSync(credentialsFile, 'utf8'));
 
-  // 1. Derive master key and hash
-  const masterKey  = pbkdf2(Buffer.from(password), Buffer.from(email.toLowerCase()), 100000, 32);
+  // 1. Derive master key and hash, using the account's current KDF settings.
+  //    Never assume an iteration count: current Bitwarden clients raise it
+  //    (e.g. 100,000 -> 600,000) automatically after login.
+  const pre = await post('/identity/accounts/prelogin', JSON.stringify({ email }));
+  if (pre.status !== 200) {
+    console.error(`[seed] prelogin failed (${pre.status}): ${pre.body}`);
+    return 1;
+  }
+  const preData = JSON.parse(pre.body);
+  const kdfType = preData.kdf ?? preData.Kdf;
+  const kdfIterations = preData.kdfIterations ?? preData.KdfIterations;
+  if (kdfType !== 0) {
+    console.error(`[seed] Unsupported KDF type ${kdfType} (only PBKDF2-SHA256 is implemented)`);
+    return 1;
+  }
+  const masterKey  = pbkdf2(Buffer.from(password), Buffer.from(email.toLowerCase()), kdfIterations, 32);
   const masterHash = pbkdf2(masterKey, Buffer.from(password), 1, 32).toString('base64');
 
   // 2. Stretch the master key (same as during registration)

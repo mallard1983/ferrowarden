@@ -1,30 +1,40 @@
-FROM node:20-slim
+FROM node:22-slim
 
 # The entrypoint scripts use curl, wget, and python3 for Vaultwarden API calls
-# and health checks. The slim image ships with none of these.
+# and health checks; openssl generates the internal CA and Vaultwarden
+# certificate (gen-internal-certs.sh). The slim image ships with none of these.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
         curl \
         wget \
         python3 \
+        openssl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install the Bitwarden CLI globally.
-# Pin to 2023.12.1 — the last version that accepts HTTP server URLs.
-# Versions 2024.x+ require HTTPS, breaking the HTTP-only test stack.
-# Account registration uses bw-register.js (see below) instead of a bw command,
-# because `bw register` was removed before the 2023.x series.
-RUN npm install -g @bitwarden/cli@2023.12.1 \
+# Install the Bitwarden CLI globally. Pinned: bump deliberately and re-run the
+# integration tests (the bw serve API shape is part of ferrowarden's contract).
+# The CLI requires Node 22+ and refuses plain-HTTP server URLs, which is why
+# Vaultwarden is served over HTTPS on the internal network (see
+# gen-internal-certs.sh and docker-compose.yml).
+RUN npm install -g @bitwarden/cli@2026.11.0 \
     && bw --version
 
+# Trust the internal CA (mounted from the internal-pki volume at /pki) for all
+# Node.js HTTPS calls: the bw CLI, bw-register.js and bw-seed.js. If the file
+# is absent Node logs a warning and continues with the system CAs.
+ENV NODE_EXTRA_CA_CERTS=/pki/ca.crt
+
 # bw-register.js: performs Bitwarden-compatible account registration using
-# only Node.js built-in crypto (no npm deps). The bw CLI never had a register
+# only Node.js built-in crypto (no npm deps). The bw CLI has no register
 # command; this script calls POST /api/accounts/register directly.
 COPY bw-register.js /home/node/bw-register.js
 
-# bw-seed.js: seeds vault items via direct Vaultwarden API calls.
-# bw CLI 2023.12.1 is incompatible with Vaultwarden 2026.x cipher format
-# (missing encryptedFor field). This script bypasses the CLI entirely.
+# bw-seed.js: seeds vault items via direct Vaultwarden API calls, so the test
+# fixtures do not depend on CLI item-creation behaviour.
 COPY bw-seed.js /home/node/bw-seed.js
+
+# Internal certificate generator, run by the one-shot internal-certs service.
+COPY gen-internal-certs.sh /usr/local/bin/gen-internal-certs.sh
 
 # node:*-slim images ship with a non-root "node" user (UID 1000).
 # bw stores its config in ~/.config/Bitwarden CLI. Create that directory now

@@ -115,6 +115,8 @@ Start Vaultwarden alone to register your account:
 docker compose up -d vaultwarden
 ```
 
+This first runs the one-shot `internal-certs` service, which creates a private CA and Vaultwarden's certificate in the `internal-pki` volume. Vaultwarden serves **HTTPS on port 443** inside Docker, because the Bitwarden CLI that `bw serve` runs refuses plain-HTTP servers.
+
 Access the web UI. If you are on the same host:
 
 ```sh
@@ -122,7 +124,10 @@ Access the web UI. If you are on the same host:
 docker compose exec vaultwarden sh -c "echo 'Vaultwarden is running'"
 # Or add a temporary port mapping to docker-compose.yml under vaultwarden:
 #   ports:
-#     - "127.0.0.1:8080:80"
+#     - "127.0.0.1:8443:443"
+# then browse to https://127.0.0.1:8443. The browser warns about the
+# certificate (it is issued by the internal CA for the name "vaultwarden");
+# accept it for this one-time setup, then remove the port mapping.
 ```
 
 In the web UI:
@@ -311,13 +316,17 @@ If you are running Ferrowarden directly on a host (development or bare-metal):
 # Install the Bitwarden CLI
 # https://bitwarden.com/help/cli/
 
-# Configure bw to point at your Vaultwarden instance
-bw config server http://your-vaultwarden-host
+# Configure bw to point at your Vaultwarden instance. It must be https://:
+# current CLI releases refuse plain HTTP. For a private CA, also
+# export NODE_EXTRA_CA_CERTS=/path/to/ca.crt
+bw config server https://your-vaultwarden-host
 
 # Log in
 bw login --apikey  # requires BW_CLIENTID and BW_CLIENTSECRET env vars
 
-# Start bw serve (keep this running in a separate terminal or service)
+# Start bw serve (keep this running in a separate terminal or service).
+# bw serve only accepts requests addressed to localhost/127.0.0.1 or this
+# --hostname, so keep bw_serve_url = "http://127.0.0.1:8087".
 bw serve --hostname 127.0.0.1 --port 8087
 
 # In another terminal, start Ferrowarden

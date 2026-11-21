@@ -20,7 +20,7 @@
  *   POST /api/accounts/register — single-step, no email verification token.
  *
  * Crypto chain (matches Bitwarden's official implementation):
- *   masterKey  = PBKDF2-SHA256(password, email, 100000, 32)
+ *   masterKey  = PBKDF2-SHA256(password, email, KDF_ITERATIONS, 32)
  *   masterHash = PBKDF2-SHA256(masterKey, password, 1, 32) [base64]
  *   stretchKey = HKDF-Expand-SHA256("enc", 32) concat HKDF-Expand-SHA256("mac", 32)
  *   encSymKey  = AES-256-CBC-HMAC-SHA256(stretchKey, random 64 bytes)
@@ -99,8 +99,13 @@ function makeOptions(url, method, body) {
   };
 }
 
+// 600,000 PBKDF2-SHA256 iterations: the current Bitwarden default. Registering
+// with fewer makes current CLI releases silently upgrade the account's KDF on
+// first login, which breaks any tool still assuming the old count.
+const KDF_ITERATIONS = 600000;
+
 async function register() {
-  const masterKey  = pbkdf2(Buffer.from(password), Buffer.from(email.toLowerCase()), 100000, 32);
+  const masterKey  = pbkdf2(Buffer.from(password), Buffer.from(email.toLowerCase()), KDF_ITERATIONS, 32);
   const masterHash = pbkdf2(masterKey, Buffer.from(password), 1, 32).toString('base64');
 
   // Stretch the 32-byte master key into a 64-byte encryption+MAC key pair
@@ -158,7 +163,7 @@ async function register() {
     masterPasswordHash: masterHash,
     masterPasswordHint: '',
     kdfType: 0,
-    kdfIterations: 100000,
+    kdfIterations: KDF_ITERATIONS,
     kdfMemory: null,
     kdfParallelism: null,
     userSymmetricKey: encSymKey,
@@ -190,7 +195,7 @@ async function legacyRegister(transport, emailAddr, masterHash, encSymKey, publi
     masterPasswordHint: '',
     key: encSymKey,
     kdf: 0,
-    kdfIterations: 100000,
+    kdfIterations: KDF_ITERATIONS,
     keys: {
       publicKey: publicKey.toString('base64'),
       encryptedPrivateKey: encPrivKey,

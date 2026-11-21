@@ -92,6 +92,14 @@ The Docker Compose configuration places `bw-serve` on an `internal: true` networ
 
 **Why this matters:** `bw serve` has no authentication. Anyone who can reach its port can list credentials and retrieve values. Network isolation is the primary protection layer for `bw serve`.
 
+Two further layers apply: Ferrowarden's outbound policy refuses `bw serve` as a forward target (property 14), and current `bw serve` releases reject requests whose `Host` header is not `localhost`/`127.0.0.1`/`[::1]` or the `--hostname` it was started with (DNS-rebinding protection). In Docker Compose it is started with `--hostname bw-serve`, the name Ferrowarden uses.
+
+### 6a. Internal TLS Between bw serve and Vaultwarden
+
+Current Bitwarden CLI releases refuse plain-HTTP servers, so Vaultwarden serves HTTPS on the `vault-internal` network. A one-shot `internal-certs` service creates a private CA (10 years) and a certificate for `vaultwarden` (825 days, re-issued automatically within 30 days of expiry) in the `internal-pki` volume. Vaultwarden mounts it read-only; bw serve, the setup and the seeder trust only that CA for the internal hop via `NODE_EXTRA_CA_CERTS`. The CA private key never leaves the volume.
+
+This hop only carries Vaultwarden's end-to-end-encrypted vault data and API-key authentication, but it now has transport encryption and server authentication too.
+
 ### 7. No Redirect Following
 
 Ferrowarden's HTTP client is configured with `redirect::Policy::none()`. It never follows HTTP redirects.
@@ -219,6 +227,7 @@ Before going to production:
 - [ ] Vaultwarden's `SIGNUPS_ALLOWED` is set to `false`
 - [ ] Vaultwarden is not exposed on a public port
 - [ ] `bw serve` port (8087) is not reachable from outside Docker (`internal: true` network)
+- [ ] The `internal-pki` volume (internal CA key) is backed up or treated as regenerable, and not copied elsewhere
 - [ ] Every vault item agents use has URIs for exactly the hosts it belongs to, and `enforce_credential_hosts` is `true`
 - [ ] `allowed_targets` lists only the internal hosts/ranges agents need; `allow_private_targets` is `false`
 - [ ] If a reverse proxy fronts Ferrowarden, `trusted_proxies` is set to its address (and nothing else)

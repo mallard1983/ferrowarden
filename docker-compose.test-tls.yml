@@ -1,0 +1,28 @@
+# docker-compose.test-tls.yml
+#
+# Override for the test stack: serve ferrowarden over its built-in TLS using
+# the dev certificate in certs/ (created by scripts/dev-setup.*), and publish
+# it on all interfaces. Use this to test through a TLS reverse proxy such as
+# Pangolin, whose targets connect to ferrowarden over HTTPS.
+#
+#   FERROWARDEN_TEST_PUBLISH=0.0.0.0 \
+#     docker compose -f docker-compose.test.yml -f docker-compose.test-tls.yml up -d ferrowarden
+#
+#   FERROWARDEN_TEST_URL=https://<your-public-host> cargo test --test integration
+#
+# Revert to the default (loopback, plaintext):
+#   docker compose -f docker-compose.test.yml up -d ferrowarden
+#
+# Publishing the test stack exposes its admin and agent endpoints to whatever
+# can reach this port. Only do this behind a proxy you control, and stop it
+# when you are done.
+
+services:
+  ferrowarden:
+    environment:
+      FERROWARDEN_TLS_ENABLED: "true"
+      FERROWARDEN_TLS_CERT_FILE: "/run/certs/server.crt"
+      FERROWARDEN_TLS_KEY_FILE: "/run/certs/server.key"
+    volumes:
+      - ./certs/server.crt:/run/certs/server.crt:ro
+      - ./certs/server.key:/run/certs/server.key:ro

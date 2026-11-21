@@ -386,7 +386,23 @@ curl https://<ferrowarden-host>:3000/v1/credentials \
 docker compose logs bw-serve
 ```
 
-bw-serve only runs `bw login` when the CLI is not already logged in, so restarts with a persistent `bw-data` volume work.
+bw-serve only runs `bw login` when the CLI is not already logged in, so restarts with a persistent `bw-data` volume work. If `BW_SERVER_URL` changed (e.g. the move to `https://vaultwarden`), the entrypoint logs out and reconfigures first.
+
+- `Insecure URL not allowed. All URLs must use HTTPS.` — `BW_SERVER_URL` is `http://`. Use `https://vaultwarden`.
+- `ERROR: internal CA certificate not found at /pki/ca.crt` — the `internal-pki` volume is not mounted, or `internal-certs` has not run (`docker compose up -d` runs it automatically).
+- TLS errors such as `unable to verify the first certificate` — Vaultwarden's certificate was not issued by the CA in `internal-pki`; run `docker compose run --rm internal-certs` and restart `vaultwarden` and `bw-serve`.
+
+### Ferrowarden fails with "error decoding response body"; bw-serve logs `Blocking request with disallowed Host`
+
+`bw serve` only accepts requests addressed to `localhost` or to the `--hostname` it was started with. `BW_SERVE_HOSTNAME` must be the host name in `FERROWARDEN_BW_SERVE_URL` (`bw-serve` in Docker Compose).
+
+### Login with a hand-written tool fails after upgrading the CLI
+
+Current Bitwarden clients raise an account's PBKDF2 iterations (e.g. 100,000 → 600,000) automatically on login. Anything that derives the master password hash itself must read the count from `POST /identity/accounts/prelogin` instead of assuming it; the bundled setup and seeder scripts do.
+
+### Internal certificate renewal
+
+`internal-certs` runs on every `docker compose up` and re-issues Vaultwarden's certificate when it is within 30 days of expiry (it is valid for 825 days). Vaultwarden only loads the certificate at start, so restart it after a renewal: `docker compose restart vaultwarden`.
 
 Common causes:
 - Vaultwarden is not fully started when bw-serve attempts login — check Vaultwarden is healthy
@@ -401,6 +417,7 @@ Common causes:
 
 1. **Vaultwarden data volume** (`vaultwarden-data`): Contains the encrypted vault. This is the critical data — lose this, lose your credentials.
 2. **Secret files** (`secrets/`): The master password, client credentials, and admin key. Store these separately from the vault data (a compromised backup should not yield both the encrypted vault and the master password).
+3. **Internal PKI** (`internal-pki` volume) — optional. It only secures the internal bw serve → Vaultwarden hop; if lost, `internal-certs` creates a new CA and certificate on the next `docker compose up`.
 
 ### Restoring
 

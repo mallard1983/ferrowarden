@@ -42,7 +42,9 @@ Using an existing, audited password manager means we do not have to implement en
 - `GET /list/object/items` — list items (Ferrowarden keeps only names, ids and URIs)
 - `GET /object/password/:id` — retrieve a credential value by item id
 
-The key property: `bw serve` performs decryption locally. Credential values are decrypted on the host, in memory, and never transmitted over a network connection. The only network traffic between `bw serve` and Vaultwarden is the encrypted vault sync.
+The key property: `bw serve` performs decryption locally. Credential values are decrypted on the host, in memory, and never transmitted over a network connection. The only network traffic between `bw serve` and Vaultwarden is the encrypted vault sync, which runs over HTTPS on the internal network (current CLI releases refuse plain HTTP). A one-shot `internal-certs` service issues Vaultwarden's certificate from a private CA kept in the `internal-pki` volume; see [Security Model §6a](security.md#6a-internal-tls-between-bw-serve-and-vaultwarden).
+
+Ferrowarden talks to `bw serve` over plain HTTP on the `vault-internal` network. `bw serve` only accepts requests addressed to `localhost` or to the `--hostname` it was started with, so in Docker Compose it runs with `--hostname bw-serve`.
 
 **Why bw serve instead of Vaultwarden's HTTP API directly?**
 Vaultwarden's vault API works with encrypted blobs. Decryption requires the master password and client-side cryptography. Implementing the full Bitwarden crypto stack (PBKDF2, AES-CBC, RSA) in Ferrowarden would significantly increase code complexity and the risk of cryptographic mistakes. `bw serve` is the officially maintained implementation of that logic.

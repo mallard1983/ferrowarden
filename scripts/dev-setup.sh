@@ -132,8 +132,10 @@ sleep 3
 echo ""
 echo "[3/7] Creating Vaultwarden account and API key..."
 
-$COMPOSE run --rm \
-    -e VAULTWARDEN_SIGNUPS_ALLOWED=true \
+# VAULTWARDEN_SIGNUPS_ALLOWED must be set for compose itself (not just with -e):
+# `run` re-applies the vaultwarden service config, and without it compose would
+# recreate Vaultwarden with signups disabled before registration runs.
+VAULTWARDEN_SIGNUPS_ALLOWED=true $COMPOSE run --rm \
     -e SETUP_EMAIL="${SETUP_EMAIL:-admin@ferrowarden.test}" \
     -e SETUP_MASTER_PASSWORD="$(cat "$SECRETS_DIR/bw_master_password")" \
     vault-setup

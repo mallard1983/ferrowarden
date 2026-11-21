@@ -13,7 +13,9 @@
 #   5. Write client_id and client_secret to /secrets/
 #
 # Environment variables (all required):
-#   BW_SERVER_URL          — Vaultwarden base URL (e.g. http://vaultwarden:80)
+#   BW_SERVER_URL          — Vaultwarden base URL (e.g. https://vaultwarden)
+#   BW_CA_CERT             — CA that signs Vaultwarden's certificate
+#                            (default: $NODE_EXTRA_CA_CERTS, i.e. /pki/ca.crt)
 #   SETUP_EMAIL            — Email address for the vault account
 #   SETUP_MASTER_PASSWORD  — Master password for the vault account
 #   SETUP_MAX_WAIT         — Seconds to wait for Vaultwarden (default: 90)
@@ -24,12 +26,21 @@ EMAIL="${SETUP_EMAIL:?SETUP_EMAIL is required}"
 MASTER_PASSWORD="${SETUP_MASTER_PASSWORD:?SETUP_MASTER_PASSWORD is required}"
 MAX_WAIT="${SETUP_MAX_WAIT:-90}"
 SECRETS_DIR="${SECRETS_DIR:-/secrets}"
+CA_CERT="${BW_CA_CERT:-${NODE_EXTRA_CA_CERTS:-/pki/ca.crt}}"
+
+# wget/curl trust the internal CA explicitly (Node.js uses NODE_EXTRA_CA_CERTS).
+WGET_CA=""
+CURL_CA=""
+if [ -f "$CA_CERT" ]; then
+    WGET_CA="--ca-certificate=$CA_CERT"
+    CURL_CA="--cacert $CA_CERT"
+fi
 
 # ── 1. Wait for Vaultwarden ──────────────────────────────────────────────────
 
 echo "[setup] Waiting for Vaultwarden at $BW_SERVER_URL ..."
 elapsed=0
-until wget -q --spider "$BW_SERVER_URL" 2>/dev/null; do
+until wget -q $WGET_CA --spider "$BW_SERVER_URL" 2>/dev/null; do
     if [ "$elapsed" -ge "$MAX_WAIT" ]; then
         echo "[setup] ERROR: Vaultwarden did not become ready within ${MAX_WAIT}s" >&2
         exit 1
@@ -55,14 +66,28 @@ fi
 # ── 3. Derive master password hash (pure Python stdlib, no extra packages) ───
 # The Bitwarden identity token endpoint requires the master password hash,
 # not the plaintext password. The hash is PBKDF2-SHA256(masterKey, password, 1).
-# masterKey itself is PBKDF2-SHA256(password, email, 100000).
-# This is the standard Bitwarden KDF chain (kdf=0, kdfIterations=100000).
+# masterKey itself is PBKDF2-SHA256(password, email, <kdfIterations>).
+# The iteration count comes from Vaultwarden's prelogin endpoint: it is
+# 600,000 for accounts registered by bw-register.js, and current Bitwarden
+# clients upgrade older accounts automatically, so it must never be assumed.
+
+PRELOGIN=$(curl -sf $CURL_CA -X POST "$BW_SERVER_URL/identity/accounts/prelogin" \
+    -H "Content-Type: application/json" \
+    -d "{\"email\": \"$EMAIL\"}")
+KDF_ITERATIONS=$(python3 -c "
+import json, sys
+d = json.loads('$PRELOGIN')
+if d.get('kdf', d.get('Kdf', 0)) != 0:
+    sys.exit('unsupported KDF type (only PBKDF2-SHA256 is implemented)')
+print(d.get('kdfIterations') or d.get('KdfIterations'))
+")
+echo "[setup] Account KDF: PBKDF2-SHA256, $KDF_ITERATIONS iterations"
 
 MASTER_HASH=$(python3 - <<PYEOF
 import hashlib, base64
 email    = "$EMAIL".lower()
 password = "$MASTER_PASSWORD"
-master_key = hashlib.pbkdf2_hmac('sha256', password.encode(), email.encode(), 100000, 32)
+master_key = hashlib.pbkdf2_hmac('sha256', password.encode(), email.encode(), $KDF_ITERATIONS, 32)
 master_hash = base64.b64encode(
     hashlib.pbkdf2_hmac('sha256', master_key, password.encode(), 1, 32)
 ).decode()
@@ -78,7 +103,7 @@ PYEOF
 DEVICE_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
 
 echo "[setup] Obtaining access token..."
-TOKEN_RESPONSE=$(curl -sf -X POST "$BW_SERVER_URL/identity/connect/token" \
+TOKEN_RESPONSE=$(curl -sf $CURL_CA -X POST "$BW_SERVER_URL/identity/connect/token" \
     --data-urlencode "grant_type=password" \
     --data-urlencode "username=$EMAIL" \
     --data-urlencode "password=$MASTER_HASH" \
@@ -116,7 +141,7 @@ echo "[setup] Access token obtained."
 # Python's stdlib (base64 + json) since we obtained the token ourselves.
 
 echo "[setup] Creating API key..."
-APIKEY_RESPONSE=$(curl -sf -X POST "$BW_SERVER_URL/api/accounts/api-key" \
+APIKEY_RESPONSE=$(curl -sf $CURL_CA -X POST "$BW_SERVER_URL/api/accounts/api-key" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -H "Content-Type: application/json" \
     -d "{\"masterPasswordHash\": \"$MASTER_HASH\"}")

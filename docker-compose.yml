@@ -7,7 +7,8 @@
 #   2. Generate a TLS certificate (see docs/setup.md Step 0).
 #   3. Start Vaultwarden alone and register your account via its web UI:
 #        docker compose up -d vaultwarden
-#        # Temporarily add ports: ["127.0.0.1:8080:80"] to vaultwarden to access the UI
+#        # Temporarily add ports: ["127.0.0.1:8443:443"] to vaultwarden and browse to
+#        # https://127.0.0.1:8443 (accept the internal-CA certificate warning)
 #   4. Create an API key in Vaultwarden (Account Settings → API Key).
 #      Write the client_id and client_secret to secrets/bw_client_id and
 #      secrets/bw_client_secret.
@@ -18,32 +19,59 @@
 
 services:
 
+  # ── Internal PKI (one-shot) ──────────────────────────────────────────────────
+  # Creates a private CA and a certificate for "vaultwarden" in the
+  # internal-pki volume. The Bitwarden CLI refuses plain-HTTP servers, so
+  # Vaultwarden serves HTTPS on the internal network and bw serve trusts this
+  # CA. Idempotent: re-issues the server cert only when missing or expiring.
+  internal-certs:
+    build:
+      context: ./docker
+      dockerfile: bw-cli.Dockerfile
+    user: "0"
+    entrypoint: ["/bin/sh", "/usr/local/bin/gen-internal-certs.sh"]
+    volumes:
+      - internal-pki:/pki
+    environment:
+      VW_HOSTNAME: "vaultwarden"
+    network_mode: none
+    restart: "no"
+
   # ── Vaultwarden ─────────────────────────────────────────────────────────────
   # Self-hosted Bitwarden-compatible server. Handles encrypted credential
   # storage and the human-facing web vault UI for managing credentials.
   # Ferrowarden itself never talks directly to Vaultwarden — only bw serve does.
   vaultwarden:
-    # Pinned: bw CLI 2023.12.1 (see docker/bw-cli.Dockerfile) is verified
+    # Pinned: bw CLI 2026.11.0 (see docker/bw-cli.Dockerfile) is verified
     # against this release. Upgrade both deliberately and re-run the tests.
     image: vaultwarden/server:1.37.5
     restart: unless-stopped
     volumes:
       - vaultwarden-data:/data
+      - internal-pki:/pki:ro
+    depends_on:
+      internal-certs:
+        condition: service_completed_successfully
     environment:
       # Set to the URL you use to reach Vaultwarden in a browser.
       # Required for email verification links to work correctly.
       # If you are not exposing Vaultwarden externally, the internal URL is fine.
-      DOMAIN: "http://vaultwarden:80"
+      DOMAIN: "https://vaultwarden"
       # Disable signups once your account is created. Anyone with network
       # access to the Vaultwarden port could otherwise register an account.
       SIGNUPS_ALLOWED: "false"
+      # HTTPS on the internal network, using the internal CA's certificate.
+      # Required because current Bitwarden CLI releases refuse plain HTTP.
+      ROCKET_TLS: '{certs="/pki/vaultwarden.crt",key="/pki/vaultwarden.key"}'
+      ROCKET_PORT: "443"
     networks:
       - vault-internal
     # Vaultwarden is on the internal network only. To access the web UI for
     # credential management, temporarily add a port mapping here and remove
     # it when done:
     #   ports:
-    #     - "127.0.0.1:8080:80"
+    #     - "127.0.0.1:8443:443"
+    # then browse to https://127.0.0.1:8443 (accept the internal-CA warning).
     logging:
       driver: json-file
       options:
@@ -70,20 +98,30 @@ services:
       # write here because the Dockerfile creates and chowns this directory
       # before the USER switch, so Docker copies that ownership to the volume.
       - bw-data:/home/node/.config/Bitwarden CLI
+      # Internal CA certificate (trusted via NODE_EXTRA_CA_CERTS).
+      - internal-pki:/pki:ro
     secrets:
       - bw_client_id
       - bw_client_secret
     environment:
-      BW_SERVER_URL: "http://vaultwarden:80"
-      BW_SERVE_HOSTNAME: "0.0.0.0"
+      BW_SERVER_URL: "https://vaultwarden"
+      # bw serve only accepts requests whose Host header is localhost or the
+      # --hostname it was started with, so this must be the name ferrowarden
+      # uses in FERROWARDEN_BW_SERVE_URL. It binds to this container's address
+      # on vault-internal.
+      BW_SERVE_HOSTNAME: "bw-serve"
       BW_SERVE_PORT: "8087"
+    depends_on:
+      internal-certs:
+        condition: service_completed_successfully
     networks:
       - vault-internal
     # bw serve takes ~15–20 seconds to log in and sync before the HTTP API is
     # ready. The healthcheck polls /status so ferrowarden can wait for the real
     # ready signal instead of a fixed sleep.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8087/status"]
+      # Must use the bw-serve name: bw serve rejects other Host headers.
+      test: ["CMD", "curl", "-f", "http://bw-serve:8087/status"]
       interval: 5s
       timeout: 3s
       retries: 15
@@ -196,6 +234,10 @@ volumes:
   bw-data:
   # Agent key hashes. Allows keys to survive ferrowarden restarts.
   ferrowarden-keys:
+  # Internal CA + Vaultwarden certificate (created by internal-certs).
+  # Holds the CA private key — back it up with the other volumes or let it be
+  # regenerated (bw serve picks up a new CA on restart).
+  internal-pki:
 
 
 # ── Secrets ──────────────────────────────────────────────────────────────────
