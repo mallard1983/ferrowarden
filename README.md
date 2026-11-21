@@ -128,6 +128,8 @@ Behind a TLS reverse proxy such as Pangolin, see [docs/tls.md](docs/tls.md#pango
 | [Logging](docs/logging.md) | Log levels, Loki, Wazuh, retention |
 | [TLS](docs/tls.md) | Pangolin reverse proxy and self-signed CA setup |
 | [Agent Skill](docs/agent-skill.md) | Reference doc for agents using the proxy (non-skill format) |
+| [Changelog](CHANGELOG.md) | Release notes and upgrade steps |
+| [Security Policy](SECURITY.md) | How to report a vulnerability privately |
 
 ### Claude Code skill
 
@@ -156,7 +158,7 @@ The skill covers endpoint schemas, placeholder syntax, error handling, and worke
 - All credential names (not values) used in a request are recorded in the audit log.
 - Every credential value used in a request is scrubbed from the response body, headers and error messages (raw, JSON-escaped, URL-encoded and base64 forms), followed by common credential patterns.
 
-See [Security Model](docs/security.md) for the full threat model and design rationale.
+See [Security Model](docs/security.md) for the full threat model and design rationale. To report a vulnerability, follow the [Security Policy](SECURITY.md) — please don't open a public issue.
 
 ---
 
