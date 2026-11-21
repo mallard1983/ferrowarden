@@ -373,6 +373,8 @@ mod tests {
             api_prefix: String::new(),
             agent_rate_limit_per_minute: 120,
             agent_rate_limit_burst: 20,
+            admin_rate_limit_per_minute: 30,
+            admin_rate_limit_burst: 5,
         }
     }
 

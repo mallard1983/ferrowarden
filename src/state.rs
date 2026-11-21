@@ -50,6 +50,10 @@ pub struct AppState {
     /// concurrent create/revoke calls cannot drop each other's changes.
     pub keys_file_lock: Arc<tokio::sync::Mutex<()>>,
 
+    /// Serializes vault re-unlock attempts, so a burst of requests arriving
+    /// while bw serve is locked triggers one unlock, not one per request.
+    pub unlock_lock: Arc<tokio::sync::Mutex<()>>,
+
     /// Outbound target policy (SSRF protection), built once from config.
     pub target_policy: Arc<TargetPolicy>,
 
@@ -68,6 +72,7 @@ impl AppState {
             agent_keys: Arc::new(RwLock::new(HashMap::new())),
             credentials: Arc::new(RwLock::new(CredentialMap::new())),
             keys_file_lock: Arc::new(tokio::sync::Mutex::new(())),
+            unlock_lock: Arc::new(tokio::sync::Mutex::new(())),
             target_policy,
             audit,
         }
@@ -145,6 +150,8 @@ mod tests {
             api_prefix: String::new(),
             agent_rate_limit_per_minute: 120,
             agent_rate_limit_burst: 20,
+            admin_rate_limit_per_minute: 30,
+            admin_rate_limit_burst: 5,
         }
     }
 

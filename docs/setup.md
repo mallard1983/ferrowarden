@@ -314,6 +314,8 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `api_prefix` | `FERROWARDEN_API_PREFIX` | *(empty)* — path prefix for all API routes except `/health`, e.g. `/k7f3q9` |
 | `agent_rate_limit_per_minute` | `FERROWARDEN_AGENT_RATE_LIMIT_PER_MINUTE` | `120` — sustained agent requests per minute per client IP |
 | `agent_rate_limit_burst` | `FERROWARDEN_AGENT_RATE_LIMIT_BURST` | `20` — back-to-back agent requests allowed before the rate applies |
+| `admin_rate_limit_per_minute` | `FERROWARDEN_ADMIN_RATE_LIMIT_PER_MINUTE` | `30` — sustained admin requests per minute per client IP |
+| `admin_rate_limit_burst` | `FERROWARDEN_ADMIN_RATE_LIMIT_BURST` | `5` — keep low; slows admin key guessing |
 | `trusted_proxies` | `FERROWARDEN_TRUSTED_PROXIES` | *(empty)* — CIDRs/IPs of reverse proxies whose `X-Forwarded-For` is trusted for rate limiting |
 | *(env only)* | `FERROWARDEN_LOG_LEVEL` | `info` — requires restart to change |
 

@@ -72,6 +72,31 @@ pub async fn unlock_from_file(state: &AppState) -> FerroResult<()> {
     Ok(())
 }
 
+/// File mode only: unlock bw serve again right away, instead of waiting for
+/// the next refresh — e.g. when a request finds the vault locked because bw
+/// serve restarted. Attempts are serialized, and a caller that waited while
+/// another task re-unlocked simply sees the vault unlocked. Returns true when
+/// the vault is unlocked afterwards.
+pub async fn reunlock_if_possible(state: &AppState) -> bool {
+    if state.config.unlock_mode != UnlockMode::File {
+        return false;
+    }
+    let _guard = state.unlock_lock.lock().await;
+    if !state.is_locked().await {
+        return true;
+    }
+    match unlock_from_file(state).await {
+        Ok(()) => {
+            tracing::info!("Vault re-unlocked from password file");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Vault re-unlock failed");
+            false
+        }
+    }
+}
+
 /// Spawn the periodic refresher. Does nothing when the interval is 0.
 pub fn spawn_refresher(state: Arc<AppState>) {
     let secs = state.config.refresh_interval_secs;
@@ -85,25 +110,14 @@ pub fn spawn_refresher(state: Arc<AppState>) {
         loop {
             ticker.tick().await;
             if state.is_locked().await {
-                if state.config.unlock_mode == UnlockMode::File {
-                    match unlock_from_file(&state).await {
-                        Ok(()) => tracing::info!("Vault re-unlocked from password file"),
-                        Err(e) => tracing::warn!(error = %e, "Vault re-unlock failed"),
-                    }
-                }
+                reunlock_if_possible(&state).await;
                 continue;
             }
             match refresh_credentials(&state).await {
                 Ok(()) => {}
                 Err(FerroError::VaultLocked) => {
                     tracing::warn!("bw serve reports the vault is locked; marking locked");
-                    if state.config.unlock_mode == UnlockMode::File {
-                        if let Err(e) = unlock_from_file(&state).await {
-                            tracing::warn!(error = %e, "Vault re-unlock failed");
-                        } else {
-                            tracing::info!("Vault re-unlocked from password file");
-                        }
-                    }
+                    reunlock_if_possible(&state).await;
                 }
                 Err(e) => tracing::warn!(error = %e, "Credential refresh failed"),
             }

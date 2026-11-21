@@ -122,6 +122,9 @@ services:
       # fraction of a second on fast CI runners; the default burst (20)
       # would turn later tests into 429s.
       FERROWARDEN_AGENT_RATE_LIMIT_BURST: "1000"
+      # Same for the admin endpoints (default burst 5): the key lifecycle,
+      # status and audit tests call them back-to-back.
+      FERROWARDEN_ADMIN_RATE_LIMIT_BURST: "1000"
     networks:
       - vault-internal
       - test-net

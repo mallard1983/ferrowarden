@@ -15,7 +15,9 @@ pub async fn list_credentials(
 ) -> FerroResult<Json<Vec<String>>> {
     authenticate_agent(&state, &headers).await?;
 
-    if state.is_locked().await {
+    // In file mode, try to unlock again right away (e.g. after a bw serve
+    // restart) instead of failing until the next refresh.
+    if state.is_locked().await && !crate::vault::refresh::reunlock_if_possible(&state).await {
         return Err(FerroError::VaultLocked);
     }
 

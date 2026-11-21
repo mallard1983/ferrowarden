@@ -25,11 +25,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         state.config.agent_rate_limit_burst,
     );
 
-    // Admin endpoints: 30 requests/min sustained, burst of 5.
-    // Admin actions (unlock, key management, audit queries) are infrequent by
-    // design. Stricter limits reduce the blast radius if the admin key is
-    // compromised and slow down guessing.
-    let admin_limiter = new_limiter(30, 5);
+    // Admin endpoints: configurable, default 30 requests/min sustained with a
+    // burst of 5. Admin actions (unlock, key management, audit queries) are
+    // infrequent by design; stricter limits slow down admin key guessing.
+    let admin_limiter = new_limiter(
+        state.config.admin_rate_limit_per_minute,
+        state.config.admin_rate_limit_burst,
+    );
 
     // Validated in Config::validate, so every entry parses.
     let trusted = TrustedProxies(Arc::new(
@@ -105,6 +107,8 @@ mod tests {
             api_prefix: prefix.to_string(),
             agent_rate_limit_per_minute: 120,
             agent_rate_limit_burst: 20,
+            admin_rate_limit_per_minute: 30,
+            admin_rate_limit_burst: 5,
         };
         router(Arc::new(AppState::new_with_audit(
             cfg,

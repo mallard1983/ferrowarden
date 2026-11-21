@@ -32,7 +32,7 @@ serde_json = "1"
 zeroize = { version = "1", features = ["derive"] }
 
 # Configuration
-config = "0.14"
+config = "0.15"
 
 # Logging and tracing
 tracing = "0.1"
@@ -52,21 +52,21 @@ regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Secure random number generation (for key generation)
-rand = "0.9"
+rand = "0.10"
 
 # SHA-256 for token hashing in the key store (tokens are stored as hashes, never plaintext)
-sha2 = "0.10"
+sha2 = "0.11"
 
 # URL encoding for vault item lookups and response scrubbing variants
 urlencoding = "2"
 
 # Base64 encoding: scrubbing base64-encoded credential echoes and returning
 # non-UTF-8 response bodies to the agent
-base64 = "0.22"
+base64 = "0.23"
 
 # Per-IP token bucket rate limiting. Keyed limiter maps source IP → token bucket.
 # Using 0.6 — verify compatibility before upgrading to 0.7+ (breaking API changes possible).
-governor = "0.6"
+governor = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

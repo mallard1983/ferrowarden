@@ -197,6 +197,9 @@ services:
       # Agent endpoint rate limit per client IP (defaults 120/min, burst 20).
       FERROWARDEN_AGENT_RATE_LIMIT_PER_MINUTE: "${FERROWARDEN_AGENT_RATE_LIMIT_PER_MINUTE:-}"
       FERROWARDEN_AGENT_RATE_LIMIT_BURST: "${FERROWARDEN_AGENT_RATE_LIMIT_BURST:-}"
+      # Admin endpoint rate limit per client IP (defaults 30/min, burst 5).
+      FERROWARDEN_ADMIN_RATE_LIMIT_PER_MINUTE: "${FERROWARDEN_ADMIN_RATE_LIMIT_PER_MINUTE:-}"
+      FERROWARDEN_ADMIN_RATE_LIMIT_BURST: "${FERROWARDEN_ADMIN_RATE_LIMIT_BURST:-}"
     networks:
       - vault-internal
       - agent-facing

@@ -46,7 +46,16 @@ pub struct StoredKey {
 pub fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
-    format!("{:x}", hasher.finalize())
+    // Lowercase hex, two digits per byte. This exact format is what key files
+    // store, so it must never change (see hash_matches_known_sha256_vectors).
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            use std::fmt::Write;
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 /// Load all stored keys from the key file.
@@ -112,6 +121,21 @@ mod tests {
     #[test]
     fn hash_differs_for_different_inputs() {
         assert_ne!(hash_token("abc"), hash_token("xyz"));
+    }
+
+    #[test]
+    fn hash_matches_known_sha256_vectors() {
+        // FIPS 180-2 test vectors. Agent key files store this exact lowercase
+        // hex form, so a dependency upgrade that changed it would invalidate
+        // every persisted agent key.
+        assert_eq!(
+            hash_token(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            hash_token("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

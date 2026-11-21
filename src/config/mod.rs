@@ -123,6 +123,16 @@ pub struct Config {
     /// make back-to-back before the sustained rate applies. Default 20.
     #[serde(default = "default_agent_rate_limit_burst")]
     pub agent_rate_limit_burst: u32,
+
+    /// Sustained request rate per client IP on the admin endpoints
+    /// (`/v1/admin/*`, `/v1/unlock`), in requests per minute. Default 30 —
+    /// deliberately low, to slow down admin key guessing.
+    #[serde(default = "default_admin_rate_limit_per_minute")]
+    pub admin_rate_limit_per_minute: u32,
+
+    /// Burst size for the admin endpoints. Default 5.
+    #[serde(default = "default_admin_rate_limit_burst")]
+    pub admin_rate_limit_burst: u32,
 }
 
 fn default_bind_addr() -> String {
@@ -155,6 +165,14 @@ fn default_agent_rate_limit_per_minute() -> u32 {
 
 fn default_agent_rate_limit_burst() -> u32 {
     20
+}
+
+fn default_admin_rate_limit_per_minute() -> u32 {
+    30
+}
+
+fn default_admin_rate_limit_burst() -> u32 {
+    5
 }
 
 fn default_forward_timeout_secs() -> u64 {
@@ -199,11 +217,12 @@ pub fn split_list(raw: &str) -> Vec<String> {
 impl Config {
     pub fn load() -> FerroResult<Self> {
         let settings = config::Config::builder()
-            // Base config from file — ferrowarden.toml in the working directory
+            // Base config from file — ferrowarden.toml in the working directory.
+            // The full file name matters: with_name("ferrowarden") also matches
+            // a file named exactly "ferrowarden" (config >= 0.15), which in the
+            // Docker image is the binary itself in /app.
             .add_source(
-                config::File::with_name("ferrowarden")
-                    .format(config::FileFormat::Toml)
-                    .required(false),
+                config::File::new("ferrowarden.toml", config::FileFormat::Toml).required(false),
             )
             // Environment variables override file values.
             // FERROWARDEN_BIND_ADDR, FERROWARDEN_UNLOCK_MODE, etc.
@@ -250,9 +269,13 @@ impl Config {
             ));
         }
 
-        if self.agent_rate_limit_per_minute == 0 || self.agent_rate_limit_burst == 0 {
+        if self.agent_rate_limit_per_minute == 0
+            || self.agent_rate_limit_burst == 0
+            || self.admin_rate_limit_per_minute == 0
+            || self.admin_rate_limit_burst == 0
+        {
             return Err(FerroError::Config(
-                "agent_rate_limit_per_minute and agent_rate_limit_burst must be greater than 0"
+                "agent_rate_limit_* and admin_rate_limit_* settings must be greater than 0"
                     .to_string(),
             ));
         }
@@ -313,6 +336,8 @@ mod tests {
             api_prefix: String::new(),
             agent_rate_limit_per_minute: 120,
             agent_rate_limit_burst: 20,
+            admin_rate_limit_per_minute: 30,
+            admin_rate_limit_burst: 5,
         }
     }
 

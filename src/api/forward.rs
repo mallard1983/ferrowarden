@@ -16,6 +16,7 @@ use crate::proxy::{
     resolve_credentials, substitute_json, substitute_str, zeroize_json, ForwardLimits,
 };
 use crate::state::AppState;
+use crate::vault::refresh::reunlock_if_possible;
 use crate::vault::VaultClient;
 
 #[derive(Deserialize)]
@@ -51,7 +52,19 @@ pub async fn forward(
     let mut placeholder_names: Vec<String> = names.iter().cloned().collect();
     placeholder_names.sort();
 
-    let result = run_forward(&state, &req, &names).await;
+    let mut result = run_forward(&state, &req, &names).await;
+
+    if let Err(FerroError::VaultLocked) = &result {
+        // bw serve is locked — typically it restarted. Reflect that so
+        // /v1/admin/status is honest, and in file mode unlock it again now and
+        // retry once rather than failing until the next refresh. The retry
+        // cannot duplicate an outbound call: VaultLocked only ever occurs
+        // before anything is sent to the target.
+        state.set_locked().await;
+        if reunlock_if_possible(&state).await {
+            result = run_forward(&state, &req, &names).await;
+        }
+    }
 
     let (outcome, status) = match &result {
         Ok(resp) => (Outcome::Success, Some(resp.status)),
@@ -69,12 +82,6 @@ pub async fn forward(
             status,
         ))
         .await;
-
-    if let Err(FerroError::VaultLocked) = &result {
-        // bw serve locked behind our back (e.g. restarted). Reflect it so
-        // /v1/admin/status is honest; the refresher re-unlocks in file mode.
-        state.set_locked().await;
-    }
 
     result.map(Json)
 }
