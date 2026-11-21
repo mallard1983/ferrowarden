@@ -32,5 +32,5 @@ First public release. Ferrowarden is a credential proxy for AI agents: credentia
 - **`/v1/unlock`** now accepts `X-Admin-Key` (as documented) and shares the admin rate limit; `Authorization: Bearer` still works.
 - **Forward responses** include a new `body_encoding` field (`"utf8"` or `"base64"`).
 
-[Unreleased]: https://github.com/OWNER/ferrowarden/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/OWNER/ferrowarden/releases/tag/v0.1.0
+[Unreleased]: https://github.com/mallard1983/ferrowarden/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/mallard1983/ferrowarden/releases/tag/v0.1.0

@@ -1,5 +1,8 @@
 # Ferrowarden
 
+[![Test](https://github.com/mallard1983/ferrowarden/actions/workflows/test.yml/badge.svg)](https://github.com/mallard1983/ferrowarden/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A credential proxy for AI agents. Agents send API calls with `{{vault:name}}` placeholders; Ferrowarden substitutes real credentials, forwards the call to the target service, scrubs credentials from the response, and returns the result. **The agent never sees a credential value.**
 
 Built as a sidecar to [Vaultwarden](https://github.com/dani-garcia/vaultwarden), using the Bitwarden CLI (`bw serve`) as the vault API layer.
@@ -51,6 +54,11 @@ The agent connects only to Ferrowarden. You manage credentials in Vaultwarden's 
 ---
 
 ## Quick Start
+
+```sh
+git clone https://github.com/mallard1983/ferrowarden.git
+cd ferrowarden
+```
 
 ### Try it in five minutes (test stack)
 

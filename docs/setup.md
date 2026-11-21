@@ -9,6 +9,17 @@ This guide walks through a complete Ferrowarden deployment using Docker Compose.
 
 ---
 
+## Get the Code
+
+```sh
+git clone https://github.com/mallard1983/ferrowarden.git
+cd ferrowarden
+```
+
+Run every command in this guide from the repository root.
+
+---
+
 ## Prerequisites
 
 - Docker and Docker Compose v2
