@@ -163,8 +163,9 @@ In the web vault:
 4. Add at least one credential as a **Login** item (**Add → Login**). You can add more later.
 
    - The item **name** is what agents use in `{{vault:name}}` placeholders. Names must be unique across login items — a duplicated name is refused as ambiguous.
-   - The item **password** is the value that gets substituted.
-   - The item **Website (URI)** decides where the credential may be sent. Add one URI per service it belongs to, e.g. `https://api.example.com` or `https://proxmox.lan:8006`. Ferrowarden refuses to send a credential to any other host, and an item with no URIs cannot be used. See [Security Model §13](security.md#13-credential-host-binding) for the matching rules.
+   - The item **password** is the default value substituted by `{{vault:name}}`. The username, TOTP code, notes and **custom fields** are available too (`{{vault:name:username}}`, `{{vault:name:field:api_key}}`, …) — store API keys as custom fields rather than separate items if you like. Secure notes work as well. Item and field names can contain any characters; agents get correctly quoted placeholders from the API.
+   - Items with **master password re-prompt** enabled are not available to agents (until approvals are supported) — use it to mark credentials agents must never use.
+- The item **Website (URI)** decides where the credential may be sent. Add one URI per service it belongs to, e.g. `https://api.example.com` or `https://proxmox.lan:8006`. Ferrowarden refuses to send a credential to any other host, and an item with no URIs cannot be used. See [Security Model §13](security.md#13-credential-host-binding) for the matching rules.
 
    If the service lives on your private network (e.g. `192.168.1.0/24` or `proxmox.lan`), also add it to `allowed_targets` (`FERROWARDEN_ALLOWED_TARGETS`) — private and internal addresses are blocked by default.
 

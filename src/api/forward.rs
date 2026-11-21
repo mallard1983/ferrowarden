@@ -2,7 +2,7 @@ use axum::{extract::State, http::HeaderMap, Json};
 use reqwest::Url;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -11,9 +11,10 @@ use crate::api::credentials::authenticate_agent;
 use crate::audit::{build_entry, Outcome};
 use crate::error::{FerroError, FerroResult};
 use crate::proxy::forward::{ProxyRequest, ZeroizingHeaders};
+use crate::proxy::placeholder::{self, Placeholder};
 use crate::proxy::{
-    extract_json_placeholder_names, extract_placeholder_names, forward_request,
-    resolve_credentials, substitute_json, substitute_str, zeroize_json, ForwardLimits,
+    forward_request, resolve_credentials, substitute_json, substitute_str, zeroize_json,
+    ForwardLimits,
 };
 use crate::state::AppState;
 use crate::vault::refresh::reunlock_if_possible;
@@ -41,18 +42,18 @@ pub async fn forward(
     let agent = authenticate_agent(&state, &headers).await?;
     let req = payload.request;
 
-    // Collect every placeholder name for the audit log before doing anything else.
-    let mut names: HashSet<String> = extract_placeholder_names(&req.url);
-    for v in req.headers.values() {
-        names.extend(extract_placeholder_names(v));
-    }
-    if let Some(body) = &req.body {
-        extract_json_placeholder_names(body, &mut names);
-    }
-    let mut placeholder_names: Vec<String> = names.iter().cloned().collect();
-    placeholder_names.sort();
+    // Parse every placeholder (URL, header values, body) before anything
+    // else. A malformed one is rejected here rather than forwarded literally.
+    let collected = collect_placeholders(&req);
+    let names = collected.as_ref().cloned().unwrap_or_default();
+    // Audit labels: the canonical placeholder text, e.g. `grafana_token` or
+    // `'Proxmox (prod)':username` — never values.
+    let placeholder_names: Vec<String> = names.iter().map(Placeholder::label).collect();
 
-    let mut result = run_forward(&state, &req, &names).await;
+    let mut result = match collected {
+        Ok(_) => run_forward(&state, &req, &names).await,
+        Err(e) => Err(e),
+    };
 
     if let Err(FerroError::VaultLocked) = &result {
         // bw serve is locked — typically it restarted. Reflect that so
@@ -86,10 +87,23 @@ pub async fn forward(
     result.map(Json)
 }
 
+/// Every distinct placeholder in the request's URL, header values and body.
+fn collect_placeholders(req: &ProxyRequest) -> FerroResult<BTreeSet<Placeholder>> {
+    let mut out = BTreeSet::new();
+    placeholder::collect(&req.url, &mut out)?;
+    for v in req.headers.values() {
+        placeholder::collect(v, &mut out)?;
+    }
+    if let Some(body) = &req.body {
+        placeholder::collect_json(body, &mut out)?;
+    }
+    Ok(out)
+}
+
 async fn run_forward(
     state: &Arc<AppState>,
     req: &ProxyRequest,
-    names: &HashSet<String>,
+    names: &BTreeSet<Placeholder>,
 ) -> FerroResult<crate::proxy::forward::ProxyResponse> {
     if state.is_locked().await {
         return Err(FerroError::VaultLocked);
@@ -104,8 +118,8 @@ async fn run_forward(
     let credentials = state.credentials.read().await.clone();
     let vault = VaultClient::new(state.config.bw_serve_url.clone());
 
-    // Validate every name (exists, unambiguous, bound to this host) before
-    // fetching any value.
+    // Validate every placeholder (item exists and is unambiguous, no re-prompt,
+    // selected value/field exists, bound to this host) before fetching any value.
     let values = resolve_credentials(
         names,
         &credentials,
@@ -159,7 +173,13 @@ async fn run_forward(
         }
     };
 
-    let secrets: Vec<&str> = values.values().map(|v| v.as_str()).collect();
+    // Exact-value scrubbing covers secrets only: usernames, TOTP codes and
+    // boolean fields are excluded (see `Resolved::scrub`).
+    let secrets: Vec<&str> = values
+        .values()
+        .filter(|r| r.scrub)
+        .map(|r| r.value.as_str())
+        .collect();
     let limits = ForwardLimits {
         timeout: Duration::from_secs(state.config.forward_timeout_secs),
         max_response_bytes: state.config.max_response_bytes,
@@ -182,11 +202,13 @@ fn outcome_for(error: &FerroError) -> Outcome {
     match error {
         FerroError::VaultLocked => Outcome::VaultLocked,
         FerroError::UnknownPlaceholder(_)
+        | FerroError::MalformedPlaceholder(_)
         | FerroError::CredentialNotFound(_)
-        | FerroError::AmbiguousCredential(_) => Outcome::UnknownCredential,
-        FerroError::CredentialHostNotAllowed { .. } | FerroError::TargetBlocked(_) => {
-            Outcome::Blocked
-        }
+        | FerroError::AmbiguousCredential(_)
+        | FerroError::AmbiguousField { .. } => Outcome::UnknownCredential,
+        FerroError::CredentialHostNotAllowed { .. }
+        | FerroError::TargetBlocked(_)
+        | FerroError::RepromptRequired(_) => Outcome::Blocked,
         FerroError::ForwardFailed(_)
         | FerroError::InvalidTargetUrl(_)
         | FerroError::ResponseTooLarge(_) => Outcome::ForwardFailed,

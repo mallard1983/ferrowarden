@@ -898,3 +898,325 @@ async fn test_string_body_is_sent_raw() {
         format!("token={TEST_API_TOKEN_VALUE}&x=1")
     );
 }
+
+// ── Field placeholders (#8) ──────────────────────────────────────────────────
+//
+// Seed items (tests/seed/credentials.json):
+//   test_login_full            username, password, TOTP, notes, custom fields
+//                              (hidden, text with spaces/colon, boolean, linked
+//                              to username, and a duplicated "dup" field)
+//   Test Login (it's spaced)   name needing a quoted placeholder
+//   test_secure_note           secure note; binding via ferrowarden_uris
+//   test_reprompt              master password re-prompt enabled
+
+const FULL_USERNAME: &str = "test-full-user";
+const FULL_PASSWORD: &str = "test-full-pass-88880000";
+const FULL_NOTES: &str = "test-full-notes-99990000";
+const FIELD_HIDDEN: &str = "test-field-hidden-12340000";
+const FIELD_TEXT: &str = "test-field-text-56780000";
+const SPACED_PASSWORD: &str = "test-spaced-pass-43210000";
+const NOTE_BODY: &str = "test-note-body-24680000";
+const NOTE_TOKEN: &str = "test-note-token-13570000";
+
+/// Correctness: username, password, TOTP and notes selectors substitute the
+/// right values.
+#[tokio::test]
+async fn test_builtin_selectors_are_substituted() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    let resp = env
+        .forward(
+            "GET",
+            "/api/selectors",
+            json!({
+                "X-User": "{{vault:test_login_full:username}}",
+                "X-Pass": "{{vault:test_login_full:password}}",
+                "X-Default": "{{vault:test_login_full}}",
+                "X-Totp": "{{vault:test_login_full:totp}}",
+                "X-Notes": "{{vault:test_login_full:notes}}"
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), 200, "forward failed");
+
+    let c = env.last_captured_request().await;
+    assert_eq!(captured_header(&c, "X-User"), Some(FULL_USERNAME));
+    assert!(
+        captured_header(&c, "X-Pass") == Some(FULL_PASSWORD),
+        "password not substituted"
+    );
+    assert!(
+        captured_header(&c, "X-Default") == Some(FULL_PASSWORD),
+        "default selector is password"
+    );
+    assert!(
+        captured_header(&c, "X-Notes") == Some(FULL_NOTES),
+        "notes not substituted"
+    );
+    let totp = captured_header(&c, "X-Totp").expect("X-Totp missing");
+    assert!(
+        totp.len() == 6 && totp.chars().all(|ch| ch.is_ascii_digit()),
+        "TOTP should be a 6-digit code, got {}",
+        describe(totp)
+    );
+}
+
+/// Correctness: custom fields — hidden, text with a name that needs quoting,
+/// boolean, and a linked field that resolves to the username.
+#[tokio::test]
+async fn test_custom_field_selectors_are_substituted() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    let resp = env
+        .forward(
+            "POST",
+            "/api/fields",
+            json!({ "X-Api-Key": "{{vault:test_login_full:field:api_key}}" }),
+            Some(json!({
+                "secret": "{{vault:test_login_full:field:'api secret: v2'}}",
+                "enabled": "{{vault:test_login_full:field:enabled}}",
+                "linked": "{{vault:test_login_full:field:'login name'}}"
+            })),
+        )
+        .await;
+    assert_eq!(resp.status(), 200, "forward failed");
+
+    let c = env.last_captured_request().await;
+    assert!(
+        captured_header(&c, "X-Api-Key") == Some(FIELD_HIDDEN),
+        "hidden field not substituted"
+    );
+    let body: Value = serde_json::from_str(c["body"].as_str().unwrap()).unwrap();
+    assert!(
+        body["secret"] == FIELD_TEXT,
+        "quoted field name not substituted"
+    );
+    assert_eq!(body["enabled"], "true");
+    assert_eq!(
+        body["linked"], FULL_USERNAME,
+        "linked field should resolve to the username"
+    );
+}
+
+/// Correctness: an item whose name contains spaces, parentheses and an
+/// apostrophe is usable through a quoted placeholder.
+#[tokio::test]
+async fn test_quoted_item_name() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    let resp = env
+        .forward(
+            "GET",
+            "/api/quoted",
+            json!({ "X-Pass": r"{{vault:'Test Login (it\'s spaced)'}}" }),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), 200, "forward failed");
+    let c = env.last_captured_request().await;
+    assert!(
+        captured_header(&c, "X-Pass") == Some(SPACED_PASSWORD),
+        "quoted item not substituted"
+    );
+}
+
+/// Correctness + security: a secure note's notes and fields are usable, and
+/// its host binding comes from the reserved ferrowarden_uris field.
+#[tokio::test]
+async fn test_secure_note_values_and_binding() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    let resp = env
+        .forward(
+            "GET",
+            "/api/note",
+            json!({
+                "X-Note": "{{vault:test_secure_note:notes}}",
+                "X-Token": "{{vault:test_secure_note:field:token}}"
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), 200, "forward failed");
+    let c = env.last_captured_request().await;
+    assert!(
+        captured_header(&c, "X-Note") == Some(NOTE_BODY),
+        "note body not substituted"
+    );
+    assert!(
+        captured_header(&c, "X-Token") == Some(NOTE_TOKEN),
+        "note field not substituted"
+    );
+
+    // Not bound to any other host.
+    let resp = env
+        .forward_url(
+            "GET",
+            "https://api.example.com/x",
+            json!({ "X-Token": "{{vault:test_secure_note:field:token}}" }),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), 403);
+}
+
+/// Security: items with master password re-prompt are refused, and nothing
+/// is sent to the target.
+#[tokio::test]
+async fn test_reprompt_item_is_refused() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    let resp = env
+        .forward(
+            "GET",
+            "/api/rp",
+            json!({ "X-Pass": "{{vault:test_reprompt}}" }),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), 403);
+    assert!(
+        env.all_captured_requests().await.is_empty(),
+        "must not forward"
+    );
+}
+
+/// Correctness: a field name that appears twice on the item is ambiguous.
+#[tokio::test]
+async fn test_duplicate_field_is_ambiguous() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    let resp = env
+        .forward(
+            "GET",
+            "/api/dup",
+            json!({ "X": "{{vault:test_login_full:field:dup}}" }),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), 409);
+    assert!(
+        env.all_captured_requests().await.is_empty(),
+        "must not forward"
+    );
+}
+
+/// Correctness: malformed placeholders and values the item does not have are
+/// rejected with 422 before anything is sent.
+#[tokio::test]
+async fn test_malformed_and_unavailable_placeholders_are_rejected() {
+    let Some(env) = TestEnv::load() else { return };
+
+    for header in [
+        "{{vault:test_login_full:bogus}}",
+        "{{vault:'unterminated}}",
+        "{{vault:test bearer}}",
+        "{{vault:test_secure_note:password}}",
+        "{{vault:test_login_full:field:nope}}",
+    ] {
+        env.reset_mock().await;
+        let resp = env
+            .forward("GET", "/api/bad", json!({ "X": header }), None)
+            .await;
+        assert_eq!(resp.status(), 422, "{header} must be rejected");
+        assert!(
+            env.all_captured_requests().await.is_empty(),
+            "{header}: must not forward"
+        );
+    }
+}
+
+/// Security: echoed custom-field and notes values are scrubbed; usernames are
+/// deliberately not (they are not treated as secret).
+#[tokio::test]
+async fn test_scrubbing_rules_for_fields() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+
+    let resp = env
+        .forward(
+            "GET",
+            "/echo",
+            json!({
+                "X-Field": "{{vault:test_login_full:field:api_key}}",
+                "X-Notes": "{{vault:test_login_full:notes}}",
+                "X-User": "{{vault:test_login_full:username}}"
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(
+        !text.contains(FIELD_HIDDEN),
+        "custom field value leaked (not printed)"
+    );
+    assert!(
+        !text.contains(FULL_NOTES),
+        "notes value leaked (not printed)"
+    );
+    assert!(
+        text.contains(FULL_USERNAME),
+        "usernames are intentionally not scrubbed"
+    );
+}
+
+/// Correctness: the detailed listing offers ready-made placeholders, and the
+/// ones it offers actually work.
+#[tokio::test]
+async fn test_detailed_listing_placeholders_work() {
+    let Some(env) = TestEnv::load() else { return };
+
+    let list: Vec<Value> = env
+        .client
+        .get(format!("{}/v1/credentials?detail=true", env.fw_url))
+        .header("X-Agent-Key", &env.agent_key)
+        .send()
+        .await
+        .expect("request failed")
+        .json()
+        .await
+        .expect("not JSON");
+    let item = |name: &str| {
+        list.iter()
+            .find(|d| d["name"] == name)
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    let spaced = item("Test Login (it's spaced)");
+    let full = item("test_login_full");
+    assert_eq!(
+        full["unavailable_fields"]["dup"]
+            .as_str()
+            .map(|s| s.starts_with("ambiguous")),
+        Some(true)
+    );
+    assert!(item("test_reprompt")["unavailable"].is_string());
+
+    env.reset_mock().await;
+    let resp = env
+        .forward(
+            "GET",
+            "/api/listed",
+            json!({
+                "X-A": spaced["placeholder"],
+                "X-B": full["fields"]["api secret: v2"],
+                "X-C": full["username"]
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), 200, "listed placeholders must be usable");
+    let c = env.last_captured_request().await;
+    assert!(captured_header(&c, "X-A") == Some(SPACED_PASSWORD));
+    assert!(captured_header(&c, "X-B") == Some(FIELD_TEXT));
+    assert_eq!(captured_header(&c, "X-C"), Some(FULL_USERNAME));
+}

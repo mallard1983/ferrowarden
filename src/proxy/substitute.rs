@@ -1,51 +1,34 @@
-use regex::Regex;
 use reqwest::Url;
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
-use std::sync::OnceLock;
+use std::collections::{BTreeMap, BTreeSet};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{FerroError, FerroResult};
+use crate::proxy::placeholder::{scan, Placeholder, Selector};
+use crate::vault::client::{CredentialEntry, FieldKind, FieldLookup, ItemKind};
 use crate::vault::{CredentialMap, VaultClient};
 
-// Placeholder pattern: {{vault:credential_name}}
-// Name may contain alphanumerics, underscores, hyphens, and dots.
-const PLACEHOLDER_PATTERN: &str = r"\{\{vault:([a-zA-Z0-9_\-\.]+)\}\}";
-
-fn placeholder_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(PLACEHOLDER_PATTERN).expect("placeholder regex compiles"))
+/// A resolved placeholder value. `scrub` says whether exact-value scrubbing
+/// applies: false for usernames, TOTP codes and boolean fields, which are
+/// low-entropy or not secret and would corrupt responses if redacted.
+pub struct Resolved {
+    pub value: Zeroizing<String>,
+    pub scrub: bool,
 }
 
-/// Resolved credential values for one request, keyed by name. Every value is
-/// Zeroizing and wiped when the map is dropped.
-pub type ResolvedValues = BTreeMap<String, Zeroizing<String>>;
-
-/// Extract all unique credential names referenced by placeholders in a string.
-pub fn extract_placeholder_names(input: &str) -> HashSet<String> {
-    placeholder_re()
-        .captures_iter(input)
-        .filter_map(|cap| cap.get(1))
-        .map(|m| m.as_str().to_string())
-        .collect()
-}
-
-/// Extract placeholder names from every string (keys and values) in a JSON value.
-pub fn extract_json_placeholder_names(value: &Value, out: &mut HashSet<String>) {
-    match value {
-        Value::String(s) => out.extend(extract_placeholder_names(s)),
-        Value::Array(items) => items
-            .iter()
-            .for_each(|v| extract_json_placeholder_names(v, out)),
-        Value::Object(map) => {
-            for (k, v) in map {
-                out.extend(extract_placeholder_names(k));
-                extract_json_placeholder_names(v, out);
-            }
-        }
-        _ => {}
+/// Never prints the value.
+impl std::fmt::Debug for Resolved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Resolved")
+            .field("value", &"<redacted>")
+            .field("scrub", &self.scrub)
+            .finish()
     }
 }
+
+/// Resolved values for one request, keyed by placeholder. Every value is
+/// Zeroizing and wiped when the map is dropped.
+pub type ResolvedValues = BTreeMap<Placeholder, Resolved>;
 
 /// Check whether a credential bound to `uris` may be sent to `target`.
 ///
@@ -55,7 +38,8 @@ pub fn extract_json_placeholder_names(value: &Value, out: &mut HashSet<String>) 
 pub fn credential_allows(uris: &[String], target: &Url) -> Result<(), String> {
     if uris.is_empty() {
         return Err(
-            "the vault item has no URIs; add the target's URL to the item to allow it".to_string(),
+            "the vault item has no URIs; add the target's URL to the item (or a ferrowarden_uris field) to allow it"
+                .to_string(),
         );
     }
     let target_host = normalize_host(target.host_str().unwrap_or_default());
@@ -95,64 +79,110 @@ fn normalize_host(h: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Validate and fetch every named credential for a request to `target`.
+/// What to fetch for a validated placeholder, and whether to scrub it.
+enum Fetch {
+    Builtin(&'static str),
+    Field(String),
+}
+
+/// Validate a placeholder against the cached item metadata (no vault call).
+fn plan(p: &Placeholder, entry: &CredentialEntry) -> FerroResult<(Fetch, bool)> {
+    let unknown = || FerroError::UnknownPlaceholder(p.label());
+    let login = entry.kind == ItemKind::Login;
+    match &p.selector {
+        Selector::Password if login && entry.has_password => Ok((Fetch::Builtin("password"), true)),
+        Selector::Username if login && entry.has_username => {
+            Ok((Fetch::Builtin("username"), false))
+        }
+        Selector::Totp if login && entry.has_totp => Ok((Fetch::Builtin("totp"), false)),
+        Selector::Notes if entry.has_notes => Ok((Fetch::Builtin("notes"), true)),
+        Selector::Field(name) => match entry.field(name) {
+            FieldLookup::Missing => Err(unknown()),
+            FieldLookup::Duplicate => Err(FerroError::AmbiguousField {
+                item: p.item.clone(),
+                field: name.clone(),
+            }),
+            FieldLookup::Unique(f) => {
+                let scrub = match f.kind {
+                    FieldKind::Text | FieldKind::Hidden | FieldKind::LinkedPassword => true,
+                    FieldKind::Boolean | FieldKind::LinkedUsername => false,
+                    FieldKind::LinkedOther => return Err(unknown()),
+                };
+                if matches!(
+                    f.kind,
+                    FieldKind::LinkedUsername | FieldKind::LinkedPassword
+                ) && !login
+                {
+                    return Err(unknown());
+                }
+                Ok((Fetch::Field(name.clone()), scrub))
+            }
+        },
+        _ => Err(unknown()),
+    }
+}
+
+/// Validate and fetch every placeholder for a request to `target`.
 ///
-/// Fails before fetching any value if a name is unknown, ambiguous, or (when
-/// `enforce_hosts` is set) not bound to the target host.
+/// Fails before fetching any value if an item is unknown or ambiguous, has
+/// master password re-prompt enabled, lacks the selected value or field, or
+/// (when `enforce_hosts` is set) is not bound to the target host.
 pub async fn resolve_credentials(
-    names: &HashSet<String>,
+    placeholders: &BTreeSet<Placeholder>,
     credentials: &CredentialMap,
     target: &Url,
     enforce_hosts: bool,
     vault: &VaultClient,
 ) -> FerroResult<ResolvedValues> {
-    let mut sorted: Vec<&String> = names.iter().collect();
-    sorted.sort();
-
-    let mut ids = Vec::with_capacity(sorted.len());
-    for name in sorted {
+    let mut planned = Vec::with_capacity(placeholders.len());
+    for p in placeholders {
         let entries = credentials
-            .get(name)
-            .ok_or_else(|| FerroError::UnknownPlaceholder(name.clone()))?;
+            .get(&p.item)
+            .ok_or_else(|| FerroError::UnknownPlaceholder(p.label()))?;
         let entry = match entries.as_slice() {
             [one] => one,
-            [] => return Err(FerroError::UnknownPlaceholder(name.clone())),
-            _ => return Err(FerroError::AmbiguousCredential(name.clone())),
+            [] => return Err(FerroError::UnknownPlaceholder(p.label())),
+            _ => return Err(FerroError::AmbiguousCredential(p.item.clone())),
         };
+        if entry.reprompt {
+            return Err(FerroError::RepromptRequired(p.item.clone()));
+        }
+        let (fetch, scrub) = plan(p, entry)?;
         if enforce_hosts {
             credential_allows(&entry.uris, target).map_err(|reason| {
                 FerroError::CredentialHostNotAllowed {
-                    name: name.clone(),
+                    name: p.label(),
                     host: target.host_str().unwrap_or_default().to_string(),
                     reason,
                 }
             })?;
         }
-        ids.push((name.clone(), entry.id.clone()));
+        planned.push((p.clone(), entry.id.clone(), fetch, scrub));
     }
 
     let mut values = ResolvedValues::new();
-    for (name, id) in ids {
-        let value = vault.get_password(&id, &name).await?;
-        values.insert(name, value);
+    for (p, id, fetch, scrub) in planned {
+        let label = p.label();
+        let value = match fetch {
+            Fetch::Builtin(object) => vault.get_value(object, &id, &label).await?,
+            Fetch::Field(name) => vault.get_field(&id, &name, &label).await?,
+        };
+        values.insert(p, Resolved { value, scrub });
     }
     Ok(values)
 }
 
-/// Replace every {{vault:name}} placeholder in `input` with its resolved
-/// value. Names not in `values` are left untouched (callers resolve every
-/// extracted name first, so this does not happen in practice).
+/// Replace every placeholder in `input` with its resolved value. Placeholders
+/// not in `values` are left untouched (callers resolve every placeholder
+/// first, and malformed ones are rejected before substitution).
 pub fn substitute_str(input: &str, values: &ResolvedValues) -> Zeroizing<String> {
     let mut result = Zeroizing::new(String::with_capacity(input.len()));
     let mut last_end = 0;
-
-    for cap in placeholder_re().captures_iter(input) {
-        let full = cap.get(0).expect("group 0 always present");
-        let name = cap.get(1).expect("group 1 always present").as_str();
-        if let Some(value) = values.get(name) {
-            result.push_str(&input[last_end..full.start()]);
-            result.push_str(value.as_str());
-            last_end = full.end();
+    for occ in scan(input).unwrap_or_default() {
+        if let Some(resolved) = values.get(&occ.placeholder) {
+            result.push_str(&input[last_end..occ.start]);
+            result.push_str(resolved.value.as_str());
+            last_end = occ.end;
         }
     }
     result.push_str(&input[last_end..]);
@@ -202,13 +232,28 @@ pub fn zeroize_json(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::client::CredentialEntry;
+    use crate::vault::client::FieldInfo;
     use serde_json::json;
 
-    fn values(pairs: &[(&str, &str)]) -> ResolvedValues {
+    fn ph(item: &str, selector: Selector) -> Placeholder {
+        Placeholder {
+            item: item.to_string(),
+            selector,
+        }
+    }
+
+    fn values(pairs: &[(Placeholder, &str)]) -> ResolvedValues {
         pairs
             .iter()
-            .map(|(k, v)| (k.to_string(), Zeroizing::new(v.to_string())))
+            .map(|(p, v)| {
+                (
+                    p.clone(),
+                    Resolved {
+                        value: Zeroizing::new(v.to_string()),
+                        scrub: true,
+                    },
+                )
+            })
             .collect()
     }
 
@@ -217,50 +262,33 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_names() {
-        let input =
-            r#"{"Authorization": "Bearer {{vault:proxmox_token}}", "X-Key": "{{vault:nas_key}}"}"#;
-        let names = extract_placeholder_names(input);
-        assert!(names.contains("proxmox_token"));
-        assert!(names.contains("nas_key"));
-        assert_eq!(names.len(), 2);
-    }
-
-    #[test]
-    fn test_extract_no_placeholders() {
-        assert!(extract_placeholder_names(r#"{"Authorization": "Bearer real_token"}"#).is_empty());
-    }
-
-    #[test]
-    fn test_extract_duplicate_placeholders() {
-        let names = extract_placeholder_names("{{vault:token}} and {{vault:token}} again");
-        assert_eq!(names.len(), 1);
-        assert!(names.contains("token"));
-    }
-
-    #[test]
-    fn extract_json_includes_keys() {
-        let mut out = HashSet::new();
-        extract_json_placeholder_names(&json!({"{{vault:k}}": ["{{vault:v}}", 1]}), &mut out);
-        assert!(out.contains("k") && out.contains("v"));
-    }
-
-    #[test]
-    fn substitute_str_replaces_all_occurrences() {
-        let v = values(&[("t", "SECRET")]);
-        let out = substitute_str("a {{vault:t}} b {{vault:t}}", &v);
-        assert_eq!(out.as_str(), "a SECRET b SECRET");
+    fn substitute_str_replaces_all_occurrences_and_selectors() {
+        let v = values(&[
+            (ph("t", Selector::Password), "SECRET"),
+            (ph("a b", Selector::Username), "USER"),
+        ]);
+        let out = substitute_str(
+            "a {{vault:t}} b {{vault:t:password}} u={{vault:'a b':username}}",
+            &v,
+        );
+        assert_eq!(out.as_str(), "a SECRET b SECRET u=USER");
     }
 
     #[test]
     fn substitute_json_escapes_special_characters() {
-        let v = values(&[("pw", r#"pa"ss\word"#)]);
+        let v = values(&[(ph("pw", Selector::Password), r#"pa"ss\word"#)]);
         let mut out = substitute_json(&json!({"password": "{{vault:pw}}", "n": 5}), &v);
         let text = serde_json::to_string(&out).unwrap();
         let reparsed: Value = serde_json::from_str(&text).expect("still valid JSON");
         assert_eq!(reparsed["password"], r#"pa"ss\word"#);
         assert_eq!(reparsed.as_object().unwrap().len(), 2, "no injected keys");
         zeroize_json(&mut out);
+    }
+
+    #[test]
+    fn substitute_no_placeholders_returns_input() {
+        let out = substitute_str("no placeholders here", &ResolvedValues::new());
+        assert_eq!(out.as_str(), "no placeholders here");
     }
 
     #[test]
@@ -298,61 +326,168 @@ mod tests {
         assert!(credential_allows(&[], &url("https://a.example/")).is_err());
     }
 
+    fn rich_login() -> CredentialEntry {
+        let mut e = CredentialEntry::login("9", &["https://a.example"]);
+        e.has_username = true;
+        e.has_notes = true;
+        e.fields = vec![
+            FieldInfo {
+                name: "api key".into(),
+                kind: FieldKind::Hidden,
+            },
+            FieldInfo {
+                name: "flag".into(),
+                kind: FieldKind::Boolean,
+            },
+            FieldInfo {
+                name: "lu".into(),
+                kind: FieldKind::LinkedUsername,
+            },
+            FieldInfo {
+                name: "card".into(),
+                kind: FieldKind::LinkedOther,
+            },
+            FieldInfo {
+                name: "dup".into(),
+                kind: FieldKind::Text,
+            },
+            FieldInfo {
+                name: "dup".into(),
+                kind: FieldKind::Text,
+            },
+        ];
+        e
+    }
+
+    #[test]
+    fn plan_selectors_and_scrub_rules() {
+        let e = rich_login();
+        let scrub = |s: Selector| plan(&ph("x", s), &e).map(|(_, scrub)| scrub);
+        assert!(scrub(Selector::Password).unwrap());
+        assert!(!scrub(Selector::Username).unwrap());
+        assert!(scrub(Selector::Notes).unwrap());
+        assert!(scrub(Selector::Field("api key".into())).unwrap());
+        assert!(!scrub(Selector::Field("flag".into())).unwrap());
+        assert!(!scrub(Selector::Field("lu".into())).unwrap());
+        assert!(
+            matches!(
+                scrub(Selector::Totp),
+                Err(FerroError::UnknownPlaceholder(_))
+            ),
+            "no totp on item"
+        );
+        assert!(matches!(
+            scrub(Selector::Field("card".into())),
+            Err(FerroError::UnknownPlaceholder(_))
+        ));
+        assert!(matches!(
+            scrub(Selector::Field("missing".into())),
+            Err(FerroError::UnknownPlaceholder(_))
+        ));
+        assert!(matches!(
+            scrub(Selector::Field("dup".into())),
+            Err(FerroError::AmbiguousField { .. })
+        ));
+    }
+
+    #[test]
+    fn plan_secure_note_has_no_login_values() {
+        let mut n = CredentialEntry::login("7", &["https://n.example"]);
+        n.kind = ItemKind::SecureNote;
+        n.has_password = false;
+        n.has_notes = true;
+        n.fields = vec![FieldInfo {
+            name: "token".into(),
+            kind: FieldKind::Hidden,
+        }];
+        assert!(plan(&ph("n", Selector::Notes), &n).is_ok());
+        assert!(plan(&ph("n", Selector::Field("token".into())), &n).is_ok());
+        assert!(matches!(
+            plan(&ph("n", Selector::Password), &n),
+            Err(FerroError::UnknownPlaceholder(_))
+        ));
+        assert!(matches!(
+            plan(&ph("n", Selector::Username), &n),
+            Err(FerroError::UnknownPlaceholder(_))
+        ));
+    }
+
     #[tokio::test]
-    async fn resolve_rejects_unknown_ambiguous_and_unbound_before_fetching() {
+    async fn resolve_rejects_before_fetching() {
         // Unreachable vault: any fetch attempt would return VaultUnavailable.
         let vault = VaultClient::new("http://127.0.0.1:1".to_string());
         let mut creds = CredentialMap::new();
         creds.insert(
             "dup".into(),
             vec![
-                CredentialEntry {
-                    id: "1".into(),
-                    uris: vec![],
-                },
-                CredentialEntry {
-                    id: "2".into(),
-                    uris: vec![],
-                },
+                CredentialEntry::login("1", &[]),
+                CredentialEntry::login("2", &[]),
             ],
         );
         creds.insert(
             "bound".into(),
-            vec![CredentialEntry {
-                id: "3".into(),
-                uris: vec!["https://a.example".into()],
-            }],
+            vec![CredentialEntry::login("3", &["https://a.example"])],
         );
+        let mut rp = CredentialEntry::login("4", &["https://b.example"]);
+        rp.reprompt = true;
+        creds.insert("guarded".into(), vec![rp]);
         let target = url("https://b.example/");
+        let set = |p: Placeholder| BTreeSet::from([p]);
 
-        let names: HashSet<String> = ["missing".to_string()].into();
-        let err = resolve_credentials(&names, &creds, &target, true, &vault)
-            .await
-            .unwrap_err();
+        let err = resolve_credentials(
+            &set(ph("missing", Selector::Password)),
+            &creds,
+            &target,
+            true,
+            &vault,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, FerroError::UnknownPlaceholder(_)));
 
-        let names: HashSet<String> = ["dup".to_string()].into();
-        let err = resolve_credentials(&names, &creds, &target, true, &vault)
-            .await
-            .unwrap_err();
+        let err = resolve_credentials(
+            &set(ph("dup", Selector::Password)),
+            &creds,
+            &target,
+            true,
+            &vault,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, FerroError::AmbiguousCredential(_)));
 
-        let names: HashSet<String> = ["bound".to_string()].into();
-        let err = resolve_credentials(&names, &creds, &target, true, &vault)
-            .await
-            .unwrap_err();
+        let err = resolve_credentials(
+            &set(ph("guarded", Selector::Password)),
+            &creds,
+            &target,
+            true,
+            &vault,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, FerroError::RepromptRequired(_)));
+
+        let err = resolve_credentials(
+            &set(ph("bound", Selector::Password)),
+            &creds,
+            &target,
+            true,
+            &vault,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, FerroError::CredentialHostNotAllowed { .. }));
 
         // With enforcement off the binding is skipped and the fetch is attempted.
-        let err = resolve_credentials(&names, &creds, &target, false, &vault)
-            .await
-            .unwrap_err();
+        let err = resolve_credentials(
+            &set(ph("bound", Selector::Password)),
+            &creds,
+            &target,
+            false,
+            &vault,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, FerroError::VaultUnavailable));
-    }
-
-    #[test]
-    fn substitute_no_placeholders_returns_input() {
-        let out = substitute_str("no placeholders here", &ResolvedValues::new());
-        assert_eq!(out.as_str(), "no placeholders here");
     }
 }
