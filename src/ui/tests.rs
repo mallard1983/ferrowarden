@@ -69,7 +69,7 @@ struct Inner {
     token_status: Option<u16>,
     prelogin_body: Option<String>,
     token_calls: Vec<(HeaderMap, HashMap<String, String>)>,
-    send_calls: Vec<Value>,
+    send_calls: Vec<String>,
     prelogin_calls: usize,
     status_calls: usize,
     bw_unauthenticated: bool,
@@ -200,8 +200,8 @@ async fn mock_token(State(m): State<Arc<Mock>>, headers: HeaderMap, body: String
 }
 
 async fn mock_send_email(State(m): State<Arc<Mock>>, body: String) -> Response {
-    let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-    m.with(|i| i.send_calls.push(v));
+    // Kept as the raw text the client sent; tests compare it verbatim.
+    m.with(|i| i.send_calls.push(body));
     StatusCode::OK.into_response()
 }
 
@@ -1047,15 +1047,15 @@ async fn email_second_factor_sends_a_code_and_limits_resends() {
     assert!(r.body.contains("The code was sent"));
     let sent = h.mock.with(|m| m.send_calls.clone());
     assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0]["email"], EMAIL);
-    assert_eq!(
-        sent[0]["masterPasswordHash"],
-        crypto::auth_hash(PASSWORD, EMAIL, KDF).unwrap().as_str()
-    );
-    assert_eq!(
-        sent[0]["deviceIdentifier"],
-        crate::ui::vw_login::device_identifier(EMAIL).to_string()
-    );
+    // Compared as text against the exact serialization the client produces
+    // (serde_json orders object keys), so the mock never has to parse it.
+    let expected = json!({
+        "email": EMAIL,
+        "masterPasswordHash": crypto::auth_hash(PASSWORD, EMAIL, KDF).unwrap().as_str(),
+        "deviceIdentifier": crate::ui::vw_login::device_identifier(EMAIL).to_string(),
+    })
+    .to_string();
+    assert_eq!(sent[0], expected);
     let e = h.events_of("ui_two_factor_email_sent");
     assert_eq!(e.len(), 1);
     assert_eq!(e[0]["event"]["outcome"], "success");
