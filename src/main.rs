@@ -3,10 +3,12 @@ mod audit;
 mod config;
 mod error;
 mod keys;
+mod middleware;
 mod proxy;
 mod state;
 mod vault;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -17,9 +19,24 @@ use vault::{read_password_file, unlock_vault, VaultClient};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Structured JSON logging — compatible with Loki/Grafana
+    // Structured JSON logging — compatible with Loki/Grafana.
+    // Level is controlled by FERROWARDEN_LOG_LEVEL (default: info).
+    // Valid levels: trace, debug, info, warn, error.
+    // Module-scoped filtering is supported: "ferrowarden=debug,tower_http=warn".
+    //
+    // Requires a container restart to change — this is intentional. A log level
+    // change produces a container restart event in Docker logs, creating an audit
+    // trail. An attacker who gains access cannot silently suppress logging.
+    let log_filter = std::env::var("FERROWARDEN_LOG_LEVEL")
+        .unwrap_or_else(|_| "info".to_string());
+    let filter = EnvFilter::try_new(&log_filter)
+        .unwrap_or_else(|_| {
+            eprintln!("Invalid FERROWARDEN_LOG_LEVEL {:?}, falling back to info", log_filter);
+            EnvFilter::new("info")
+        });
+
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with(filter)
         .with(tracing_subscriber::fmt::layer().json())
         .init();
 
@@ -89,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
 
         tracing::info!("Listening on https://{} (TLS)", addr);
         axum_server::bind_rustls(addr, tls_config)
-            .serve(router.into_make_service())
+            .serve(router.into_make_service_with_connect_info::<SocketAddr>())
             .await?;
     } else {
         // TLS is disabled. This is only safe when the agent and ferrowarden
@@ -104,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("Listening on http://{} (plaintext)", addr);
-        axum::serve(listener, router).await?;
+        axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await?;
     }
 
     Ok(())

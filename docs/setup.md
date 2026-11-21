@@ -250,6 +250,7 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `tls_enabled` | `FERROWARDEN_TLS_ENABLED` | `true` |
 | `tls_cert_file` | `FERROWARDEN_TLS_CERT_FILE` | *(required when tls_enabled)* |
 | `tls_key_file` | `FERROWARDEN_TLS_KEY_FILE` | *(required when tls_enabled)* |
+| *(env only)* | `FERROWARDEN_LOG_LEVEL` | `info` — requires restart to change |
 
 ---
 

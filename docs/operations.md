@@ -150,6 +150,85 @@ After revoking, create a new key and update the agent's configuration.
 
 ---
 
+## ⚠ Rotating the Admin Key
+
+> **This requires a container restart.** The admin key is read once at startup from the Docker secret file. There is no hot-reload. Plan accordingly — there will be a brief (~30 second) outage during the restart.
+
+The admin key controls all key management and audit operations. Rotate it:
+
+- If you suspect it was exposed (logs, screen sharing, error messages)
+- After any team member with access departs
+- On a routine schedule (recommended: every 90 days)
+- Immediately after any security incident
+
+### Rotation Procedure
+
+**1. Generate a new key:**
+
+Linux/Mac:
+```sh
+openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48
+```
+
+Windows (PowerShell):
+```powershell
+$chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'.ToCharArray()
+$rng   = [Security.Cryptography.RandomNumberGenerator]::Create()
+$buf   = [byte[]]::new(1)
+-join (1..48 | ForEach-Object { $rng.GetBytes($buf); $chars[$buf[0] % $chars.Length] })
+```
+
+**2. Write the new key to the secret file** (the old key is still active until restart):
+
+Linux/Mac:
+```sh
+echo -n "NewKeyHere" > secrets/ferrowarden_admin_key
+chmod 600 secrets/ferrowarden_admin_key
+```
+
+Windows (PowerShell):
+```powershell
+[IO.File]::WriteAllText("secrets\ferrowarden_admin_key", "NewKeyHere", [Text.UTF8Encoding]::new($false))
+```
+
+**3. Restart the ferrowarden container** to pick up the new key:
+
+```sh
+docker compose restart ferrowarden
+```
+
+The container reads the secret file at startup. The new key takes effect immediately when the process starts. The old key stops working.
+
+**4. Verify the new key works** before closing your terminal:
+
+```sh
+NEW_KEY="NewKeyHere"
+curl -s https://<ferrowarden-host>:3000/v1/admin/status \
+  -H "X-Admin-Key: $NEW_KEY" \
+  --cacert certs/server.crt
+# Should return: {"locked":false,"credential_count":N,"agent_key_count":N}
+```
+
+**5. Update any scripts or automation** that use the old admin key.
+
+### If the Key Is Compromised
+
+Treat a compromised admin key as a full-access breach of key management:
+
+1. Rotate the key immediately (procedure above).
+2. List all agent keys — an attacker may have created new ones:
+   ```sh
+   curl https://<host>:3000/v1/admin/keys -H "X-Admin-Key: $NEW_KEY" --cacert certs/server.crt
+   ```
+3. Revoke any keys you do not recognize.
+4. Review the audit log for the period the key was exposed:
+   ```sh
+   curl https://<host>:3000/v1/admin/audit -H "X-Admin-Key: $NEW_KEY" --cacert certs/server.crt
+   ```
+5. Rotate all agent keys as a precaution — an attacker may have read the key list.
+
+---
+
 ## Monitoring
 
 ### Structured Log Output

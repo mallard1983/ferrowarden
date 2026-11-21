@@ -42,6 +42,11 @@ services:
     # it when done:
     #   ports:
     #     - "127.0.0.1:8080:80"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   # ── bw serve ────────────────────────────────────────────────────────────────
   # The Bitwarden CLI running in server mode. Provides a local REST API that
@@ -72,10 +77,22 @@ services:
       BW_SERVE_PORT: "8087"
     networks:
       - vault-internal
-    depends_on:
-      - vaultwarden
+    # bw serve takes ~15–20 seconds to log in and sync before the HTTP API is
+    # ready. The healthcheck polls /status so ferrowarden can wait for the real
+    # ready signal instead of a fixed sleep.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8087/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 20s
     # bw serve port is intentionally NOT exposed to the host.
     # Only ferrowarden (on vault-internal) can reach it.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   # ── Ferrowarden ─────────────────────────────────────────────────────────────
   # The credential proxy. Agents send API calls here with {{vault:name}}
@@ -108,6 +125,10 @@ services:
       FERROWARDEN_TLS_KEY_FILE: "/run/certs/server.key"
       # Persist agent keys across restarts (SHA-256 hashes only, never plaintext).
       FERROWARDEN_KEYS_FILE: "/data/agent_keys.json"
+      # Log level. Valid values: trace, debug, info, warn, error.
+      # Module-scoped: "ferrowarden=debug,tower_http=warn"
+      # Changing this requires a container restart — intentional, see docs/logging.md.
+      FERROWARDEN_LOG_LEVEL: "info"
     networks:
       - vault-internal
       - agent-facing
@@ -117,7 +138,27 @@ services:
       # Change to 127.0.0.1:3000:3000 if the agent runs on the same host only.
       - "0.0.0.0:3000:3000"
     depends_on:
-      - bw-serve
+      bw-serve:
+        # Wait for bw serve to pass its healthcheck before starting ferrowarden.
+        # Without this, ferrowarden's file-mode unlock races against bw serve init
+        # and fails with "connection refused" on the first boot.
+        condition: service_healthy
+    healthcheck:
+      # Uses the public /health endpoint (no auth required).
+      # -k accepts the self-signed TLS cert for the local health check.
+      test: ["CMD", "curl", "-f", "-k", "https://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # Log rotation: keeps logs on disk bounded. Each log file caps at 50 MB;
+    # up to 10 files are kept (500 MB max per service).
+    # For Loki or Wazuh integration, see docs/logging.md.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "10"
 
 
 # ── Networks ──────────────────────────────────────────────────────────────────

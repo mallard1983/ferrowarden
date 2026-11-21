@@ -27,10 +27,12 @@ RUN cargo build --release
 # ── Runtime stage ────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
-# Install only what is needed at runtime: CA certificates for TLS when
-# ferrowarden makes outbound HTTPS calls to target services.
+# Install only what is needed at runtime:
+# - ca-certificates: TLS when ferrowarden makes outbound HTTPS calls
+# - curl: Docker health check (GET /health)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Run as a non-root user. The process has no need for elevated privileges.

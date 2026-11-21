@@ -57,5 +57,9 @@ sha2 = "0.10"
 # URL encoding for vault item name lookups
 urlencoding = "2"
 
+# Per-IP token bucket rate limiting. Keyed limiter maps source IP → token bucket.
+# Using 0.6 — verify compatibility before upgrading to 0.7+ (breaking API changes possible).
+governor = "0.6"
+
 [dev-dependencies]
 tempfile = "3"

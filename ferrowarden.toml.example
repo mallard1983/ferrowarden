@@ -92,3 +92,17 @@ tls_cert_file = "/run/certs/server.crt"
 # File permissions: chmod 400, owned by the ferrowarden process user.
 # Docker Compose: /run/certs/server.key
 tls_key_file = "/run/certs/server.key"
+
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+#
+# Log level is set via environment variable only — not in this file.
+# This is intentional: changing the log level requires a container restart,
+# which produces an auditable event. See docs/logging.md for details.
+#
+# Set FERROWARDEN_LOG_LEVEL in docker-compose.yml or the host environment.
+# Valid values: trace | debug | info | warn | error
+# Default: info
+#
+# Module-scoped filtering is supported:
+#   FERROWARDEN_LOG_LEVEL="ferrowarden=debug,tower_http=warn"
