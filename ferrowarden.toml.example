@@ -50,6 +50,19 @@ unlock_mode = "file"
 unlock_file = "/run/secrets/bw_master_password"
 
 
+# ── Agent key persistence ─────────────────────────────────────────────────────
+
+# Path to the agent key store file. Optional.
+# When set, agent keys survive container restarts. The file stores only
+# SHA-256 hashes of tokens — plaintext is never written to disk.
+# Omit to use in-memory-only storage (keys are lost when the process stops).
+#
+# Docker: use a named volume mounted at /data and set this to /data/agent_keys.json
+# Bare host: any writable path, e.g. /var/lib/ferrowarden/agent_keys.json
+#
+# keys_file = "/data/agent_keys.json"
+
+
 # ── TLS ──────────────────────────────────────────────────────────────────────
 #
 # TLS is ENABLED by default. You must supply a certificate and key before
@@ -70,10 +83,12 @@ unlock_file = "/run/secrets/bw_master_password"
 tls_enabled = true
 
 # Path to the TLS certificate (PEM format). Required when tls_enabled = true.
-# Docker: mount the cert as a bind volume or Docker secret.
-tls_cert_file = "/run/secrets/server.crt"
+# Docker Compose: mount certs/ as a bind volume and set to /run/certs/server.crt
+# Bare host:      path to the cert file, e.g. /etc/ferrowarden/certs/server.crt
+tls_cert_file = "/run/certs/server.crt"
 
 # Path to the TLS private key (PEM format). Required when tls_enabled = true.
 # The key must correspond to the certificate above.
 # File permissions: chmod 400, owned by the ferrowarden process user.
-tls_key_file = "/run/secrets/server.key"
+# Docker Compose: /run/certs/server.key
+tls_key_file = "/run/certs/server.key"

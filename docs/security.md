@@ -105,11 +105,15 @@ The response body from every forwarded request is run through a set of regex pat
 
 **Limitations:** The scrubber is regex-based and cannot catch all possible formats. It is a defense-in-depth measure, not a complete guarantee. Custom credential formats may not be caught. The scrubber errs on the side of false positives (over-redacting) rather than false negatives.
 
-### 9. `x-fw-*` Header Namespace
+### 9. Auth Headers Never Forwarded; `x-fw-*` Namespace Reserved
 
-Ferrowarden uses `x-fw-*` headers for internal communication (agent key, admin key). These are stripped before the request is forwarded to the target.
+There are two separate protections:
 
-**Why this matters:** Without this, an agent could craft a request where `x-fw-agent-key` appears as a forwarded header, potentially misleading a target service or leaking the key value. All `x-fw-*` headers are dropped unconditionally.
+**Agent and admin keys are on the outer request, not the inner one.** The agent authenticates by putting `X-Agent-Key` in the HTTP request headers sent to Ferrowarden. The inner `request.headers` field inside the JSON body is what Ferrowarden forwards to the target — a completely different structure. `X-Agent-Key` is read and consumed by Ferrowarden's auth layer and is never inserted into the outbound request.
+
+**`x-fw-*` headers in the inner request are stripped.** If an agent includes any header whose name starts with `x-fw-` inside its `request.headers` body field, that header is dropped before the request is forwarded. This namespace is reserved for future Ferrowarden-internal use.
+
+**Why this matters:** Together these two properties mean no Ferrowarden authentication credential can reach a target service, whether by accident or by a malicious agent trying to exfiltrate its own key by including it in a forwarded header.
 
 ### 10. Native TLS (Transport Security)
 

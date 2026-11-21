@@ -50,13 +50,14 @@ Vaultwarden's vault API works with encrypted blobs. Decryption requires the mast
 
 Ferrowarden is the proxy. It manages:
 
-- **Agent authentication**: Bearer token check on every request (constant-time comparison)
+- **Agent authentication**: `X-Agent-Key` header check on every request (constant-time comparison)
 - **Admin authentication**: Separate admin key for management operations
 - **Vault lock state**: Tracks whether `bw serve` has been unlocked; rejects requests when locked
 - **Credential name cache**: The list of available credential names, populated at unlock time
 - **Substitution**: Finds `{{vault:name}}` placeholders, validates names against the cache, fetches values, builds the substituted request
 - **Forwarding**: Sends the substituted request to the target, respecting a 30-second timeout with no redirect following
 - **Scrubbing**: Runs the response body through regex patterns that redact bearer tokens, API key JSON fields, Proxmox tokens, basic auth in URLs, and PEM private key blocks
+- **Agent key persistence**: On create, appends a SHA-256 hash of the token to a JSON file (never the plaintext). On startup, re-loads those hashes so keys survive container restarts.
 - **Audit log**: Records every proxy request (credential names, outcome, response status) to a ring buffer and to structured log output
 
 ---
@@ -138,4 +139,5 @@ The tradeoff is longer build times and a steeper learning curve. For a credentia
 - **Not a secrets manager**: Vaultwarden handles storage. Ferrowarden only proxies.
 - **Not a firewall**: It does not enforce which target URLs the agent may call. That is the operator's responsibility (network policy, reverse proxy rules).
 - **Not a full audit trail**: The in-memory ring buffer (default 1000 entries) is lost on restart. Persist the structured log output (Loki, Elasticsearch, etc.) for a durable audit trail.
-- **Not a replacement for TLS**: Ferrowarden should run behind a TLS-terminating reverse proxy if agents connect from a different host. The proxy endpoint itself does not provide transport encryption.
+- **Not a firewall for target URLs**: It does not enforce which URLs the agent may call. That is the operator's responsibility (network policy, firewall rules).
+- **Not a full audit trail on its own**: The in-memory ring buffer is lost on restart. Ship the structured JSON log output to Loki, Elasticsearch, or a log file for a durable audit trail.

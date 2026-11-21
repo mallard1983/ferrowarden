@@ -22,10 +22,11 @@ This all happens before the HTTP server starts accepting connections. If the unl
 Ferrowarden starts and immediately begins listening. All credential proxy requests return `503 Service Unavailable` until an operator posts the master password to `POST /v1/unlock`.
 
 ```sh
-curl -X POST http://localhost:3000/v1/unlock \
+curl -X POST https://<ferrowarden-host>:3000/v1/unlock \
   -H "X-Admin-Key: $ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"password": "your-master-password"}'
+  -d '{"password": "your-master-password"}' \
+  --cacert certs/server.crt
 ```
 
 **Use this mode when:**
@@ -101,13 +102,16 @@ docker compose up -d
 
 ## Managing Agent Keys
 
+Replace `<ferrowarden-host>` in the examples below with the hostname or IP of the machine running Ferrowarden. If the agent is on the same host, use `localhost`. TLS is on by default; use `--cacert certs/server.crt` with a self-signed cert, or `-k` to skip verification (dev only).
+
 ### Creating Keys
 
 ```sh
-curl -X POST http://localhost:3000/v1/admin/keys \
+curl -X POST https://<ferrowarden-host>:3000/v1/admin/keys \
   -H "X-Admin-Key: $ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "descriptive-agent-name"}'
+  -d '{"name": "descriptive-agent-name"}' \
+  --cacert certs/server.crt
 ```
 
 Name keys descriptively. The name appears in audit log entries — if something unexpected happens, the name is how you identify which agent was responsible.
@@ -117,8 +121,9 @@ The token is shown once. Store it immediately in the agent's secret management (
 ### Listing Keys
 
 ```sh
-curl http://localhost:3000/v1/admin/keys \
-  -H "X-Admin-Key: $ADMIN_KEY"
+curl https://<ferrowarden-host>:3000/v1/admin/keys \
+  -H "X-Admin-Key: $ADMIN_KEY" \
+  --cacert certs/server.crt
 ```
 
 Token values are never returned. Only the ID, name, and creation time.
@@ -128,8 +133,9 @@ Token values are never returned. Only the ID, name, and creation time.
 ```sh
 KEY_ID="550e8400-e29b-41d4-a716-446655440000"
 
-curl -X DELETE "http://localhost:3000/v1/admin/keys/$KEY_ID" \
-  -H "X-Admin-Key: $ADMIN_KEY"
+curl -X DELETE "https://<ferrowarden-host>:3000/v1/admin/keys/$KEY_ID" \
+  -H "X-Admin-Key: $ADMIN_KEY" \
+  --cacert certs/server.crt
 ```
 
 Revocation is immediate. The token is removed from in-memory state and, if `FERROWARDEN_KEYS_FILE` is configured, removed from the key store file. Any subsequent request using the revoked token will receive `401 Unauthorized`. The key will not be re-loaded on the next container restart.
@@ -198,8 +204,9 @@ Useful LogQL queries:
 ### Admin Status
 
 ```sh
-curl http://localhost:3000/v1/admin/status \
-  -H "X-Admin-Key: $ADMIN_KEY"
+curl https://<ferrowarden-host>:3000/v1/admin/status \
+  -H "X-Admin-Key: $ADMIN_KEY" \
+  --cacert certs/server.crt
 ```
 
 ```json
@@ -247,8 +254,18 @@ The admin key environment variable is missing. If using Docker secrets, check th
 
 The key is too short. Generate a new one:
 
+**Linux/Mac:**
 ```sh
 openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48 > secrets/ferrowarden_admin_key
+```
+
+**Windows (PowerShell):**
+```powershell
+$chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'.ToCharArray()
+$rng   = [Security.Cryptography.RandomNumberGenerator]::Create()
+$buf   = [byte[]]::new(1)
+$key   = -join (1..48 | ForEach-Object { $rng.GetBytes($buf); $chars[$buf[0] % $chars.Length] })
+[IO.File]::WriteAllText("secrets\ferrowarden_admin_key", $key, [Text.UTF8Encoding]::new($false))
 ```
 
 ### `503 Service Unavailable` on all requests
@@ -266,8 +283,9 @@ The placeholder name does not match any credential in the vault (or the vault wa
 To list what credentials ferrowarden knows about:
 
 ```sh
-curl http://localhost:3000/v1/credentials \
-  -H "X-Agent-Key: $AGENT_TOKEN"
+curl https://<ferrowarden-host>:3000/v1/credentials \
+  -H "X-Agent-Key: $AGENT_TOKEN" \
+  --cacert certs/server.crt
 ```
 
 ### bw-serve login fails at startup

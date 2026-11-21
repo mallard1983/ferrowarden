@@ -36,12 +36,12 @@ Both scripts perform identical steps. Use `dev-setup.sh` on Linux/Mac and `dev-s
 
 ## Step 0: Generate TLS Certificate
 
-Ferrowarden requires TLS by default. Generate a certificate before starting the stack. For production, use a certificate from a trusted CA. For development, a self-signed certificate works fine.
+Ferrowarden requires TLS by default. Generate a certificate before starting the stack. For production, use a certificate from a trusted CA. For development or a homelab, a self-signed certificate is fine — your agent will need to either trust the cert or use `--cacert`.
 
+**Linux/Mac:**
 ```sh
 mkdir -p certs
 
-# Self-signed certificate (development only)
 openssl req -x509 -newkey ed25519 \
     -keyout certs/server.key \
     -out certs/server.crt \
@@ -50,9 +50,20 @@ openssl req -x509 -newkey ed25519 \
 chmod 400 certs/server.key
 ```
 
-The `certs/` directory is in `.gitignore`. Never commit certificate files.
+**Windows (PowerShell):**
+```powershell
+New-Item -ItemType Directory -Force certs | Out-Null
 
-If you are running ferrowarden on the same host as the agent (no network hop), you can disable TLS entirely by setting `FERROWARDEN_TLS_ENABLED=false` in your environment. Ferrowarden will log a prominent warning, and you will not need certificate files. See [Security: Native TLS](security.md#10-native-tls-transport-security) for when this is acceptable.
+openssl req -x509 -newkey ed25519 `
+    -keyout certs\server.key `
+    -out certs\server.crt `
+    -days 365 -nodes `
+    -subj '/CN=ferrowarden' 2>$null
+```
+
+`openssl` ships with Git for Windows — if the command is not found, install Git for Windows. The `certs/` directory is in `.gitignore`. Never commit certificate files.
+
+If you are running ferrowarden on the same host as the agent (no network hop), you can disable TLS by setting `FERROWARDEN_TLS_ENABLED=false`. Ferrowarden will log a prominent warning. See [Security: Native TLS](security.md#10-native-tls-transport-security) for when this is acceptable.
 
 ---
 
@@ -60,11 +71,11 @@ If you are running ferrowarden on the same host as the agent (no network hop), y
 
 Secret values are mounted as Docker secrets — files on disk that the containers read at startup. Create the `secrets/` directory and populate it. **Do not commit this directory.**
 
+**Linux/Mac:**
 ```sh
 mkdir secrets
 
-# These come from Vaultwarden after you create your account (Step 2).
-# Leave these empty for now — fill them in after Step 2.
+# Leave these empty for now — fill them in after Step 2 (Vaultwarden setup).
 touch secrets/bw_client_id
 touch secrets/bw_client_secret
 
@@ -76,6 +87,27 @@ openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48 > secrets/ferrowarden_
 
 chmod 600 secrets/*
 ```
+
+**Windows (PowerShell):**
+```powershell
+New-Item -ItemType Directory -Force secrets | Out-Null
+
+# Leave these empty for now — fill them in after Step 2.
+[IO.File]::WriteAllText("secrets\bw_client_id",    "", [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText("secrets\bw_client_secret","", [Text.UTF8Encoding]::new($false))
+
+# Your Vaultwarden master password
+[IO.File]::WriteAllText("secrets\bw_master_password", "YourMasterPasswordHere", [Text.UTF8Encoding]::new($false))
+
+# Generate a strong admin key (48 random alphanumeric characters)
+$chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'.ToCharArray()
+$rng   = [Security.Cryptography.RandomNumberGenerator]::Create()
+$buf   = [byte[]]::new(1)
+$key   = -join (1..48 | ForEach-Object { $rng.GetBytes($buf); $chars[$buf[0] % $chars.Length] })
+[IO.File]::WriteAllText("secrets\ferrowarden_admin_key", $key, [Text.UTF8Encoding]::new($false))
+```
+
+Secret files must have no trailing newline — `[IO.File]::WriteAllText` with `UTF8Encoding($false)` handles this correctly on Windows (PowerShell's `Set-Content` and `Out-File` add a BOM or trailing newline by default).
 
 ---
 
@@ -222,6 +254,40 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `tls_enabled` | `FERROWARDEN_TLS_ENABLED` | `true` |
 | `tls_cert_file` | `FERROWARDEN_TLS_CERT_FILE` | *(required when tls_enabled)* |
 | `tls_key_file` | `FERROWARDEN_TLS_KEY_FILE` | *(required when tls_enabled)* |
+
+---
+
+## Port Configuration
+
+Ferrowarden defaults to port **3000**. In a homelab this commonly collides with other services:
+
+| Service | Default port |
+|---|---|
+| Grafana | 3000 |
+| Gitea / Gogs | 3000 |
+| Node.js dev servers | 3000 |
+| Home Assistant | 8123 |
+| Portainer | 9443 / 9000 |
+
+To change the port, set `FERROWARDEN_BIND_ADDR` in `docker-compose.yml`:
+
+```yaml
+# docker-compose.yml — ferrowarden service
+environment:
+  FERROWARDEN_BIND_ADDR: "0.0.0.0:3443"   # or any free port
+ports:
+  - "0.0.0.0:3443:3443"
+```
+
+Both values must match — the `ports` mapping and the `FERROWARDEN_BIND_ADDR` inside the container.
+
+The agent then connects to `https://<ferrowarden-host>:3443` instead of the default `:3000`.
+
+If you are running Ferrowarden directly on the host (not Docker), set `bind_addr` in `ferrowarden.toml`:
+
+```toml
+bind_addr = "0.0.0.0:3443"
+```
 
 ---
 
