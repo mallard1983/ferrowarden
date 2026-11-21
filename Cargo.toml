@@ -62,7 +62,7 @@ urlencoding = "2"
 
 # Base64 encoding: scrubbing base64-encoded credential echoes and returning
 # non-UTF-8 response bodies to the agent
-base64 = "0.22"
+base64 = "0.23"
 
 # Per-IP token bucket rate limiting. Keyed limiter maps source IP → token bucket.
 # Using 0.6 — verify compatibility before upgrading to 0.7+ (breaking API changes possible).
