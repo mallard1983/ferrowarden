@@ -52,7 +52,7 @@ regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Secure random number generation (for key generation)
-rand = "0.9"
+rand = "0.10"
 
 # SHA-256 for token hashing in the key store (tokens are stored as hashes, never plaintext)
 sha2 = "0.10"
