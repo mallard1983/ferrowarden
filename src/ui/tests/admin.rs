@@ -316,9 +316,12 @@ async fn sensitive_actions_need_a_recent_sign_in_on_get_and_post() {
     let new_path = "/ui/keys/new";
     let revoke_path = format!("/ui/keys/{id}/revoke");
     let edit_path = format!("/ui/keys/{id}");
-    for (path, next) in [(new_path, new_path), (&revoke_path, &revoke_path)] {
+    for (label, path, next) in [
+        ("create form", new_path, new_path),
+        ("revoke form", &revoke_path, &revoke_path),
+    ] {
         let r = b.get(&h, path).await;
-        assert_eq!(r.status, StatusCode::SEE_OTHER, "{path}");
+        assert_eq!(r.status, StatusCode::SEE_OTHER, "{label}");
         assert_eq!(r.location(), format!("/ui/login?m=sudo&next={next}"));
     }
     let mut attempts = vec![
