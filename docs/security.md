@@ -94,6 +94,14 @@ The Docker Compose configuration places `bw-serve` on an `internal: true` networ
 
 Two further layers apply: Ferrowarden's outbound policy refuses `bw serve` as a forward target (property 14), and current `bw serve` releases reject requests whose `Host` header is not `localhost`/`127.0.0.1`/`[::1]` or the `--hostname` it was started with (DNS-rebinding protection). In Docker Compose it is started with `--hostname bw-serve`, the name Ferrowarden uses.
 
+### 6b. The Vaultwarden Web Vault Is User-Facing
+
+Vaultwarden is the user's password manager, so its web vault is published (`127.0.0.1:8443` by default, configurable via `.env`). This is the same exposure as any self-hosted Vaultwarden: vault data is end-to-end encrypted with the master password, and the server never sees plaintext. Signups are off except while creating the first account, and the `/admin` panel is disabled because no `ADMIN_TOKEN` is set.
+
+What is *not* exposed: `bw serve`, which holds the unlocked vault, stays on the `internal: true` network only. The web vault is on a separate `vault-web` network that bw serve and ferrowarden do not join.
+
+Ferrowarden's target policy treats the web vault like any other internal service: an agent cannot reach `https://vaultwarden` (internal address) unless `allowed_targets` permits it, and even if it could, it would only see end-to-end-encrypted data without the master password. Do not bind a credential to the vault's own URL.
+
 ### 6a. Internal TLS Between bw serve and Vaultwarden
 
 Current Bitwarden CLI releases refuse plain-HTTP servers, so Vaultwarden serves HTTPS on the `vault-internal` network. A one-shot `internal-certs` service creates a private CA (10 years) and a certificate for `vaultwarden` (825 days, re-issued automatically within 30 days of expiry) in the `internal-pki` volume. Vaultwarden mounts it read-only; bw serve, the setup and the seeder trust only that CA for the internal hop via `NODE_EXTRA_CA_CERTS`. The CA private key never leaves the volume.
@@ -225,7 +233,7 @@ The in-memory ring buffer (default 1000 entries) is accessible via `GET /v1/admi
 Before going to production:
 
 - [ ] Vaultwarden's `SIGNUPS_ALLOWED` is set to `false`
-- [ ] Vaultwarden is not exposed on a public port
+- [ ] The Vaultwarden web vault is published only where you need it (`VAULTWARDEN_PUBLISH`); if it is reachable from the internet, it is behind a TLS reverse proxy — ideally with SSO in front — and your account has two-step login enabled
 - [ ] `bw serve` port (8087) is not reachable from outside Docker (`internal: true` network)
 - [ ] The `internal-pki` volume (internal CA key) is backed up or treated as regenerable, and not copied elsewhere
 - [ ] Every vault item agents use has URIs for exactly the hosts it belongs to, and `enforce_credential_hosts` is `true`

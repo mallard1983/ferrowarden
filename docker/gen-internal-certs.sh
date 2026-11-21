@@ -14,10 +14,11 @@
 # Output (in $PKI_DIR, a named volume shared read-only with other services):
 #   ca.crt            CA certificate — trusted by bw serve, setup and seeder
 #   ca.key            CA private key — never leaves this volume
-#   vaultwarden.crt   Server certificate, SAN DNS:${VW_HOSTNAME}
+#   vaultwarden.crt   Server certificate: SAN DNS:${VW_HOSTNAME} + VW_EXTRA_SANS
+#   vaultwarden.sans  The SAN list it was issued for (re-issued on change)
 #   vaultwarden.key   Server private key
 #
-# These certificates are only for the internal hop. The agent-facing TLS
+# The same certificate serves the web vault published on the host. The agent-facing TLS
 # certificate for ferrowarden is separate (certs/server.crt, or a reverse
 # proxy such as Pangolin).
 
@@ -25,6 +26,24 @@ set -e
 
 PKI_DIR="${PKI_DIR:-/pki}"
 VW_HOSTNAME="${VW_HOSTNAME:-vaultwarden}"
+# Comma-separated extra names/IPs (e.g. "localhost,127.0.0.1,vault.lan") so a
+# browser can reach the web vault directly by those names.
+VW_EXTRA_SANS="${VW_EXTRA_SANS:-}"
+
+SANS="DNS:${VW_HOSTNAME}"
+OLD_IFS="$IFS"
+IFS=','
+for entry in $VW_EXTRA_SANS; do
+    entry="$(printf '%s' "$entry" | tr -d ' ')"
+    [ -z "$entry" ] && continue
+    case "$entry" in
+        *:*)        SANS="$SANS,IP:$entry" ;;   # IPv6
+        *[!0-9.]*)  SANS="$SANS,DNS:$entry" ;;  # host name
+        *)          SANS="$SANS,IP:$entry" ;;   # IPv4
+    esac
+done
+IFS="$OLD_IFS"
+
 umask 077
 mkdir -p "$PKI_DIR"
 cd "$PKI_DIR"
@@ -50,26 +69,27 @@ elif ! openssl x509 -in vaultwarden.crt -noout -checkend 2592000 >/dev/null 2>&1
 elif ! openssl verify -CAfile ca.crt vaultwarden.crt >/dev/null 2>&1; then
     echo "[certs] Vaultwarden certificate not signed by the current CA"
     needs_issue=1
-elif ! openssl x509 -in vaultwarden.crt -noout -ext subjectAltName 2>/dev/null | grep -q "DNS:${VW_HOSTNAME}\$"; then
-    echo "[certs] Vaultwarden certificate host name changed"
+elif [ "$(cat vaultwarden.sans 2>/dev/null)" != "$SANS" ]; then
+    echo "[certs] Vaultwarden certificate names changed"
     needs_issue=1
 fi
 
 if [ "$needs_issue" = 1 ]; then
-    echo "[certs] Issuing Vaultwarden certificate for ${VW_HOSTNAME}"
+    echo "[certs] Issuing Vaultwarden certificate for ${SANS}"
     openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
         -subj "/CN=${VW_HOSTNAME}" -keyout vaultwarden.key -out vaultwarden.csr 2>/dev/null
-    printf 'subjectAltName=DNS:%s\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature\nbasicConstraints=critical,CA:FALSE\n' \
-        "$VW_HOSTNAME" > vaultwarden.ext
+    printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature\nbasicConstraints=critical,CA:FALSE\n' \
+        "$SANS" > vaultwarden.ext
     openssl x509 -req -in vaultwarden.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
         -days 825 -extfile vaultwarden.ext -out vaultwarden.crt 2>/dev/null
     rm -f vaultwarden.csr vaultwarden.ext
+    printf '%s' "$SANS" > vaultwarden.sans
 else
     echo "[certs] Vaultwarden certificate is valid"
 fi
 
 # The CA certificate is public; other containers (running as non-root users)
 # must be able to read it. Private keys stay owner-only.
-chmod 644 ca.crt vaultwarden.crt
+chmod 644 ca.crt vaultwarden.crt vaultwarden.sans
 chmod 600 ca.key vaultwarden.key
 echo "[certs] Done"

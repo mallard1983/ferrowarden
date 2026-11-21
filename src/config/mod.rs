@@ -104,6 +104,15 @@ pub struct Config {
     /// connect directly — otherwise clients could spoof the header.
     #[serde(default)]
     pub trusted_proxies: String,
+
+    /// Optional path prefix for every API route except `/health`, e.g.
+    /// `/k7f3q9` serves the API at `/k7f3q9/v1/forward`. Empty (default)
+    /// serves it at `/v1/...`. Use a hard-to-guess value to keep generic
+    /// scanners off the API and to give a reverse proxy (e.g. an SSO bypass
+    /// rule) a non-obvious path to match. This is obscurity, not
+    /// authentication: the agent and admin keys remain the real controls.
+    #[serde(default)]
+    pub api_prefix: String,
 }
 
 fn default_bind_addr() -> String {
@@ -132,6 +141,31 @@ fn default_max_response_bytes() -> usize {
 
 fn default_forward_timeout_secs() -> u64 {
     30
+}
+
+/// Normalize and validate an API prefix. Returns "" for no prefix, otherwise
+/// a string like "/a/b": leading slash, no trailing slash, segments of
+/// letters, digits, '-' and '_' only.
+pub fn normalize_api_prefix(raw: &str) -> FerroResult<String> {
+    let trimmed = raw.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    for segment in trimmed.split('/') {
+        let valid = !segment.is_empty()
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !valid {
+            return Err(FerroError::Config(format!(
+                "api_prefix {raw:?} is invalid: use path segments of letters, digits, '-' and '_' (e.g. \"/k7f3q9\")"
+            )));
+        }
+    }
+    if trimmed == "health" {
+        return Err(FerroError::Config("api_prefix may not be \"/health\"".to_string()));
+    }
+    Ok(format!("/{trimmed}"))
 }
 
 /// Split a comma-separated config value into trimmed, non-empty entries.
@@ -169,6 +203,8 @@ impl Config {
         // Admin key must come from the environment — never a config file.
         cfg.admin_key = std::env::var("FERROWARDEN_ADMIN_KEY")
             .map_err(|_| FerroError::Config("FERROWARDEN_ADMIN_KEY must be set".to_string()))?;
+
+        cfg.api_prefix = normalize_api_prefix(&cfg.api_prefix)?;
 
         cfg.validate()?;
 
@@ -247,6 +283,18 @@ mod tests {
             max_response_bytes: 1024,
             forward_timeout_secs: 30,
             trusted_proxies: String::new(),
+            api_prefix: String::new(),
+        }
+    }
+
+    #[test]
+    fn api_prefix_normalization() {
+        assert_eq!(normalize_api_prefix("").unwrap(), "");
+        assert_eq!(normalize_api_prefix("/").unwrap(), "");
+        assert_eq!(normalize_api_prefix("k7f3q9").unwrap(), "/k7f3q9");
+        assert_eq!(normalize_api_prefix("/a-b/c_d/").unwrap(), "/a-b/c_d");
+        for bad in ["/a//b", "/a b", "/a?b", "/../x", "/health", "/a.b"] {
+            assert!(normalize_api_prefix(bad).is_err(), "{bad} must be rejected");
         }
     }
 

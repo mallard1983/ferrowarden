@@ -2,6 +2,8 @@
 
 ## Endpoints
 
+Paths are relative to the configured base URL, which may include an operator-chosen prefix (e.g. `/k7f3q9/v1/forward`). `/health` is never prefixed.
+
 ### GET /v1/credentials
 
 Returns the names of all credentials available for use in placeholders. Names only -- values are never returned.

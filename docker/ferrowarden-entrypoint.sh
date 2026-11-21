@@ -15,6 +15,12 @@ if [ -z "$FERROWARDEN_ADMIN_KEY" ] && [ -n "$FERROWARDEN_ADMIN_KEY_FILE" ]; then
         echo "ERROR: FERROWARDEN_ADMIN_KEY_FILE does not exist: $FERROWARDEN_ADMIN_KEY_FILE" >&2
         exit 1
     fi
+    if [ ! -r "$FERROWARDEN_ADMIN_KEY_FILE" ]; then
+        # Compose mounts file secrets with their host owner and mode.
+        echo "ERROR: cannot read $FERROWARDEN_ADMIN_KEY_FILE as UID $(id -u)." >&2
+        echo "       On a Linux host: sudo chown 999:999 secrets/ferrowarden_admin_key secrets/bw_master_password certs/server.key" >&2
+        exit 1
+    fi
     FERROWARDEN_ADMIN_KEY="$(cat "$FERROWARDEN_ADMIN_KEY_FILE")"
     export FERROWARDEN_ADMIN_KEY
 fi

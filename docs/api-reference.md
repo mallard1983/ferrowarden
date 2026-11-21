@@ -5,6 +5,10 @@ All requests require an authentication header. The header name depends on the en
 - **Agent endpoints** (`/v1/credentials`, `/v1/forward`): `X-Agent-Key: <token>`
 - **Admin endpoints** (`/v1/admin/*`, `/v1/unlock`): `X-Admin-Key: <key>`
 
+`GET /health` needs no authentication.
+
+**API prefix.** If the operator sets `api_prefix` (`FERROWARDEN_API_PREFIX`, e.g. `/k7f3q9`), every path in this document except `/health` moves under it: `/k7f3q9/v1/forward`, `/k7f3q9/v1/admin/keys`, and so on, and the unprefixed `/v1/...` paths return `404`. Give agents the base URL *including* the prefix.
+
 Responses are JSON. Errors follow a consistent shape:
 
 ```json

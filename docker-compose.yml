@@ -5,15 +5,19 @@
 # BEFORE FIRST RUN:
 #   1. Generate secrets (see the secrets section at the bottom).
 #   2. Generate a TLS certificate (see docs/setup.md Step 0).
-#   3. Start Vaultwarden alone and register your account via its web UI:
-#        docker compose up -d vaultwarden
-#        # Temporarily add ports: ["127.0.0.1:8443:443"] to vaultwarden and browse to
-#        # https://127.0.0.1:8443 (accept the internal-CA certificate warning)
-#   4. Create an API key in Vaultwarden (Account Settings → API Key).
-#      Write the client_id and client_secret to secrets/bw_client_id and
-#      secrets/bw_client_secret.
-#   5. Bring up the full stack:
+#   3. Optional: copy .env.example to .env and set where the Vaultwarden web
+#      vault is published and the URL you reach it at.
+#   4. Start Vaultwarden with signups enabled, just long enough to create
+#      your account in the web vault (https://127.0.0.1:8443 by default):
+#        VAULTWARDEN_SIGNUPS_ALLOWED=true docker compose up -d vaultwarden
+#   5. In the web vault: Settings → Security → Keys → View API key. Write the
+#      client_id and client_secret to secrets/bw_client_id and
+#      secrets/bw_client_secret. Add Login items with URIs for your services.
+#   6. Bring up the full stack (this also turns signups back off):
 #        docker compose up -d
+#
+# The Vaultwarden web vault stays available afterwards: it is where you
+# manage your passwords and the credentials agents use.
 #
 # See docs/setup.md for the complete step-by-step guide.
 
@@ -34,13 +38,19 @@ services:
       - internal-pki:/pki
     environment:
       VW_HOSTNAME: "vaultwarden"
+      # Extra names/IPs for the certificate, for browsing to the web vault
+      # directly (e.g. "vault.lan,192.168.1.20"). Not needed behind a reverse
+      # proxy that has its own certificate (e.g. Pangolin + Let's Encrypt).
+      VW_EXTRA_SANS: "${VAULTWARDEN_CERT_SANS:-localhost,127.0.0.1}"
     network_mode: none
     restart: "no"
 
   # ── Vaultwarden ─────────────────────────────────────────────────────────────
-  # Self-hosted Bitwarden-compatible server. Handles encrypted credential
-  # storage and the human-facing web vault UI for managing credentials.
-  # Ferrowarden itself never talks directly to Vaultwarden — only bw serve does.
+  # Self-hosted Bitwarden-compatible server: your password manager. Its web
+  # vault (and any Bitwarden app or browser extension) is where you store and
+  # manage passwords, including the credentials agents use through
+  # ferrowarden. Ferrowarden itself never talks to Vaultwarden — only bw
+  # serve does, over the internal network.
   vaultwarden:
     # Pinned: bw CLI 2026.11.0 (see docker/bw-cli.Dockerfile) is verified
     # against this release. Upgrade both deliberately and re-run the tests.
@@ -53,25 +63,27 @@ services:
       internal-certs:
         condition: service_completed_successfully
     environment:
-      # Set to the URL you use to reach Vaultwarden in a browser.
-      # Required for email verification links to work correctly.
-      # If you are not exposing Vaultwarden externally, the internal URL is fine.
-      DOMAIN: "https://vaultwarden"
-      # Disable signups once your account is created. Anyone with network
-      # access to the Vaultwarden port could otherwise register an account.
-      SIGNUPS_ALLOWED: "false"
-      # HTTPS on the internal network, using the internal CA's certificate.
-      # Required because current Bitwarden CLI releases refuse plain HTTP.
+      # The URL you reach the web vault at (e.g. https://vault.example.com
+      # behind a reverse proxy). Used for links, passkeys/WebAuthn and emails.
+      DOMAIN: "${VAULTWARDEN_DOMAIN:-https://127.0.0.1:8443}"
+      # Off except while creating your first account
+      # (VAULTWARDEN_SIGNUPS_ALLOWED=true docker compose up -d vaultwarden).
+      # Anyone who can reach the web vault could otherwise register.
+      SIGNUPS_ALLOWED: "${VAULTWARDEN_SIGNUPS_ALLOWED:-false}"
+      # HTTPS with the internal CA's certificate: required because current
+      # Bitwarden CLI releases refuse plain HTTP, and the web vault needs a
+      # secure context.
       ROCKET_TLS: '{certs="/pki/vaultwarden.crt",key="/pki/vaultwarden.key"}'
       ROCKET_PORT: "443"
     networks:
+      # vault-internal: reached by bw serve as https://vaultwarden.
+      # vault-web: an ordinary bridge so the web vault can be published.
       - vault-internal
-    # Vaultwarden is on the internal network only. To access the web UI for
-    # credential management, temporarily add a port mapping here and remove
-    # it when done:
-    #   ports:
-    #     - "127.0.0.1:8443:443"
-    # then browse to https://127.0.0.1:8443 (accept the internal-CA warning).
+      - vault-web
+    ports:
+      # The web vault. Loopback by default; set VAULTWARDEN_PUBLISH=0.0.0.0
+      # (in .env) for a reverse proxy or LAN clients — see docs/tls.md.
+      - "${VAULTWARDEN_PUBLISH:-127.0.0.1}:${VAULTWARDEN_PORT:-8443}:443"
     logging:
       driver: json-file
       options:
@@ -169,16 +181,19 @@ services:
       # Module-scoped: "ferrowarden=debug,tower_http=warn"
       # Changing this requires a container restart — intentional, see docs/logging.md.
       FERROWARDEN_LOG_LEVEL: "info"
-      # Outbound target policy. Private/internal addresses are blocked by
-      # default; list the internal hosts or ranges agents need to reach
-      # (comma-separated CIDRs, IPs or host names). bw serve is always blocked.
-      # FERROWARDEN_ALLOWED_TARGETS: "192.168.1.0/24,proxmox.lan"
       # Credentials are only sent to hosts listed in their vault item's URIs.
       # Leave this on; see docs/security.md before changing it.
       FERROWARDEN_ENFORCE_CREDENTIAL_HOSTS: "true"
-      # If a reverse proxy (e.g. Pangolin) sits in front of ferrowarden, set its
-      # address so rate limiting uses the real client IP from X-Forwarded-For.
-      # FERROWARDEN_TRUSTED_PROXIES: "172.16.0.0/12"
+      # The settings below are read from .env (see .env.example); empty means
+      # ferrowarden's default.
+      # Private/internal targets agents may reach (CIDRs, IPs, host names).
+      FERROWARDEN_ALLOWED_TARGETS: "${FERROWARDEN_ALLOWED_TARGETS:-}"
+      # Reverse proxies whose X-Forwarded-For is trusted for rate limiting.
+      FERROWARDEN_TRUSTED_PROXIES: "${FERROWARDEN_TRUSTED_PROXIES:-}"
+      # Optional hard-to-guess path prefix for the API (not /health).
+      FERROWARDEN_API_PREFIX: "${FERROWARDEN_API_PREFIX:-}"
+      # How often new/changed vault items are picked up (seconds).
+      FERROWARDEN_REFRESH_INTERVAL_SECS: "${FERROWARDEN_REFRESH_INTERVAL_SECS:-}"
     networks:
       - vault-internal
       - agent-facing
@@ -186,7 +201,7 @@ services:
       # Bound to all interfaces so agents on other hosts can connect over TLS.
       # TLS is required (default) whenever this port is reachable over a network.
       # Change to 127.0.0.1:3000:3000 if the agent runs on the same host only.
-      - "0.0.0.0:3000:3000"
+      - "${FERROWARDEN_PUBLISH:-0.0.0.0}:${FERROWARDEN_PORT:-3000}:3000"
     depends_on:
       bw-serve:
         # Wait for bw serve to pass its healthcheck before starting ferrowarden.
@@ -214,10 +229,15 @@ services:
 # ── Networks ──────────────────────────────────────────────────────────────────
 networks:
   # Internal network for vault communication. Vaultwarden, bw-serve, and
-  # ferrowarden can reach each other here. Nothing outside Docker can.
+  # ferrowarden can reach each other here. bw serve is only on this network,
+  # so nothing outside Docker can reach it.
   vault-internal:
     driver: bridge
     internal: true
+
+  # Network used only to publish the Vaultwarden web vault.
+  vault-web:
+    driver: bridge
 
   # Network ferrowarden uses to accept agent connections and make outbound
   # API calls to target services. Not internal.

@@ -46,51 +46,73 @@ The agent token itself is scoped only to ferrowarden — it cannot reach Vaultwa
                                         └─────────────────┘
 ```
 
-The agent connects only to Ferrowarden. Vaultwarden and bw serve are never reachable from outside the host/container network.
+The agent connects only to Ferrowarden. You manage credentials in Vaultwarden's web vault (published on `:8443`, or behind your reverse proxy) — it is a full Bitwarden-compatible password manager. bw serve, which holds the unlocked vault, is never reachable from outside the internal Docker network.
 
 ---
 
 ## Quick Start
 
+### Try it in five minutes (test stack)
+
+The setup scripts build a complete throwaway stack — Vaultwarden, bw serve, Ferrowarden and a mock API — with a test account and fake credentials, then write the keys you need to `.env.test`:
+
 ```sh
-# 1. Create secret files
-mkdir secrets
-echo -n "your-vaultwarden-client-id"       > secrets/bw_client_id
-echo -n "your-vaultwarden-client-secret"   > secrets/bw_client_secret
-echo -n "your-vault-master-password"       > secrets/bw_master_password
+./scripts/dev-setup.sh            # Linux/Mac
+.\scripts\dev-setup.ps1           # Windows (PowerShell 7)
+
+# Run the integration tests against it
+set -a; . ./.env.test; set +a
+cargo test --test integration -- --test-threads=1
+```
+
+### Production deployment
+
+The full walkthrough, with Linux and Windows commands for every step, is in **[docs/setup.md](docs/setup.md)**. In outline:
+
+```sh
+# 0. A TLS certificate for Ferrowarden (EC P-256 with a SAN for the host agents use)
+mkdir -p certs
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 365 \
+    -keyout certs/server.key -out certs/server.crt -subj "/CN=ferrowarden" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+
+# 1. Secrets: your future master password and an admin key
+mkdir -p secrets
+touch secrets/bw_client_id secrets/bw_client_secret
+echo -n "your-vault-master-password" > secrets/bw_master_password
 openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48 > secrets/ferrowarden_admin_key
-chmod 600 secrets/*
+# Linux hosts only — the containers run as UID 999 (ferrowarden) and 1000 (bw serve):
+sudo chown 999:999   certs/server.key secrets/bw_master_password secrets/ferrowarden_admin_key
+sudo chown 1000:1000 secrets/bw_client_id secrets/bw_client_secret
+sudo chmod 600 secrets/* && sudo chmod 400 certs/server.key
 
-# 2. Copy and edit config
-cp ferrowarden.toml.example ferrowarden.toml
+# 2. Vaultwarden, with signups enabled just for creating your account.
+#    The web vault is at https://127.0.0.1:8443 (cp .env.example .env to publish
+#    it for a reverse proxy or your LAN and to set its URL).
+VAULTWARDEN_SIGNUPS_ALLOWED=true docker compose up -d vaultwarden
+#    In the web vault: create your account (same master password), then
+#    Settings → Security → Keys → View API key → write client_id and
+#    client_secret into secrets/bw_client_id and secrets/bw_client_secret
+#    (with sudo on Linux, since step 1 chowned them).
+#    Add Login items; each item's Website URI is the only host it may be sent to.
 
-# 3. Start the stack
+# 3. Start everything (this also turns signups back off; the web vault stays
+#    available for managing credentials — enable two-step login on your account)
 docker compose up -d
 
-# 4. Create an agent key
-curl -X POST http://localhost:3000/v1/admin/keys \
+# 4. Create an agent key — the token is shown ONCE
+curl -s -X POST https://localhost:3000/v1/admin/keys --cacert certs/server.crt \
   -H "X-Admin-Key: $(cat secrets/ferrowarden_admin_key)" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "my-agent"}'
-# → {"id":"...","name":"my-agent","token":"...","created_at":"..."}
-# The token is shown ONCE. Store it securely.
+  -H "Content-Type: application/json" -d '{"name": "my-agent"}'
 
-# 5. Use the proxy
-#    The vault item "my_api_token" must have https://api.example.com in its
-#    URIs: credentials are only ever sent to hosts listed on their item.
-curl -X POST http://localhost:3000/v1/forward \
-  -H "X-Agent-Key: <token-from-step-4>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "request": {
-      "method": "GET",
-      "url": "https://api.example.com/status",
-      "headers": {
-        "Authorization": "Bearer {{vault:my_api_token}}"
-      }
-    }
-  }'
+# 5. Use the proxy (the item "my_api_token" must list https://api.example.com as a URI)
+curl -s -X POST https://localhost:3000/v1/forward --cacert certs/server.crt \
+  -H "X-Agent-Key: <token-from-step-4>" -H "Content-Type: application/json" \
+  -d '{"request": {"method": "GET", "url": "https://api.example.com/status",
+       "headers": {"Authorization": "Bearer {{vault:my_api_token}}"}}}'
 ```
+
+Behind a TLS reverse proxy such as Pangolin, see [docs/tls.md](docs/tls.md#pangolin).
 
 ---
 
@@ -140,4 +162,4 @@ See [Security Model](docs/security.md) for the full threat model and design rati
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

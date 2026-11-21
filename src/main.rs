@@ -83,6 +83,13 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::warn!("enforce_credential_hosts = false: any agent can send any credential to any reachable host");
     }
+    if config.api_prefix.is_empty() {
+        tracing::info!("API served at /v1/... (no api_prefix set)");
+    } else {
+        // The prefix is logged deliberately: operators need it to configure
+        // agents and proxies, and it is obscurity rather than a secret key.
+        tracing::info!(api_prefix = %config.api_prefix, "API served under {}/v1/...", config.api_prefix);
+    }
     if config.allow_private_targets {
         tracing::warn!("allow_private_targets = true: agents may reach private/internal addresses (bw serve is still blocked)");
     }

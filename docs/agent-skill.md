@@ -2,7 +2,7 @@
 
 You are connected to a **Ferrowarden** credential proxy. Ferrowarden lets you make API calls that require credentials without you ever receiving the credential values. You send requests with `{{vault:name}}` placeholders; Ferrowarden substitutes real values, forwards the request to the target, and returns the response. Credential values are never in your context.
 
-**Base URL:** `https://<ferrowarden-host>:3000`  
+**Base URL:** `https://<ferrowarden-host>:3000` — or the URL the operator gave you, which may include a path prefix (e.g. `https://ferro.example.com/k7f3q9`). All paths below are relative to it.  
 **Authentication:** Every request requires the header `X-Agent-Key: <your-token>`
 
 ---

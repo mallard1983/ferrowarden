@@ -54,6 +54,16 @@ Point Pangolin at `http://ferrowarden:3000` as the upstream. Pangolin provides t
 
 A `504 Gateway Timeout` from Pangolin usually means it cannot reach the port at all — e.g. Ferrowarden is published on `127.0.0.1` only while Pangolin's connector reaches the host on another interface.
 
+**Putting the site behind SSO.** Agents cannot complete an SSO login, so add a bypass rule (in Pangolin, a resource rule that allows a path without authentication) for the agent endpoints only:
+
+| Path | Who calls it | Bypass SSO? |
+|---|---|---|
+| `{prefix}/v1/forward`, `{prefix}/v1/credentials` | Agents (`X-Agent-Key`) | Yes |
+| `/health` | Monitoring | Optional |
+| `{prefix}/v1/admin/*`, `{prefix}/v1/unlock` | Operator (`X-Admin-Key`) | No — call these from inside your network, or add a separate rule |
+
+`{prefix}` is `api_prefix` (empty by default). Setting a hard-to-guess prefix such as `/k7f3q9` means the bypass rule only matches a path scanners do not know — a cheap extra layer, though the agent key remains the real control.
+
 **Rate limiting behind Pangolin.** Every request reaches Ferrowarden from Pangolin's connector address, so all agents would share one rate-limit bucket. Set `FERROWARDEN_TRUSTED_PROXIES` to that address (for a connector running on the Docker host and reaching a published port, typically the Docker bridge gateway, e.g. `172.17.0.1`) and Ferrowarden will rate-limit by the client IP in `X-Forwarded-For`. Only list the proxy itself — any client in that range could otherwise forge the header.
 
 **Testing through Pangolin with the test stack:** `docker-compose.test-tls.yml` serves the test stack's Ferrowarden over TLS on all interfaces; see the comments in that file.
@@ -66,6 +76,29 @@ The same pattern applies to any TLS-terminating proxy:
 2. Put the proxy on a shared Docker network with Ferrowarden.
 3. Configure the proxy to forward to `http://ferrowarden:3000` (or the internal IP/hostname).
 4. Do **not** expose Ferrowarden's port to the host — only the proxy should reach it.
+
+---
+
+## The Vaultwarden Web Vault
+
+The web vault (your password manager) is published separately from Ferrowarden, on `VAULTWARDEN_PUBLISH:VAULTWARDEN_PORT` (default `127.0.0.1:8443`). It always serves HTTPS, using a certificate from the stack's internal CA (the `internal-pki` volume).
+
+**Behind Pangolin (or any reverse proxy):** in `.env` set
+
+```sh
+VAULTWARDEN_PUBLISH=0.0.0.0
+VAULTWARDEN_DOMAIN=https://vault.example.com
+```
+
+and point the proxy at `https://<this-host>:8443`. Pangolin accepts the internal-CA certificate on the backend and presents its own Let's Encrypt certificate to browsers. Putting the site behind SSO works for the browser; Bitwarden mobile/desktop apps and browser extensions cannot complete an SSO login, so if you use them through the proxy, bypass SSO for `/api/*`, `/identity/*`, `/notifications/*` and `/icons/*` (the web vault UI itself can stay behind SSO). Enable two-step login on your Vaultwarden account either way.
+
+**Directly on your LAN:** set `VAULTWARDEN_PUBLISH` to the host's LAN address (or `0.0.0.0`), add the names and IPs you browse with to `VAULTWARDEN_CERT_SANS` (e.g. `localhost,127.0.0.1,vault.lan,192.168.1.20`), and install the internal CA on your devices to avoid certificate warnings:
+
+```sh
+docker compose run --rm internal-certs                     # (re)issues the cert with the new names
+docker compose cp internal-certs:/pki/ca.crt ./vault-ca.crt  # then trust vault-ca.crt (see Step 4 below)
+docker compose restart vaultwarden
+```
 
 ---
 

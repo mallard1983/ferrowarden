@@ -232,6 +232,7 @@ mod tests {
             max_response_bytes: 1024,
             forward_timeout_secs: 5,
             trusted_proxies: String::new(),
+            api_prefix: String::new(),
         }))
     }
 

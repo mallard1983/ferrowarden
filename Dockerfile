@@ -41,7 +41,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create /data for the agent key file and own it before switching users —
 # Docker named volumes copy the image directory's ownership on first creation,
 # so this ensures the ferrowarden user can write to the volume mount.
-RUN useradd --system --no-create-home --shell /bin/false ferrowarden \
+#
+# UID/GID are pinned to 999 (what --system assigned in earlier images, so
+# existing volumes stay writable). On a Linux host, the files Compose mounts
+# into this container (secrets/ferrowarden_admin_key,
+# secrets/bw_master_password, certs/server.key) keep their host owner and
+# mode, so they must be readable by UID 999 — see docs/setup.md.
+RUN groupadd --system --gid 999 ferrowarden \
+    && useradd --system --uid 999 --gid 999 --no-create-home --shell /bin/false ferrowarden \
     && mkdir /data \
     && chown ferrowarden:ferrowarden /data
 USER ferrowarden

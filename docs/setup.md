@@ -12,7 +12,7 @@ This guide walks through a complete Ferrowarden deployment using Docker Compose.
 ## Prerequisites
 
 - Docker and Docker Compose v2
-- `openssl` (for generating the admin key and TLS certificate)
+- `openssl` (for generating the admin key and TLS certificate; ships with Git for Windows)
 - A host where the agent will also run, or network access from the agent host to port 3000
 
 ### Windows development
@@ -38,68 +38,79 @@ Both scripts perform identical steps. Use `dev-setup.sh` on Linux/Mac and `dev-s
 
 Ferrowarden requires TLS by default. The full TLS reference — including Pangolin/reverse-proxy setup, local CA generation, and installing the CA on Linux and Windows — is in **[docs/tls.md](tls.md)**.
 
-For a quick self-signed cert to get started (the setup scripts do this automatically):
+For a quick self-signed certificate to get started (the setup scripts do this automatically). Use EC P-256 with a `subjectAltName`: Windows' TLS stack (Schannel, used by `curl.exe` and PowerShell) cannot validate Ed25519 certificates, and most clients ignore a certificate's CN without a SAN. Add the host name agents will use (e.g. `DNS:ferro.example.lan`) to the SAN list.
 
 **Linux/Mac:**
 ```sh
 mkdir -p certs
-openssl req -x509 -newkey ed25519 \
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
     -keyout certs/server.key -out certs/server.crt \
-    -days 365 -nodes -subj "/CN=ferrowarden"
+    -days 365 -nodes -subj "/CN=ferrowarden" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+# Ferrowarden runs as UID 999 inside its container, and Docker mounts the key
+# with its host owner and mode, so give UID 999 ownership.
+sudo chown 999:999 certs/server.key
 chmod 400 certs/server.key
 ```
 
 **Windows (PowerShell):**
 ```powershell
 New-Item -ItemType Directory -Force certs | Out-Null
-openssl req -x509 -newkey ed25519 `
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 `
     -keyout certs\server.key -out certs\server.crt `
-    -days 365 -nodes -subj '/CN=ferrowarden' 2>$null
+    -days 365 -nodes -subj '/CN=ferrowarden' `
+    -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' 2>$null
 ```
 
-`openssl` ships with Git for Windows. The `certs/` directory is gitignored — never commit cert files.
+`openssl` ships with Git for Windows. The `certs/` directory is gitignored — never commit cert files. (Docker Desktop on Windows/macOS does not enforce host file ownership, so no `chown` is needed there.)
 
-If the agent and Ferrowarden run on the same host (no network hop), you can skip TLS entirely with `FERROWARDEN_TLS_ENABLED=false`. Ferrowarden logs a prominent warning when this is set. See [Security: TLS](security.md#10-native-tls-transport-security) for when it is acceptable.
+If the agent and Ferrowarden run on the same host (no network hop), you can skip TLS entirely with `FERROWARDEN_TLS_ENABLED=false`. Ferrowarden logs a prominent warning when this is set. See [Security: TLS](security.md#10-native-tls-transport-security) for when it is acceptable. Behind a TLS reverse proxy such as Pangolin, see [docs/tls.md](tls.md#pangolin).
 
 ---
 
 ## Step 1: Create Secret Files
 
-Secret values are mounted as Docker secrets — files on disk that the containers read at startup. Create the `secrets/` directory and populate it. **Do not commit this directory.**
+Secret values are mounted as Docker secrets — files on disk that the containers read at startup. Create the `secrets/` directory and populate it. **Do not commit this directory.** Each file holds only the value — no trailing newline.
 
 **Linux/Mac:**
 ```sh
-mkdir secrets
+mkdir -p secrets
 
-# Leave these empty for now — fill them in after Step 2 (Vaultwarden setup).
-touch secrets/bw_client_id
-touch secrets/bw_client_secret
+# Filled in after Step 2 (Vaultwarden setup).
+touch secrets/bw_client_id secrets/bw_client_secret
 
-# Your Vaultwarden master password
+# The master password you will use for your Vaultwarden account in Step 2
 echo -n "YourMasterPasswordHere" > secrets/bw_master_password
 
-# Generate a strong admin key (48 random alphanumeric characters)
+# A strong admin key (48 random alphanumeric characters)
 openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48 > secrets/ferrowarden_admin_key
 
-chmod 600 secrets/*
+# Docker mounts these with their host owner and mode. Ferrowarden runs as
+# UID 999 and bw serve as UID 1000 inside their containers:
+sudo chown 999:999   secrets/bw_master_password secrets/ferrowarden_admin_key
+sudo chown 1000:1000 secrets/bw_client_id secrets/bw_client_secret
+sudo chmod 600 secrets/*
 ```
+
+You will need `sudo` to write `bw_client_id` and `bw_client_secret` in Step 2 after this, or create them in Step 2 and `chown` them then.
 
 **Windows (PowerShell):**
 ```powershell
 New-Item -ItemType Directory -Force secrets | Out-Null
+# [IO.File] resolves relative paths against the process directory, which a
+# `cd` in PowerShell does not change. Sync it first:
+[Environment]::CurrentDirectory = (Get-Location).Path
 
-# Leave these empty for now — fill them in after Step 2.
+# Filled in after Step 2.
 [IO.File]::WriteAllText("secrets\bw_client_id",    "", [Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText("secrets\bw_client_secret","", [Text.UTF8Encoding]::new($false))
 
-# Your Vaultwarden master password
+# The master password you will use for your Vaultwarden account in Step 2
 [IO.File]::WriteAllText("secrets\bw_master_password", "YourMasterPasswordHere", [Text.UTF8Encoding]::new($false))
 
-# Generate a strong admin key (48 random alphanumeric characters)
+# A strong admin key (48 random alphanumeric characters)
 $chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'.ToCharArray()
-$rng   = [Security.Cryptography.RandomNumberGenerator]::Create()
-$buf   = [byte[]]::new(1)
-$key   = -join (1..48 | ForEach-Object { $rng.GetBytes($buf); $chars[$buf[0] % $chars.Length] })
+$key   = -join (1..48 | ForEach-Object { $chars[[Security.Cryptography.RandomNumberGenerator]::GetInt32($chars.Length)] })
 [IO.File]::WriteAllText("secrets\ferrowarden_admin_key", $key, [Text.UTF8Encoding]::new($false))
 ```
 
@@ -109,47 +120,44 @@ Secret files must have no trailing newline — `[IO.File]::WriteAllText` with `U
 
 ## Step 2: First-Time Vaultwarden Setup
 
-Start Vaultwarden alone to register your account:
+Vaultwarden is your password manager: its web vault is where you create and manage the credentials agents use (and any other passwords — Bitwarden apps and browser extensions work with it too). The web vault is published on **https://127.0.0.1:8443** by default. To publish it elsewhere — on all interfaces for a reverse proxy such as Pangolin, or on your LAN — copy [`.env.example`](../.env.example) to `.env` and set `VAULTWARDEN_PUBLISH`, `VAULTWARDEN_DOMAIN` and, for direct LAN access, `VAULTWARDEN_CERT_SANS`. See [docs/tls.md](tls.md#the-vaultwarden-web-vault).
+
+New signups are disabled except while you create your first account. Start Vaultwarden with signups enabled:
 
 ```sh
-docker compose up -d vaultwarden
+VAULTWARDEN_SIGNUPS_ALLOWED=true docker compose up -d vaultwarden
+```
+```powershell
+$env:VAULTWARDEN_SIGNUPS_ALLOWED = 'true'; docker compose up -d vaultwarden; Remove-Item env:VAULTWARDEN_SIGNUPS_ALLOWED
 ```
 
-This first runs the one-shot `internal-certs` service, which creates a private CA and Vaultwarden's certificate in the `internal-pki` volume. Vaultwarden serves **HTTPS on port 443** inside Docker, because the Bitwarden CLI that `bw serve` runs refuses plain-HTTP servers.
+This first runs the one-shot `internal-certs` service, which creates a private CA and Vaultwarden's certificate in the `internal-pki` volume. Vaultwarden serves **HTTPS**, because the Bitwarden CLI that `bw serve` runs refuses plain-HTTP servers.
 
-Access the web UI. If you are on the same host:
+Browse to **https://127.0.0.1:8443** (or your `VAULTWARDEN_DOMAIN`). Browsing directly, the browser warns about the certificate because it is issued by the internal CA; accept it, or install `ca.crt` from the `internal-pki` volume as a trusted CA (`docker compose cp internal-certs:/pki/ca.crt .` after a run). Behind a reverse proxy with its own certificate there is no warning.
 
-```sh
-# Temporarily expose the port for initial setup
-docker compose exec vaultwarden sh -c "echo 'Vaultwarden is running'"
-# Or add a temporary port mapping to docker-compose.yml under vaultwarden:
-#   ports:
-#     - "127.0.0.1:8443:443"
-# then browse to https://127.0.0.1:8443. The browser warns about the
-# certificate (it is issued by the internal CA for the name "vaultwarden");
-# accept it for this one-time setup, then remove the port mapping.
-```
+In the web vault:
+1. **Create account** with your email and the master password you wrote to `secrets/bw_master_password`.
+2. Go to **Settings → Security → Keys** and click **View API key**. Enter your master password.
+3. Write the **client_id** and **client_secret** to the secrets files:
 
-In the web UI:
-1. Create an account using the email and master password you wrote to `secrets/bw_master_password`.
-2. Navigate to **Account Settings → Security → API Key**.
-3. Click **View API Key** and authenticate.
-4. Copy the **client_id** and **client_secret** values.
+   ```sh
+   echo -n "user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" > secrets/bw_client_id
+   echo -n "YourClientSecretHere" > secrets/bw_client_secret
+   ```
+   ```powershell
+   [IO.File]::WriteAllText("secrets\bw_client_id",     "user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", [Text.UTF8Encoding]::new($false))
+   [IO.File]::WriteAllText("secrets\bw_client_secret", "YourClientSecretHere", [Text.UTF8Encoding]::new($false))
+   ```
 
-```sh
-echo -n "user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" > secrets/bw_client_id
-echo -n "YourClientSecretHere" > secrets/bw_client_secret
-```
+4. Add at least one credential as a **Login** item (**Add → Login**). You can add more later.
 
-Add at least one credential to your vault via the web UI, as a **Login** item. You can add more later.
+   - The item **name** is what agents use in `{{vault:name}}` placeholders. Names must be unique across login items — a duplicated name is refused as ambiguous.
+   - The item **password** is the value that gets substituted.
+   - The item **Website (URI)** decides where the credential may be sent. Add one URI per service it belongs to, e.g. `https://api.example.com` or `https://proxmox.lan:8006`. Ferrowarden refuses to send a credential to any other host, and an item with no URIs cannot be used. See [Security Model §13](security.md#13-credential-host-binding) for the matching rules.
 
-- The item **name** is what agents use in `{{vault:name}}` placeholders. Names must be unique across login items — a duplicated name is refused as ambiguous.
-- The item **password** is the value that gets substituted.
-- The item **URIs** decide where the credential may be sent. Add one URI per service it belongs to, e.g. `https://api.example.com` or `https://proxmox.lan:8006`. Ferrowarden refuses to send a credential to any other host, and an item with no URIs cannot be used. See [Security Model §13](security.md#13-credential-host-binding) for the matching rules.
+   If the service lives on your private network (e.g. `192.168.1.0/24` or `proxmox.lan`), also add it to `allowed_targets` (`FERROWARDEN_ALLOWED_TARGETS`) — private and internal addresses are blocked by default.
 
-If the service lives on your private network (e.g. `192.168.1.0/24` or `proxmox.lan`), also add it to `allowed_targets` (`FERROWARDEN_ALLOWED_TARGETS`) — private and internal addresses are blocked by default.
-
-New items and URI changes are picked up automatically within `refresh_interval_secs` (default 5 minutes).
+New items and URI changes are picked up automatically within `refresh_interval_secs` (default 5 minutes) — this is the day-to-day workflow: add or change a credential in the web vault, and agents can use it shortly after, without ever seeing it.
 
 ---
 
@@ -159,7 +167,9 @@ New items and URI changes are picked up automatically within `refresh_interval_s
 docker compose up -d
 ```
 
-Check that all three services started cleanly:
+Because `VAULTWARDEN_SIGNUPS_ALLOWED` is not set this time, this also restarts Vaultwarden with signups disabled. The web vault stays available for managing your credentials. Turn on two-step login for your account (**Settings → Security → Two-step login**) now that it is reachable.
+
+Check that all services started cleanly:
 
 ```sh
 docker compose ps
@@ -172,6 +182,7 @@ Ferrowarden's log should show:
 {"level":"INFO","message":"Ferrowarden starting"}
 {"level":"INFO","message":"File unlock mode: reading password from ..."}
 {"level":"INFO","message":"Vault unlocked via file mode"}
+{"level":"INFO","message":"Credential host binding enforced: ..."}
 {"level":"INFO","message":"Listening on https://0.0.0.0:3000 (TLS)"}
 ```
 
@@ -186,11 +197,11 @@ The admin key (from `secrets/ferrowarden_admin_key`) is for operator use only. C
 ```sh
 ADMIN_KEY="$(cat secrets/ferrowarden_admin_key)"
 
-curl -s -X POST https://<ferrowarden-host>:3000/v1/admin/keys \
+curl -s -X POST https://localhost:3000/v1/admin/keys \
   -H "X-Admin-Key: $ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name": "homelab-agent"}' \
-  --cacert certs/server.crt    # omit if using a trusted CA cert
+  --cacert certs/server.crt    # omit if the certificate is from a trusted CA
 ```
 
 Response:
@@ -209,6 +220,8 @@ Response:
 
 ## Step 5: Verify the Setup
 
+This walkthrough assumes the Login item from Step 2 is named `httpbin_token`, with any password and the URI `https://httpbin.org` — httpbin is a public service that echoes requests back, which makes the protections visible.
+
 List available credentials (what the agent sees):
 
 ```sh
@@ -216,33 +229,51 @@ AGENT_TOKEN="the-token-from-step-4"
 
 curl -s https://localhost:3000/v1/credentials \
   -H "X-Agent-Key: $AGENT_TOKEN" \
-  --cacert certs/server.crt    # omit if using a trusted CA cert
+  --cacert certs/server.crt
 ```
 
 Response:
 ```json
-["my_proxmox_token", "nas_api_key", "plex_token"]
+["httpbin_token"]
 ```
 
-Make a test proxy request:
+Make a proxied request. `/bearer` returns the token it received:
 
 ```sh
 curl -s -X POST https://localhost:3000/v1/forward \
   -H "X-Agent-Key: $AGENT_TOKEN" \
-  --cacert certs/server.crt \
   -H "Content-Type: application/json" \
+  --cacert certs/server.crt \
   -d '{
     "request": {
       "method": "GET",
-      "url": "https://httpbin.org/get",
-      "headers": {
-        "X-Test-Header": "{{vault:my_proxmox_token}}"
-      }
+      "url": "https://httpbin.org/bearer",
+      "headers": { "Authorization": "Bearer {{vault:httpbin_token}}" }
     }
   }'
 ```
 
-The response will include httpbin's echo of your request. The `X-Test-Header` will contain the real credential value as sent to httpbin — but notice it is scrubbed from any credential-shaped patterns in the response before being returned to you.
+```json
+{"status":200,"headers":{...},"body":"{\n  \"authenticated\": true, \n  \"token\": \"[REDACTED]\"\n}\n","body_encoding":"utf8"}
+```
+
+httpbin received the real value (`"authenticated": true`), but every copy of it in the response is replaced with `[REDACTED]` before it reaches the agent.
+
+Now try sending the same credential to a host that is not in its URIs:
+
+```sh
+curl -s -X POST https://localhost:3000/v1/forward \
+  -H "X-Agent-Key: $AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  --cacert certs/server.crt \
+  -d '{"request":{"method":"GET","url":"https://postman-echo.com/get","headers":{"X-Key":"{{vault:httpbin_token}}"}}}'
+```
+
+```json
+{"error":"Credential httpbin_token may not be sent to postman-echo.com: the target does not match any URI on the vault item"}
+```
+
+The request is refused with `403` and nothing is sent.
 
 ---
 
@@ -269,6 +300,7 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `refresh_interval_secs` | `FERROWARDEN_REFRESH_INTERVAL_SECS` | `300` — sync/refresh interval; `0` disables |
 | `max_response_bytes` | `FERROWARDEN_MAX_RESPONSE_BYTES` | `10485760` (10 MiB) |
 | `forward_timeout_secs` | `FERROWARDEN_FORWARD_TIMEOUT_SECS` | `30` |
+| `api_prefix` | `FERROWARDEN_API_PREFIX` | *(empty)* — path prefix for all API routes except `/health`, e.g. `/k7f3q9` |
 | `trusted_proxies` | `FERROWARDEN_TRUSTED_PROXIES` | *(empty)* — CIDRs/IPs of reverse proxies whose `X-Forwarded-For` is trusted for rate limiting |
 | *(env only)* | `FERROWARDEN_LOG_LEVEL` | `info` — requires restart to change |
 

@@ -98,13 +98,19 @@ echo "[1b/7] Generating TLS certificate..."
 
 if [ ! -f ./certs/server.crt ] || [ ! -f ./certs/server.key ]; then
     if command -v openssl > /dev/null 2>&1; then
-        MSYS_NO_PATHCONV=1 openssl req -x509 -newkey ed25519 \
+        # EC P-256 (not Ed25519): Windows Schannel clients cannot validate
+        # Ed25519 certificates. Most modern clients require the SAN.
+        MSYS_NO_PATHCONV=1 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
             -keyout ./certs/server.key \
             -out ./certs/server.crt \
             -days 365 -nodes \
             -subj "/CN=ferrowarden-test" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
             > /dev/null 2>&1
-        chmod 400 ./certs/server.key
+        # Dev-only throwaway key: world-readable so the container user (UID 999)
+        # can read it through the bind mount (docker-compose.test-tls.yml).
+        # Production keys must instead be chowned to 999 — see docs/setup.md.
+        chmod 644 ./certs/server.key
         echo "  Generated: certs/server.crt + certs/server.key (self-signed, 1 year)"
         echo "  NOTE: This is a dev-only certificate. Import certs/server.crt into"
         echo "        your test HTTP client to skip certificate verification, or use"

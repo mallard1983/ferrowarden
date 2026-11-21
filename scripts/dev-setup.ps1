@@ -26,7 +26,16 @@
 
 $ErrorActionPreference = 'Stop'
 
-$secretsDir = '.\secrets'
+# Always operate from the repository root, whatever directory the script was
+# started from, and keep .NET's working directory in step with PowerShell's.
+# .NET file APIs ([IO.File], [IO.Path]::GetFullPath) resolve relative paths
+# against the process directory, not PowerShell's location, so without this
+# a run started elsewhere could check one secrets\ folder and write another.
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+Set-Location $repoRoot
+[System.Environment]::CurrentDirectory = $repoRoot
+
+$secretsDir = Join-Path $repoRoot 'secrets'
 $ferroUrl   = if ($env:FERROWARDEN_URL) { $env:FERROWARDEN_URL } else { 'http://localhost:3000' }
 
 function Write-Step([string]$msg) { Write-Host ""; Write-Host $msg }
@@ -40,7 +49,8 @@ function Invoke-Compose {
 # Write a file as UTF-8 without BOM and without a trailing newline.
 # Docker reads secrets with cat, so a trailing newline would break the value.
 function Write-Secret([string]$path, [string]$value) {
-    $fullPath = [System.IO.Path]::GetFullPath($path)
+    # Resolve with PowerShell's path rules, not .NET's process directory.
+    $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
     [System.IO.File]::WriteAllText($fullPath, $value, [System.Text.UTF8Encoding]::new($false))
 }
 
@@ -105,10 +115,14 @@ if (-not (Test-Path $certPath) -or -not (Test-Path $keyPath)) {
     if ($openssl) {
         # -subj with a forward-slash subject works on Windows openssl too.
         # Redirect stderr to suppress the "Generating key" noise.
-        & openssl req -x509 -newkey ed25519 `
+        # EC P-256 (not Ed25519): Windows Schannel — used by curl.exe and
+        # PowerShell — cannot validate Ed25519 certificates. The SAN is required
+        # by most modern clients; CN alone is ignored.
+        & openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 `
             -keyout $keyPath -out $certPath `
             -days 365 -nodes `
-            -subj '/CN=ferrowarden-test' 2>$null
+            -subj '/CN=ferrowarden-test' `
+            -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' 2>$null
         Write-Sub 'Generated: certs/server.crt + certs/server.key (self-signed, 1 year)'
         Write-Sub 'NOTE: Import certs/server.crt into your HTTP client to skip cert errors.'
     } else {

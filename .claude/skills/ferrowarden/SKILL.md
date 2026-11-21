@@ -6,6 +6,8 @@ user-invocable: false
 
 ## Quick start
 
+All paths are relative to the Ferrowarden base URL the operator configured. It may include a path prefix (e.g. `https://ferro.example.com/k7f3q9`); if so, `/v1/credentials` means `https://ferro.example.com/k7f3q9/v1/credentials`.
+
 ```
 GET /v1/credentials          -- list what names are available
 X-Agent-Key: <token>
