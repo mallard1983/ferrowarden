@@ -170,7 +170,9 @@ pub fn validate_credentials(patterns: Vec<String>) -> FerroResult<Vec<String>> {
             "credentials may have at most {MAX_PATTERNS} patterns"
         )));
     }
-    let mut out: Vec<String> = Vec::with_capacity(patterns.len());
+    // No pre-sized allocation from the request-controlled length (the bound
+    // above already holds, but growing on demand keeps that obvious).
+    let mut out: Vec<String> = Vec::new();
     for (i, pattern) in patterns.into_iter().enumerate() {
         let chars = pattern.chars().count();
         if chars == 0 || chars > MAX_PATTERN_CHARS {
