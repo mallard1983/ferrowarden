@@ -27,8 +27,12 @@ COPY bw-register.js /home/node/bw-register.js
 COPY bw-seed.js /home/node/bw-seed.js
 
 # node:*-slim images ship with a non-root "node" user (UID 1000).
-# bw stores its config in ~/.config/Bitwarden CLI — that directory must be
-# writable, so we run as the node user, not root.
+# bw stores its config in ~/.config/Bitwarden CLI. Create that directory now
+# and chown it before switching users — Docker named volumes copy the image
+# directory's ownership on first creation, so this ensures the node user can
+# write to the volume mount.
+RUN mkdir -p "/home/node/.config/Bitwarden CLI" \
+    && chown -R node:node "/home/node/.config"
 USER node
 WORKDIR /home/node
 

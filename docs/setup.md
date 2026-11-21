@@ -145,7 +145,7 @@ The admin key (from `secrets/ferrowarden_admin_key`) is for operator use only. C
 ```sh
 ADMIN_KEY="$(cat secrets/ferrowarden_admin_key)"
 
-curl -s -X POST https://localhost:3000/v1/admin/keys \
+curl -s -X POST https://<ferrowarden-host>:3000/v1/admin/keys \
   -H "X-Admin-Key: $ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name": "homelab-agent"}' \
