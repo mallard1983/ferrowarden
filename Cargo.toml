@@ -66,7 +66,7 @@ base64 = "0.22"
 
 # Per-IP token bucket rate limiting. Keyed limiter maps source IP → token bucket.
 # Using 0.6 — verify compatibility before upgrading to 0.7+ (breaking API changes possible).
-governor = "0.6"
+governor = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
