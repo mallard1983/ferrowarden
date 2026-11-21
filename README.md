@@ -136,6 +136,7 @@ Behind a TLS reverse proxy such as Pangolin, see [docs/tls.md](docs/tls.md#pango
 | [Logging](docs/logging.md) | Log levels, Loki, Wazuh, retention |
 | [TLS](docs/tls.md) | Pangolin reverse proxy and self-signed CA setup |
 | [Agent Skill](docs/agent-skill.md) | Reference doc for agents using the proxy (non-skill format) |
+| [Roadmap](ROADMAP.md) | Planned work: field placeholders, scoping, approvals, MCP, agent SSH client |
 | [Changelog](CHANGELOG.md) | Release notes and upgrade steps |
 | [Security Policy](SECURITY.md) | How to report a vulnerability privately |
 | [Contributing](CONTRIBUTING.md) | Development setup, checks, and pull request guidelines |

@@ -16,7 +16,7 @@ Open an issue with:
 - how to reproduce it (configuration, the `/v1/forward` payload, logs — **with any credential values, admin keys and agent tokens removed**),
 - your platform (Linux / Windows / macOS, Docker version) and the Ferrowarden version or commit.
 
-For larger changes, open an issue to discuss the approach before writing code.
+For larger changes, open an issue to discuss the approach before writing code. Looking for something to work on? The [roadmap](ROADMAP.md) links issues with design notes and acceptance criteria.
 
 ## Development setup
 
