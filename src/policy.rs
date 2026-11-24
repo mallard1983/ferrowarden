@@ -108,6 +108,21 @@ impl KeyPolicy {
         }
     }
 
+    /// Would replacing this policy with `draft` give the key more access? True
+    /// if `draft` allows a method this one does not, or has a credential
+    /// pattern that this policy's patterns do not cover. The pattern test is
+    /// conservative and independent of the vault: a pattern is covered if one
+    /// of ours matches it read literally (its `*` characters as plain text),
+    /// which holds exactly when every name the pattern can match is matched.
+    /// So `uptime_a*` is covered by `uptime_*`, `up*` is not.
+    pub fn is_widened_by(&self, draft: &KeyPolicy) -> bool {
+        let methods_wider = METHODS
+            .iter()
+            .any(|m| draft.allows_method(m) && !self.allows_method(m));
+        let patterns_wider = draft.credentials.iter().any(|p| !self.allows_credential(p));
+        methods_wider || patterns_wider
+    }
+
     /// `{ "credentials": [...], "methods": [...] }`, as shown in API output
     /// and events.
     pub fn to_json(&self) -> Value {
@@ -363,6 +378,40 @@ pub fn some_not_null<'de, T: serde::Deserialize<'de>, D: Deserializer<'de>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pol(c: &[&str], m: &[&str]) -> KeyPolicy {
+        KeyPolicy::from_raw(
+            c.iter().map(|s| s.to_string()).collect(),
+            m.iter().map(|s| s.to_string()).collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn widening_is_detected_for_methods_and_patterns() {
+        let saved = pol(&["uptime_*"], &["GET"]);
+        // Same, narrower, or covered: not widening.
+        assert!(!saved.is_widened_by(&saved));
+        assert!(!saved.is_widened_by(&pol(&["uptime_api"], &["GET"])));
+        assert!(!saved.is_widened_by(&pol(&["uptime_a*"], &["GET"])));
+        assert!(!saved.is_widened_by(&pol(&[], &[])));
+        assert!(!saved.is_widened_by(&pol(&["uptime_*"], &[])));
+        // Wider patterns or methods.
+        assert!(saved.is_widened_by(&pol(&["up*"], &["GET"])));
+        assert!(saved.is_widened_by(&pol(&["*"], &["GET"])));
+        assert!(saved.is_widened_by(&pol(&["uptime_*", "other"], &["GET"])));
+        assert!(saved.is_widened_by(&pol(&["uptime_*"], &["GET", "POST"])));
+        assert!(saved.is_widened_by(&pol(&["uptime_*"], &["*"])));
+        // `*` covers everything; all methods cover each method.
+        let all = pol(&["*"], &["*"]);
+        assert!(!all.is_widened_by(&pol(&["a*", "b"], &["GET", "DELETE"])));
+        assert!(!all.is_widened_by(&all));
+        // A deny-all (legacy) key is widened by anything non-empty.
+        let none = KeyPolicy::default();
+        assert!(none.is_widened_by(&pol(&["a"], &[])));
+        assert!(none.is_widened_by(&pol(&[], &["GET"])));
+        assert!(!none.is_widened_by(&pol(&[], &[])));
+    }
     use crate::api::strict_json::parse_strict;
     use serde::Deserialize;
 

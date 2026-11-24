@@ -71,6 +71,39 @@ pub enum Action {
 }
 
 impl Action {
+    /// Every action, in the order the audit view lists them. Keep in step
+    /// with the enum: the `all_actions_are_listed` test counts the variants.
+    pub const ALL: [Action; 23] = [
+        Action::Forward,
+        Action::CredentialsList,
+        Action::AgentAuth,
+        Action::AdminAuth,
+        Action::RateLimited,
+        Action::RequestRejected,
+        Action::KeyCreate,
+        Action::KeyRevoke,
+        Action::KeyList,
+        Action::KeyPolicyChange,
+        Action::PolicyPreview,
+        Action::AuditRead,
+        Action::StatusRead,
+        Action::VaultUnlock,
+        Action::VaultLock,
+        Action::VaultSync,
+        Action::Startup,
+        Action::Shutdown,
+        Action::EventsDropped,
+        Action::UiLogin,
+        Action::UiLogout,
+        Action::UiSessionExpired,
+        Action::UiTwoFactorEmailSent,
+    ];
+
+    /// The action whose wire name (`as_str`) is `name`.
+    pub fn from_name(name: &str) -> Option<Action> {
+        Action::ALL.into_iter().find(|a| a.as_str() == name)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Action::Forward => "forward",
@@ -201,6 +234,22 @@ pub enum Outcome {
     Success,
     Failure,
     Unknown,
+}
+
+impl Outcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Success => "success",
+            Outcome::Failure => "failure",
+            Outcome::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Outcome> {
+        [Outcome::Success, Outcome::Failure, Outcome::Unknown]
+            .into_iter()
+            .find(|o| o.as_str() == name)
+    }
 }
 
 /// `event.reason`: a fixed code, never free text from a request. Extend only
@@ -643,6 +692,47 @@ mod tests {
             policy: Default::default(),
             policy_set: true,
         }
+    }
+
+    #[test]
+    fn all_actions_are_listed() {
+        // A new variant must be added to `Action::ALL`: this match stops
+        // compiling until it is handled here, and the count then fails
+        // until the list is extended.
+        fn index(a: Action) -> usize {
+            match a {
+                Action::Forward => 0,
+                Action::CredentialsList => 1,
+                Action::AgentAuth => 2,
+                Action::AdminAuth => 3,
+                Action::RateLimited => 4,
+                Action::RequestRejected => 5,
+                Action::KeyCreate => 6,
+                Action::KeyRevoke => 7,
+                Action::KeyList => 8,
+                Action::KeyPolicyChange => 9,
+                Action::PolicyPreview => 10,
+                Action::AuditRead => 11,
+                Action::StatusRead => 12,
+                Action::VaultUnlock => 13,
+                Action::VaultLock => 14,
+                Action::VaultSync => 15,
+                Action::Startup => 16,
+                Action::Shutdown => 17,
+                Action::EventsDropped => 18,
+                Action::UiLogin => 19,
+                Action::UiLogout => 20,
+                Action::UiSessionExpired => 21,
+                Action::UiTwoFactorEmailSent => 22,
+            }
+        }
+        for (i, a) in Action::ALL.into_iter().enumerate() {
+            assert_eq!(index(a), i, "{a:?}");
+            assert_eq!(Action::from_name(a.as_str()), Some(a));
+        }
+        assert_eq!(Action::from_name("nope"), None);
+        assert_eq!(Outcome::from_name("success"), Some(Outcome::Success));
+        assert_eq!(Outcome::from_name("Success"), None);
     }
 
     #[test]

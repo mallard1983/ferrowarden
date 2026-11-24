@@ -9,6 +9,8 @@
 #     tests/seed/credentials.json
 #   - the test agent key and admin key from .env.test
 #   - the vault master password from secrets/bw_master_password (if present)
+#   - agent tokens the integration tests created during the run, from
+#     target/integration-secrets.txt (or $FERROWARDEN_GATE_EXTRA_SECRETS_FILE)
 # then greps (fixed-string) for each of them in
 #   - `docker compose -f docker-compose.test.yml logs ferrowarden`
 #   - the event file(s) copied out of the container with `docker compose cp`
@@ -98,6 +100,21 @@ done
 if [ -f "$MASTER_PW_FILE" ]; then
     v="$(tr -d '\r\n' < "$MASTER_PW_FILE")"
     [ -z "$v" ] || printf 'bw_master_password\t%s\n' "$v" >> "$secrets"
+fi
+
+# Secrets generated during the run (agent tokens created through the UI by the
+# integration tests): one value per line, in a file the tests write. Set
+# FERROWARDEN_GATE_EXTRA_SECRETS_FILE to read another file.
+EXTRA_SECRETS_FILE="${FERROWARDEN_GATE_EXTRA_SECRETS_FILE:-target/integration-secrets.txt}"
+if [ -f "$EXTRA_SECRETS_FILE" ]; then
+    n=0
+    while IFS= read -r v || [ -n "$v" ]; do
+        v="$(printf '%s' "$v" | tr -d '\r')"
+        [ "${#v}" -ge 6 ] || continue
+        n=$((n + 1))
+        printf 'run_secret_%s\t%s\n' "$n" "$v" >> "$secrets"
+    done < "$EXTRA_SECRETS_FILE"
+    echo "Including $n run-generated secret(s) from $EXTRA_SECRETS_FILE."
 fi
 
 count="$(wc -l < "$secrets" | tr -d ' ')"

@@ -166,6 +166,9 @@ pub fn origin_ok(headers: &HeaderMap, transport: &Transport) -> bool {
 
 /// Largest form body accepted (a master password plus tokens fits easily).
 pub const MAX_FORM_BYTES: usize = 8 * 1024;
+/// Largest form body on the key pages: up to 256 patterns of 256 characters,
+/// percent-encoded, plus the request-check fields.
+pub const MAX_ADMIN_FORM_BYTES: usize = 160 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormError {
@@ -229,7 +232,12 @@ fn into_string(mut bytes: Zeroizing<Vec<u8>>) -> Option<Zeroizing<String>> {
 /// Parse an `application/x-www-form-urlencoded` body into pairs, accepting only
 /// the `allowed` field names, each at most once.
 pub fn parse_form(body: &[u8], allowed: &[&str]) -> Result<Form, FormError> {
-    if body.len() > MAX_FORM_BYTES {
+    parse_form_limited(body, allowed, MAX_FORM_BYTES)
+}
+
+/// [`parse_form`] with a different size limit.
+pub fn parse_form_limited(body: &[u8], allowed: &[&str], limit: usize) -> Result<Form, FormError> {
+    if body.len() > limit {
         return Err(FormError::TooLarge);
     }
     let mut fields: Vec<(String, Zeroizing<String>)> = Vec::new();
@@ -287,6 +295,43 @@ pub fn is_form_content_type(headers: &HeaderMap) -> bool {
         })
 }
 
+// ── The `next` redirect target ────────────────────────────────────────────────
+
+/// Longest accepted `next`.
+const MAX_NEXT_CHARS: usize = 200;
+
+/// Validate a post-sign-in redirect target. Only a plain path inside the UI
+/// is accepted: it starts with `/ui/`, is at most 200 characters, and
+/// consists solely of ASCII letters, digits and `/ _ - .`. That excludes
+/// everything an open redirect needs: a scheme or host (`:`, `@`), a second
+/// slash (`//`), a backslash, percent-encoding (so `%2f%2f` and `%5c` cannot
+/// decode into those later), whitespace and control characters, and query or
+/// fragment. `.` and `..` segments are refused, and so are the sign-in and
+/// static-file paths (a redirect there would loop or do nothing).
+///
+/// Returns the path unchanged, or `None`: callers then use `/ui/`.
+pub fn safe_next(raw: &str) -> Option<String> {
+    if raw.len() > MAX_NEXT_CHARS || !raw.starts_with("/ui/") {
+        return None;
+    }
+    if !raw
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'-' | b'.'))
+    {
+        return None;
+    }
+    if raw.contains("//") {
+        return None;
+    }
+    if matches!(raw.split('/').nth(2), Some("login") | Some("static")) {
+        return None;
+    }
+    if raw.split('/').any(|seg| seg == "." || seg == "..") {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
 // ── Security headers ──────────────────────────────────────────────────────────
 
 /// No scripts at all in phase 1: `default-src 'none'`, CSS from this origin.
@@ -326,6 +371,75 @@ pub fn apply_security_headers(headers: &mut HeaderMap, secure: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_next_accepts_ui_paths() {
+        for ok in [
+            "/ui/",
+            "/ui/keys",
+            "/ui/keys/new",
+            "/ui/keys/0b5c1c88-ad3f-4f43-9a73-1e7d0cbd2b61",
+            "/ui/keys/0b5c1c88-ad3f-4f43-9a73-1e7d0cbd2b61/revoke",
+            "/ui/audit",
+            "/ui/a.b_c-d",
+        ] {
+            assert_eq!(safe_next(ok).as_deref(), Some(ok), "{ok}");
+        }
+    }
+
+    #[test]
+    fn safe_next_refuses_open_redirect_payloads() {
+        let long = format!("/ui/{}", "a".repeat(200));
+        let bad: Vec<&str> = vec![
+            "",
+            "/",
+            "/ui",
+            "ui/keys",
+            "//evil.com",
+            "///evil.com",
+            "/\\evil.com",
+            "/\\\\evil.com",
+            "/ui/\\evil.com",
+            "/ui//evil.com",
+            "/ui/..",
+            "/ui/../x",
+            "/ui/keys/../../x",
+            "/ui/./keys",
+            "/ui/keys/..",
+            "/ui/%2e%2e/x",
+            "/ui/%2f%2fevil.com",
+            "/ui/%2F%2Fevil.com",
+            "/ui/%5cevil.com",
+            "/ui/%252f",
+            "/ui/keys%00",
+            "https://evil.com",
+            "http://evil.com/ui/",
+            "javascript:alert(1)",
+            "data:text/html,x",
+            "/ui/keys?x=1",
+            "/ui/keys#frag",
+            "/ui/keys\n",
+            "/ui/keys\r\nLocation: https://evil.com",
+            "/ui/ke ys",
+            "/ui/k\u{e9}ys",
+            "/ui/keys\u{ff0f}\u{ff0f}evil.com",
+            "/ui/a:b",
+            "/ui/@evil.com",
+            "/ui/login",
+            "/ui/login/2fa",
+            "/ui/static/app.css",
+            "/UI/keys",
+            &long,
+        ];
+        for b in bad {
+            assert_eq!(safe_next(b), None, "{b:?}");
+        }
+        // The length limit is inclusive at 200.
+        let max = format!("/ui/{}", "a".repeat(196));
+        assert_eq!(max.len(), 200);
+        assert!(safe_next(&max).is_some());
+        assert_eq!(safe_next(&format!("{max}a")), None);
+    }
 
     fn h(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();

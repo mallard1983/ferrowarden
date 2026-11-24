@@ -2872,3 +2872,179 @@ async fn test_ui_and_api_are_separate_listeners() {
         assert_eq!(r.status, 404, "{path} must not exist on the UI port");
     }
 }
+
+// ── Admin web UI (phase 2: keys, policy editor, revoke, audit) ────────────────
+
+/// Where tests leave secret values for `scripts/check-no-secrets.sh` to scan
+/// for (the gate cannot know a token that was generated during the run).
+fn extra_secrets_file() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/integration-secrets.txt")
+}
+
+fn record_secret_for_gate(value: &str) {
+    use std::io::Write;
+    let path = extra_secrets_file();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("cannot write the gate's extra secrets file");
+    writeln!(f, "{value}").unwrap();
+}
+
+/// The agent's view of `/v1/credentials` with `token`.
+async fn credentials_for(env: &TestEnv, token: &str) -> (u16, Vec<String>) {
+    let resp = env
+        .client
+        .get(format!("{}/v1/credentials", env.fw_url))
+        .header("X-Agent-Key", token)
+        .send()
+        .await
+        .expect("request failed");
+    let status = resp.status().as_u16();
+    let mut names: Vec<String> = if status == 200 {
+        resp.json().await.unwrap()
+    } else {
+        Vec::new()
+    };
+    names.sort();
+    (status, names)
+}
+
+/// The whole operator flow through the UI with one real sign-in: create a key
+/// (token shown once), use it, widen its policy with Check policy and the
+/// confirmation step, revoke it, and find all of it in the audit page. The
+/// token must be in no event; the gate script scans the logs and event file
+/// for it afterwards.
+#[tokio::test]
+async fn test_ui_key_lifecycle() {
+    let Some(env) = TestEnv::load() else { return };
+    let _ = std::fs::remove_file(extra_secrets_file());
+    let mut b = env.ui_browser();
+    let r = b.sign_in(&master_password()).await;
+    assert_eq!(r.status, 303, "sign-in");
+
+    // Create.
+    let form = b.get("/ui/keys/new").await;
+    assert_eq!(form.status, 200);
+    let csrf = form.csrf();
+    let created = b
+        .post(
+            "/ui/keys/new",
+            &[
+                ("csrf", &csrf),
+                ("name", "ui-lifecycle"),
+                ("credentials", "test_api_token\nnas_*"),
+                ("m_GET", "1"),
+            ],
+        )
+        .await;
+    assert_eq!(created.status, 200, "create");
+    assert!(created.header("location").is_empty());
+    assert!(created.body.contains("This token will not be shown again"));
+    let marker = "readonly value=\"";
+    let start = created.body.find(marker).expect("token field") + marker.len();
+    let token = created.body[start..start + created.body[start..].find('"').unwrap()].to_string();
+    assert_eq!(token.len(), 48);
+    record_secret_for_gate(&token);
+
+    // The new token sees only its patterns.
+    let (status, names) = credentials_for(&env, &token).await;
+    assert_eq!(status, 200);
+    assert_eq!(names, vec!["nas_api_key", "test_api_token"]);
+
+    // Its id, from the admin API.
+    let keys: Vec<Value> = env
+        .admin_call("GET", "/v1/admin/keys", None)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let id = keys
+        .iter()
+        .find(|k| k["name"] == "ui-lifecycle")
+        .expect("key listed")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Check policy with a wider draft, then Save with confirmation.
+    let page = b.get(&format!("/ui/keys/{id}")).await;
+    assert_eq!(page.status, 200);
+    let csrf = page.csrf();
+    let draft = [
+        ("csrf", csrf.as_str()),
+        ("credentials", "test_api_token\nnas_*\nplex_token"),
+        ("m_GET", "1"),
+    ];
+    let mut check = draft.to_vec();
+    check.push(("op", "check"));
+    let r = b.post(&format!("/ui/keys/{id}"), &check).await;
+    assert_eq!(r.status, 200);
+    assert!(r.body.contains("<code class=\"gain\">plex_token</code>"));
+    assert!(r.body.contains("{{vault:plex_token}}"));
+    assert_eq!(
+        credentials_for(&env, &token).await.1.len(),
+        2,
+        "check saves nothing"
+    );
+
+    let mut save = draft.to_vec();
+    save.push(("op", "save"));
+    let r = b.post(&format!("/ui/keys/{id}"), &save).await;
+    assert_eq!(r.status, 200);
+    assert!(r.body.contains("Confirm save"));
+    assert_eq!(
+        credentials_for(&env, &token).await.1.len(),
+        2,
+        "not saved yet"
+    );
+    save.push(("confirm", "1"));
+    let r = b.post(&format!("/ui/keys/{id}"), &save).await;
+    assert_eq!(r.status, 303);
+    assert_eq!(r.header("location"), format!("/ui/keys/{id}?m=saved"));
+    let (_, names) = credentials_for(&env, &token).await;
+    assert_eq!(names, vec!["nas_api_key", "plex_token", "test_api_token"]);
+
+    // Revoke.
+    let page = b.get(&format!("/ui/keys/{id}/revoke")).await;
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("ui-lifecycle"));
+    let r = b
+        .post(&format!("/ui/keys/{id}/revoke"), &[("csrf", &page.csrf())])
+        .await;
+    assert_eq!(r.status, 303);
+    assert_eq!(r.header("location"), "/ui/keys?m=revoked");
+    assert_eq!(credentials_for(&env, &token).await.0, 401, "revoked");
+
+    // The audit page shows it, and no event holds the token.
+    let audit = b.get("/ui/audit?limit=500").await;
+    assert_eq!(audit.status, 200);
+    for action in [
+        "key_create",
+        "key_policy_change",
+        "key_revoke",
+        "policy_preview",
+    ] {
+        assert!(
+            audit.body.contains(&format!("<code>{action}</code>")),
+            "{action} in the audit page"
+        );
+    }
+    assert!(audit.body.contains("&#34;via&#34;: &#34;ui&#34;"));
+    assert!(!audit.body.contains(&token));
+    let events = env.events(1000).await;
+    assert!(
+        !serde_json::to_string(&events).unwrap().contains(&token),
+        "token in the audit events"
+    );
+    let ui_events = events
+        .iter()
+        .filter(|e| e["ferrowarden"]["details"]["via"] == "ui")
+        .count();
+    assert!(ui_events >= 4);
+
+    let csrf = audit.csrf();
+    assert_eq!(b.post("/ui/logout", &[("csrf", &csrf)]).await.status, 303);
+}

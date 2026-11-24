@@ -256,6 +256,7 @@ struct Opts {
     insecure_http: bool,
     trusted_proxies: &'static str,
     two_fa: Option<TwoFa>,
+    keys_file: bool,
 }
 
 impl Default for Opts {
@@ -265,6 +266,7 @@ impl Default for Opts {
             insecure_http: false,
             trusted_proxies: "",
             two_fa: None,
+            keys_file: false,
         }
     }
 }
@@ -277,6 +279,8 @@ struct Harness {
     logs: LogBuf,
     /// Every body, header block (without Set-Cookie) the UI returned.
     seen: Arc<Mutex<Vec<String>>>,
+    keys_path: Option<std::path::PathBuf>,
+    _dir: Option<tempfile::TempDir>,
     _guard: tracing::subscriber::DefaultGuard,
 }
 
@@ -291,13 +295,15 @@ async fn harness(opts: Opts) -> Harness {
     );
 
     let (mock, base) = start_mock(opts.two_fa).await;
+    let dir = opts.keys_file.then(|| tempfile::tempdir().unwrap());
+    let keys_path = dir.as_ref().map(|d| d.path().join("keys.json"));
     let config = Config {
         bind_addr: "127.0.0.1:3000".to_string(),
         bw_serve_url: base.clone(),
         unlock_mode: UnlockMode::Manual,
         unlock_file: None,
         admin_key: "a".repeat(32),
-        keys_file: None,
+        keys_file: keys_path.clone(),
         tls_enabled: opts.tls,
         tls_cert_file: None,
         tls_key_file: None,
@@ -331,6 +337,8 @@ async fn harness(opts: Opts) -> Harness {
         mock,
         logs,
         seen: Arc::new(Mutex::new(Vec::new())),
+        keys_path,
+        _dir: dir,
         _guard: guard,
     }
 }
@@ -1598,7 +1606,7 @@ async fn routes_redirect_and_unknown_paths_follow_the_session() {
     assert_eq!(b.get(&h, "/").await.location(), "/ui/");
     assert_eq!(b.get(&h, "/ui").await.location(), "/ui/");
     assert_eq!(b.get(&h, "/ui/").await.location(), "/ui/login");
-    for path in ["/ui/keys", "/ui/anything/else", "/ui/logout/x"] {
+    for path in ["/ui/keys", "/ui/audit", "/ui/anything/else", "/ui/logout/x"] {
         assert_eq!(b.get(&h, path).await.location(), "/ui/login", "{path}");
     }
     // Outside /ui there is nothing.
@@ -1610,7 +1618,10 @@ async fn routes_redirect_and_unknown_paths_follow_the_session() {
         );
     }
     b.sign_in(&h, PASSWORD).await;
-    assert_eq!(b.get(&h, "/ui/keys").await.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        b.get(&h, "/ui/nothing-here").await.status,
+        StatusCode::NOT_FOUND
+    );
     // The wrong method is refused, not served.
     let r = b.send(&h, Method::GET, "/ui/logout", &[], None).await;
     assert_eq!(r.status, StatusCode::METHOD_NOT_ALLOWED);
@@ -1866,3 +1877,5 @@ fn the_provider_enum_matches_the_documented_event_names() {
     assert_eq!(Provider::Email.name(), "email");
     assert_eq!(Provider::YubiKey.name(), "yubikey");
 }
+
+mod admin;

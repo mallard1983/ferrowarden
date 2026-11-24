@@ -1,0 +1,136 @@
+{% extends "ui/base.html" %}
+{% block title %}Key{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<h1>Key: {{ key.name }}</h1>
+{% if let Some(message) = notice %}<p class="alert" role="status">{{ message }}</p>{% endif %}
+{% if let Some(message) = error %}<p class="alert error" role="alert">{{ message }}</p>{% endif %}
+{% include "ui/_sudo.html" %}
+<dl class="facts">
+<dt>Id</dt>
+<dd><code>{{ key.id }}</code></dd>
+<dt>Created</dt>
+<dd>{{ key.created }}</dd>
+<dt>Saved policy</dt>
+<dd>{% if key.policy_set %}
+Credentials: {% if key.credentials.is_empty() %}none{% else %}{% for p in key.credentials %}<code>{{ p }}</code> {% endfor %}{% endif %}<br>
+Methods: {{ key.methods }}
+{% else %}<span class="badge bad">No policy &mdash; deny-all</span>{% endif %}</dd>
+</dl>
+{% if !key.policy_set %}
+<p class="alert warn" role="note">This key was created before per-key policies existed. It can do nothing until a policy is saved, and a policy needs <strong>both</strong> the credential patterns and the methods to be set (an empty list means none). Fill in the form below, check it, and save.</p>
+{% endif %}
+<p><a href="/ui/keys">Back to keys</a> &middot; <a href="/ui/keys/{{ key.id }}/revoke">Revoke this key</a></p>
+
+{% if confirm %}
+<section class="alert warn" aria-labelledby="confirm-h">
+<h2 id="confirm-h">Confirm: this change gives the key more access</h2>
+<p>The draft below allows more than the saved policy (more credentials, more methods, or patterns that could match credentials added later). Review the differences, then confirm or go back and adjust.</p>
+{% if let Some(pv) = preview %}
+{% if !pv.gained.is_empty() %}<p>Credentials gained: {% for n in pv.gained %}<code class="gain">{{ n }}</code> {% endfor %}</p>{% endif %}
+{% endif %}
+<form method="post" action="/ui/keys/{{ key.id }}" class="inline">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="op" value="save">
+<input type="hidden" name="confirm" value="1">
+<input type="hidden" name="credentials" value="{{ form.patterns }}">
+{% for m in form.methods %}{% if m.checked %}<input type="hidden" name="{{ m.field }}" value="1">{% endif %}{% endfor %}
+{% if form.all_methods %}<input type="hidden" name="m_all" value="1">{% endif %}
+<button type="submit">Confirm save</button>
+<a class="button secondary" href="/ui/keys/{{ key.id }}">Cancel</a>
+</form>
+</section>
+{% endif %}
+
+{% if let Some(pv) = preview %}
+<section aria-labelledby="preview-h">
+<h2 id="preview-h">Policy check</h2>
+<p class="muted">Nothing here is saved, and no credential value is read or sent. Placeholders are shown by name only.</p>
+<div class="cols">
+<div>
+<h3>Saved</h3>
+<p>Credentials: {% if pv.saved.credentials.is_empty() %}none{% else %}{% for p in pv.saved.credentials %}<code>{{ p }}</code> {% endfor %}{% endif %}</p>
+<p>Methods: {{ pv.saved.methods }}</p>
+</div>
+<div>
+<h3>Draft</h3>
+<p>Credentials: {% if pv.draft.credentials.is_empty() %}none{% else %}{% for p in pv.draft.credentials %}<code>{{ p }}</code> {% endfor %}{% endif %}</p>
+<p>Methods: {{ pv.draft.methods }}</p>
+</div>
+</div>
+{% if pv.widens %}<p class="alert warn" role="note">Saving this draft would give the key more access than it has now.</p>{% endif %}
+<p>Gained: {% if pv.gained.is_empty() %}<span class="muted">no credentials</span>{% else %}{% for n in pv.gained %}<code class="gain">{{ n }}</code> {% endfor %}{% endif %}</p>
+<p>Lost: {% if pv.lost.is_empty() %}<span class="muted">no credentials</span>{% else %}{% for n in pv.lost %}<code class="loss">{{ n }}</code> {% endfor %}{% endif %}</p>
+<h3>Credentials the draft reaches ({{ pv.creds.len() }})</h3>
+{% if pv.creds.is_empty() %}
+<p class="muted">The draft reaches no credential in the vault.</p>
+{% else %}
+<ul class="creds">
+{% for row in pv.creds %}
+<li{% if row.gained %} class="gained"{% endif %}>
+<strong>{{ row.d.name }}</strong>{% if row.gained %} <span class="badge gain">gained</span>{% endif %}
+{% if let Some(why) = row.d.unavailable %}<br><span class="badge bad">Unusable</span> {{ why }}{% endif %}
+{% if let Some(v) = row.d.placeholder %}<br>Password: <code>{{ v }}</code>{% endif %}
+{% if let Some(v) = row.d.username %}<br>Username: <code>{{ v }}</code>{% endif %}
+{% if let Some(v) = row.d.totp %}<br>TOTP: <code>{{ v }}</code>{% endif %}
+{% if let Some(v) = row.d.notes %}<br>Notes: <code>{{ v }}</code>{% endif %}
+{% for (fname, ph) in row.d.fields %}<br>Field <em>{{ fname }}</em>: <code>{{ ph }}</code>{% endfor %}
+{% for (fname, why) in row.d.unavailable_fields %}<br>Field <em>{{ fname }}</em> unusable: {{ why }}{% endfor %}
+<br>Bound to: {% if row.d.bound_to.is_empty() %}<span class="muted">no host binding</span>{% else %}{% for h in row.d.bound_to %}<code>{{ h }}</code> {% endfor %}{% endif %}
+</li>
+{% endfor %}
+</ul>
+{% endif %}
+</section>
+{% endif %}
+
+{% if let Some(c) = check %}
+<section aria-labelledby="check-h">
+<h2 id="check-h">Request check</h2>
+{% if c.allowed %}
+<p class="alert ok" role="status"><span class="badge ok">Allowed</span> The request would pass every check that does not need a live connection.</p>
+{% else %}
+<p class="alert error" role="status"><span class="badge bad">Denied</span> Status {{ c.status }}, reason <code>{{ c.reason }}</code>: {{ c.message }}</p>
+{% endif %}
+<p class="muted">{{ c.note }}</p>
+</section>
+{% endif %}
+
+<section aria-labelledby="edit-h">
+<h2 id="edit-h">Edit policy</h2>
+<form method="post" action="/ui/keys/{{ key.id }}">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<label for="credentials">Credential patterns</label>
+<p class="muted hint">One pattern per line. <code>*</code> matches any run of characters; a line with just <code>*</code> allows every credential. Leave empty to allow none.</p>
+<textarea id="credentials" name="credentials" rows="6" spellcheck="false" autocomplete="off">
+{{ form.patterns }}</textarea>
+<fieldset>
+<legend>Methods</legend>
+{% for m in form.methods %}<label class="check"><input type="checkbox" name="{{ m.field }}" value="1"{% if m.checked %} checked{% endif %}> {{ m.label }}</label>
+{% endfor %}<label class="check"><input type="checkbox" name="m_all" value="1"{% if form.all_methods %} checked{% endif %}> All methods (<code>*</code>)</label>
+</fieldset>
+<details{% if check.is_some() || !form.req_url.is_empty() %} open{% endif %}>
+<summary>Check a request against this draft</summary>
+<label for="req_method">Method</label>
+<select id="req_method" name="req_method">
+{% for o in form.req_methods %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.value }}</option>
+{% endfor %}</select>
+<label for="req_url">URL</label>
+<input id="req_url" name="req_url" type="text" autocomplete="off" spellcheck="false" value="{{ form.req_url }}">
+<label for="req_headers">Headers</label>
+<p class="muted hint">One <code>Name: value</code> per line, at most 50, no repeated names.</p>
+<textarea id="req_headers" name="req_headers" rows="3" spellcheck="false" autocomplete="off">
+{{ form.req_headers }}</textarea>
+<label for="req_body">Body</label>
+<textarea id="req_body" name="req_body" rows="3" spellcheck="false" autocomplete="off">
+{{ form.req_body }}</textarea>
+<button type="submit" name="op" value="request" class="secondary">Check request</button>
+</details>
+<p class="actions">
+<button type="submit" name="op" value="check" class="secondary">Check policy</button>
+<button type="submit" name="op" value="save">Save policy</button>
+</p>
+<p class="muted hint">Saving needs a sign-in within the last 10 minutes. If the change gives the key more access you will be asked to confirm it first.</p>
+</form>
+</section>
+{% endblock %}

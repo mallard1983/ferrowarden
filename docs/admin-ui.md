@@ -1,6 +1,6 @@
 # Admin Web UI
 
-Ferrowarden has an optional web UI for its operator. **Phase 1** (this release) is the sign-in and a read-only status page. Managing agent keys and policies, and viewing the audit trail, follow in a later release; until then use the [admin API](api-reference.md).
+Ferrowarden has an optional web UI for its operator. It covers sign-in, a status page, **agent key management** (list, create, edit policy with a dry-run, revoke) and an **audit view**. Everything the UI does to keys goes through the same code as the [admin API](api-reference.md), so both behave identically.
 
 The UI is **off by default**. When you turn it on, it listens on its own port, separate from the agent and admin API.
 
@@ -10,6 +10,7 @@ The UI is **off by default**. When you turn it on, it listens on its own port, s
 
 - **Sign in with your Vaultwarden master password**, including two-step login (authenticator app, email code or YubiKey OTP). Vaultwarden itself checks the password; Ferrowarden has no password of its own to guard.
 - A **status page**: vault locked or unlocked, credential count, last sync, Ferrowarden version, TLS/HTTPS state, agent key count and how many keys have **no policy** (those keys are deny-all until a policy is set), events dropped, the signed-in account and when your session ends. A **Sign out** button.
+- **Keys, policy editor and audit pages**, described under [Managing keys](#managing-keys) and [Audit view](#audit-view).
 - No JavaScript, no external fonts, scripts or CDNs. Works at phone width and in light and dark mode.
 
 The UI accepts the vault master password, so it is the most sensitive part of Ferrowarden. Read [What the UI does with your password](#what-the-ui-does-with-your-password) and the [threat model](security.md#16-the-admin-web-ui) before exposing it.
@@ -173,6 +174,47 @@ The request body is read into a buffer Ferrowarden owns and wipes, but the HTTP 
 
 ---
 
+## Managing keys
+
+All pages need a session. Every POST needs the per-session CSRF token and the same-origin proof, and its form is parsed strictly: a field that is not part of the form, or one given twice, is a `400`. The header navigation (Status, Keys, Audit, the signed-in account, Sign out) is on every signed-in page and marks the current page with `aria-current="page"`.
+
+| Page | What it does |
+|---|---|
+| `/ui/keys` | Table of keys sorted by name: name, short id, created, methods, credential patterns (first three, with a count) and links to view/edit and revoke. A key with no policy (created with 0.1.0, `policy_set = false`) carries a **"No policy: deny-all"** badge. |
+| `/ui/keys/new` | **Create** (needs a recent sign-in). Name (1 to 128), credential patterns (one per line, blank lines ignored, each trimmed) and one checkbox per method (`m_GET` to `m_OPTIONS`) plus **All methods** (`*`). Validation errors (the same messages as the API) appear next to the form with your input kept. |
+| `/ui/keys/{id}` | The key and its saved policy, and the editor (below). |
+| `/ui/keys/{id}/revoke` | **Revoke** (needs a recent sign-in): a confirmation page naming the key, then a POST. |
+
+### The token is shown once
+
+A successful create renders the **token page directly in the response to the POST**, with the token in a read-only text field you can select and copy (there is no clipboard script). There is no redirect, so the token is in no URL, no history entry and no `Location` header; the response is `Cache-Control: no-store`. It is not stored: only its hash is kept, so after you leave the page the only remedy for a lost token is to revoke the key and create another. The token is never in an event, a log line, a later page or the audit view.
+
+### The policy editor and Check policy
+
+On `/ui/keys/{id}` the form is pre-filled with the saved policy and has three actions:
+
+- **Check policy** (no recent sign-in needed): a dry run through the same preview as `POST /v1/admin/keys/{id}/preview`. It shows the saved and the draft policy, the credentials the draft **gains** and **loses** (highlighted), the full list of credentials the draft reaches with their ready-made `{{vault:...}}` placeholders and `bound_to` hosts (names only, never values), and the allowed methods. Nothing is saved, no value is read, nothing is sent. The form stays filled in so you can adjust and check again.
+- **Check request** (also no recent sign-in): method, URL, headers (`Name: value` per line, at most 50, no repeated name in any letter case) and a body (sent as a raw string) are checked against the *draft* with the same logic as a real forward, minus the live connection. The page says Allowed or Denied with the status, the reason code and the message.
+- **Save policy** (needs a recent sign-in): applies the draft with the shared patch. If the draft **gives the key more access** you first get a confirmation page with the differences and a **Confirm save** button (a POST carrying `confirm=1` and the same draft); a narrowing change saves directly and redirects to the key with a "Policy saved" notice. "More access" is judged conservatively and without the vault: a method the saved policy lacks, or a credential pattern the saved patterns do not cover (so `lab_a*` under `lab_*` is covered, `lab*` is not). That also catches a pattern that matches nothing yet but would match a credential added later.
+
+A key with no policy (legacy) is explained on its page: it can do nothing until a policy with **both** the patterns and the methods is saved (an empty list means none).
+
+## Recent sign-in for sensitive actions
+
+Creating a key, revoking one and saving a policy change need a sign-in within the last **10 minutes** (the "sudo window"; not configurable). A session is created at sign-in and remembers when; activity keeps the session alive but never extends the window. Viewing, Check policy, Check request and the audit view do not need it.
+
+It is enforced on **both the GET of the form and the POST**. If the sign-in is older, the browser is redirected to `/ui/login?m=sudo&next=<path>` with the message "Sign in again to continue". After a successful sign-in (password and second factor if required) a new session is created, as always, and the browser goes to `next`. A POST that arrives stale (for instance a save after a long pause) is not processed; its draft is lost, so check and save promptly. Pages with sensitive actions show "Signed in N minutes ago" and whether the window is open.
+
+`next` is validated, on the way in and again before the redirect: it must start with `/ui/`, be at most 200 characters, and consist only of ASCII letters, digits and `/ _ - .`. That rules out schemes, hosts, `//`, backslashes, any percent-encoding (so `%2f%2f` cannot decode into something else), `.` and `..` segments, query strings, and the sign-in and static paths. Anything else becomes `/ui/`. The sign-in form carries it in a hidden field that is re-validated on submit; for a two-step login it is kept **server-side in the pending login**, and the second-factor form does not accept a `next` field at all.
+
+## Audit view
+
+`/ui/audit` lists the security events held in the in-memory ring buffer (the same data as `GET /v1/admin/audit`), newest first. Filters are GET parameters: `action` (a select of the known actions), `outcome` (`success`, `failure`, `unknown`), `key` (a key id or name, exact), `ip` (exact) and `limit` (25, 100 or 500; default 100). The query is parsed strictly: an unknown or repeated parameter, or a value that is not allowed, is a `400`. Columns: time, action, outcome, reason, key name, source IP, method and target host, status, request id, and a `<details>` disclosure with the event as pretty-printed JSON. Everything is HTML-escaped (the JSON sits in a `<pre>`). Reading it emits an `audit_read` event. For history beyond the buffer use the [event sinks](events.md#sinks-and-configuration).
+
+### Rendering safety
+
+Every value comes through an auto-escaping template: key names, credential names, field names and placeholders (which can contain quotes, `<` and spaces), and event contents are never trusted. There is no JavaScript at all and the content security policy is unchanged.
+
 ## What is logged
 
 Every UI action is a [security event](events.md) with a request ID and the client IP:
@@ -183,15 +225,17 @@ Every UI action is a [security event](events.md) with a request ID and the clien
 | `ui_two_factor_email_sent` | A code was requested (or the request failed) |
 | `ui_logout` | Signed out |
 | `ui_session_expired` | An expired session was detected |
+| `key_create`, `key_revoke`, `key_policy_change`, `policy_preview`, `key_list`, `audit_read` | The same events as the admin API, with `ferrowarden.details.via` set to `"ui"` (the API sets `"api"`), so a SIEM can tell them apart. Never a token |
 | `request_rejected` | A UI POST refused for CSRF or origin (`details.error`: `csrf_check_failed`, `origin_check_failed`) |
 
 Events never contain the password, the hash, a code, a token, a cookie or anything Vaultwarden said. The [SIEM examples](../examples/siem/README.md) have Wazuh rules and a LogQL query for them.
 
 ---
 
-## Limits of phase 1
+## Limits
 
-- Read-only. No key, policy or audit pages yet.
+- Screens are plain forms: no live updates, no bulk actions, no key renaming.
+- The audit view shows only what is in the ring buffer.
 - Sessions do not survive a restart.
 - No second-factor "remember this device" (Ferrowarden never sends `twoFactorRemember`).
 - WebAuthn, Duo and recovery-code sign-in are not supported.

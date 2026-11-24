@@ -1,0 +1,36 @@
+{% extends "ui/base.html" %}
+{% block title %}Keys{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<h1>Agent keys</h1>
+{% if let Some(message) = notice %}<p class="alert" role="status">{{ message }}</p>{% endif %}
+{% include "ui/_sudo.html" %}
+<p><a class="button" href="/ui/keys/new">Create key</a></p>
+{% if rows.is_empty() %}
+<p class="muted">There are no agent keys yet.</p>
+{% else %}
+<div class="scroll">
+<table>
+<thead>
+<tr><th scope="col">Name</th><th scope="col">Id</th><th scope="col">Created</th><th scope="col">Methods</th><th scope="col">Credential patterns</th><th scope="col">Actions</th></tr>
+</thead>
+<tbody>
+{% for row in rows %}
+<tr>
+<th scope="row"><a href="/ui/keys/{{ row.id }}">{{ row.name }}</a></th>
+<td><code>{{ row.short_id }}</code></td>
+<td>{{ row.created }}</td>
+{% if row.policy_set %}
+<td>{{ row.methods }}</td>
+<td>{% for p in row.shown %}<code>{{ p }}</code> {% endfor %}{% if row.more > 0 %}<span class="muted">and {{ row.more }} more</span> {% endif %}<span class="muted">({{ row.count }} in total)</span></td>
+{% else %}
+<td colspan="2"><span class="badge bad">No policy &mdash; deny-all</span></td>
+{% endif %}
+<td><a href="/ui/keys/{{ row.id }}">View / edit</a> <a href="/ui/keys/{{ row.id }}/revoke">Revoke</a></td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

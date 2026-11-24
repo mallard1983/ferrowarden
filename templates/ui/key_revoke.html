@@ -1,0 +1,13 @@
+{% extends "ui/base.html" %}
+{% block title %}Revoke key{% endblock %}
+{% block content %}
+<h1>Revoke key</h1>
+{% include "ui/_sudo.html" %}
+<p>Revoke the key <strong>{{ name }}</strong> (<code>{{ id }}</code>)?</p>
+<p>Its token stops working immediately, for every agent that uses it. This cannot be undone; create a new key instead.</p>
+<form method="post" action="/ui/keys/{{ id }}/revoke">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="danger">Revoke key</button>
+<a class="button secondary" href="/ui/keys/{{ id }}">Cancel</a>
+</form>
+{% endblock %}

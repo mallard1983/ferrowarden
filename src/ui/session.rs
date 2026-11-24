@@ -37,6 +37,9 @@ pub const PENDING_TTL: Duration = Duration::from_secs(180);
 pub const MAX_CODE_ATTEMPTS: u8 = 3;
 /// Minimum time between two "send the email code" requests.
 pub const EMAIL_RESEND_INTERVAL: Duration = Duration::from_secs(60);
+/// Sensitive actions (creating or revoking a key, saving a policy) need a
+/// sign-in this recent: the "sudo window". Not configurable.
+pub const SUDO_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 // ── Random tokens ─────────────────────────────────────────────────────────────
 
@@ -67,6 +70,9 @@ struct Session {
     /// Creation order, so "oldest" is never a tie.
     seq: u64,
     created: Instant,
+    /// When the password (and second factor) were last accepted. Equal to
+    /// `created`: a re-sign-in makes a new session. Never moved by activity.
+    authenticated_at: Instant,
     last_seen: Instant,
     csrf: Zeroizing<String>,
 }
@@ -77,6 +83,22 @@ pub struct SessionView {
     pub csrf: Zeroizing<String>,
     /// When the session ends if it stays idle, capped by the absolute limit.
     pub expires_at: Instant,
+    /// When this session's sign-in happened.
+    pub authenticated_at: Instant,
+}
+
+impl SessionView {
+    /// Whole minutes since the sign-in.
+    pub fn signed_in_minutes(&self, now: Instant) -> u64 {
+        now.saturating_duration_since(self.authenticated_at)
+            .as_secs()
+            / 60
+    }
+
+    /// Is the sign-in recent enough for a sensitive action?
+    pub fn sudo_active(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.authenticated_at) < SUDO_WINDOW
+    }
 }
 
 pub enum Lookup {
@@ -138,6 +160,7 @@ impl SessionStore {
             Session {
                 seq: self.next_seq,
                 created: now,
+                authenticated_at: now,
                 last_seen: now,
                 csrf: csrf.clone(),
             },
@@ -162,6 +185,7 @@ impl SessionStore {
         Lookup::Valid(SessionView {
             csrf: session.csrf.clone(),
             expires_at,
+            authenticated_at: session.authenticated_at,
         })
     }
 
@@ -197,6 +221,10 @@ pub struct PendingLogin {
     attempts: u8,
     #[zeroize(skip)]
     last_email_sent: Option<Instant>,
+    /// Where to go after the sign-in: already validated by
+    /// `web::safe_next`, kept here (not in a URL) through the second step.
+    #[zeroize(skip)]
+    pub next: Option<String>,
 }
 
 impl PendingLogin {
@@ -216,7 +244,14 @@ impl PendingLogin {
             created: now,
             attempts: 0,
             last_email_sent: None,
+            next: None,
         }
+    }
+
+    /// Remember where the sign-in should end up.
+    pub fn with_next(mut self, next: Option<String>) -> Self {
+        self.next = next;
+        self
     }
 
     pub fn offers(&self, provider: Provider) -> bool {
