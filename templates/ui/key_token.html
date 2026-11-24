@@ -2,7 +2,7 @@
 {% block title %}Key created{% endblock %}
 {% block content %}
 <h1>Key created</h1>
-<p class="alert" role="status"><strong>This token will not be shown again.</strong> Copy it now and store it where the agent can read it. Ferrowarden keeps only a hash. If you lose it, revoke the key and create a new one.</p>
+<p class="alert warn" role="status"><strong>This token will not be shown again.</strong> Copy it now and store it where the agent can read it. Ferrowarden keeps only a hash. If you lose it, revoke the key and create a new one.</p>
 <dl class="facts">
 <dt>Name</dt>
 <dd>{{ name }}</dd>
@@ -16,5 +16,5 @@
 <dd>{{ methods }}</dd>
 </dl>
 <p>Select the token text and copy it. This page is not stored by the browser cache and the token is in no URL; reloading or going back will not show it again.</p>
-<p><a href="/ui/keys">Back to keys</a></p>
+<p class="actions"><a class="button secondary" href="/ui/keys">Back to keys</a></p>
 {% endblock %}

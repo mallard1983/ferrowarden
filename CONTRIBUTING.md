@@ -2,7 +2,7 @@
 
 Thanks for your interest in improving Ferrowarden! Bug reports, documentation fixes, tests and code are all welcome.
 
-Ferrowarden is a security tool: its whole job is to keep credential values away from AI agents. That shapes how changes are reviewed, so please read the [Security Model](docs/security.md) before working on anything in the request path.
+Ferrowarden is a security tool: its job is to keep credential values out of AI agents' context. That shapes how changes are reviewed, so please read the [Security Model](docs/security.md) before working on anything in the request path.
 
 ## Reporting security issues
 
@@ -53,7 +53,7 @@ cargo test --test integration -- --test-threads=1
 **Security-sensitive changes** — anything touching substitution, scrubbing, the target policy, credential host binding, authentication, key storage, logging or error messages — must:
 
 - keep every guarantee in [docs/security.md](docs/security.md), or update that document and explain why;
-- come with tests that would fail if a credential value could reach the agent (see the leak-prevention tests at the end of `tests/integration.rs` and the mock API's `/echo` endpoints);
+- come with tests that would fail if a credential value could be returned to the agent (see the leak-prevention tests at the end of `tests/integration.rs` and the mock API's `/echo` endpoints);
 - never put credential values, admin keys or agent tokens into logs, audit entries, error messages or test output.
 
 **Generally:**
@@ -64,6 +64,10 @@ cargo test --test integration -- --test-threads=1
 - Add an entry under **[Unreleased]** in [CHANGELOG.md](CHANGELOG.md); call out anything that needs action when upgrading.
 - New dependencies need a reason; prefer well-maintained crates and check them with `cargo audit`.
 - Line endings are handled by `.gitattributes` (scripts that run in containers must stay LF).
+
+## Branding
+
+The [`branding/`](branding/README.md) kit is the source of truth for the Ferrowarden logo, colours, typography and voice (see [`branding/docs/VOICE_AND_MESSAGING.md`](branding/docs/VOICE_AND_MESSAGING.md) for the claims rules: no absolute security guarantees, no implied affiliation with Vaultwarden or Bitwarden). Use its assets as they are, regenerate exported files with the scripts in `branding/scripts/` (see [`branding/docs/MAINTAINING_ASSETS.md`](branding/docs/MAINTAINING_ASSETS.md)), and do not hand-edit exported PNG, SVG or favicon files.
 
 ## Licence
 

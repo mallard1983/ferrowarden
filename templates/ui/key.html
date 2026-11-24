@@ -3,7 +3,7 @@
 {% block main_class %}wide{% endblock %}
 {% block content %}
 <h1>Key: {{ key.name }}</h1>
-{% if let Some(message) = notice %}<p class="alert" role="status">{{ message }}</p>{% endif %}
+{% if let Some(message) = notice %}<p class="alert ok" role="status">{{ message }}</p>{% endif %}
 {% if let Some(message) = error %}<p class="alert error" role="alert">{{ message }}</p>{% endif %}
 {% include "ui/_sudo.html" %}
 <dl class="facts">
@@ -20,7 +20,7 @@ Methods: {{ key.methods }}
 {% if !key.policy_set %}
 <p class="alert warn" role="note">This key was created before per-key policies existed. It can do nothing until a policy is saved, and a policy needs <strong>both</strong> the credential patterns and the methods to be set (an empty list means none). Fill in the form below, check it, and save.</p>
 {% endif %}
-<p><a href="/ui/keys">Back to keys</a> &middot; <a href="/ui/keys/{{ key.id }}/revoke">Revoke this key</a></p>
+<p class="actions"><a class="button secondary" href="/ui/keys">Back to keys</a><a class="button secondary" href="/ui/keys/{{ key.id }}/revoke">Revoke this key</a></p>
 
 {% if confirm %}
 <section class="alert warn" aria-labelledby="confirm-h">
@@ -36,8 +36,8 @@ Methods: {{ key.methods }}
 <input type="hidden" name="credentials" value="{{ form.patterns }}">
 {% for m in form.methods %}{% if m.checked %}<input type="hidden" name="{{ m.field }}" value="1">{% endif %}{% endfor %}
 {% if form.all_methods %}<input type="hidden" name="m_all" value="1">{% endif %}
-<button type="submit">Confirm save</button>
-<a class="button secondary" href="/ui/keys/{{ key.id }}">Cancel</a>
+<p class="actions"><button type="submit">Confirm save</button>
+<a class="button secondary" href="/ui/keys/{{ key.id }}">Cancel</a></p>
 </form>
 </section>
 {% endif %}
@@ -68,15 +68,17 @@ Methods: {{ key.methods }}
 <ul class="creds">
 {% for row in pv.creds %}
 <li{% if row.gained %} class="gained"{% endif %}>
-<strong>{{ row.d.name }}</strong>{% if row.gained %} <span class="badge gain">gained</span>{% endif %}
-{% if let Some(why) = row.d.unavailable %}<br><span class="badge bad">Unusable</span> {{ why }}{% endif %}
-{% if let Some(v) = row.d.placeholder %}<br>Password: <code>{{ v }}</code>{% endif %}
-{% if let Some(v) = row.d.username %}<br>Username: <code>{{ v }}</code>{% endif %}
-{% if let Some(v) = row.d.totp %}<br>TOTP: <code>{{ v }}</code>{% endif %}
-{% if let Some(v) = row.d.notes %}<br>Notes: <code>{{ v }}</code>{% endif %}
-{% for (fname, ph) in row.d.fields %}<br>Field <em>{{ fname }}</em>: <code>{{ ph }}</code>{% endfor %}
-{% for (fname, why) in row.d.unavailable_fields %}<br>Field <em>{{ fname }}</em> unusable: {{ why }}{% endfor %}
-<br>Bound to: {% if row.d.bound_to.is_empty() %}<span class="muted">no host binding</span>{% else %}{% for h in row.d.bound_to %}<code>{{ h }}</code> {% endfor %}{% endif %}
+<span class="name">{{ row.d.name }}</span>{% if row.gained %}<span class="badge gain">gained</span>{% endif %}
+{% if let Some(why) = row.d.unavailable %}<p><span class="badge bad">Unusable</span> {{ why }}</p>{% endif %}
+<dl>
+{% if let Some(v) = row.d.placeholder %}<dt>Password</dt><dd><code>{{ v }}</code></dd>{% endif %}
+{% if let Some(v) = row.d.username %}<dt>Username</dt><dd><code>{{ v }}</code></dd>{% endif %}
+{% if let Some(v) = row.d.totp %}<dt>TOTP</dt><dd><code>{{ v }}</code></dd>{% endif %}
+{% if let Some(v) = row.d.notes %}<dt>Notes</dt><dd><code>{{ v }}</code></dd>{% endif %}
+{% for (fname, ph) in row.d.fields %}<dt>Field <em>{{ fname }}</em></dt><dd><code>{{ ph }}</code></dd>{% endfor %}
+{% for (fname, why) in row.d.unavailable_fields %}<dt>Field <em>{{ fname }}</em></dt><dd>unusable: {{ why }}</dd>{% endfor %}
+<dt>Bound to</dt><dd>{% if row.d.bound_to.is_empty() %}<span class="muted">no host binding</span>{% else %}{% for h in row.d.bound_to %}<code>{{ h }}</code> {% endfor %}{% endif %}</dd>
+</dl>
 </li>
 {% endfor %}
 </ul>
@@ -100,31 +102,43 @@ Methods: {{ key.methods }}
 <h2 id="edit-h">Edit policy</h2>
 <form method="post" action="/ui/keys/{{ key.id }}">
 <input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="field">
 <label for="credentials">Credential patterns</label>
 <p class="muted hint">One pattern per line. <code>*</code> matches any run of characters; a line with just <code>*</code> allows every credential. Leave empty to allow none.</p>
 <textarea id="credentials" name="credentials" rows="6" spellcheck="false" autocomplete="off">
 {{ form.patterns }}</textarea>
+</div>
 <fieldset>
 <legend>Methods</legend>
+<div class="checks">
 {% for m in form.methods %}<label class="check"><input type="checkbox" name="{{ m.field }}" value="1"{% if m.checked %} checked{% endif %}> {{ m.label }}</label>
-{% endfor %}<label class="check"><input type="checkbox" name="m_all" value="1"{% if form.all_methods %} checked{% endif %}> All methods (<code>*</code>)</label>
+{% endfor %}<label class="check all"><input type="checkbox" name="m_all" value="1"{% if form.all_methods %} checked{% endif %}> All methods (<code>*</code>)</label>
+</div>
 </fieldset>
 <details{% if check.is_some() || !form.req_url.is_empty() %} open{% endif %}>
 <summary>Check a request against this draft</summary>
+<div class="field">
 <label for="req_method">Method</label>
 <select id="req_method" name="req_method">
 {% for o in form.req_methods %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.value }}</option>
 {% endfor %}</select>
+</div>
+<div class="field">
 <label for="req_url">URL</label>
 <input id="req_url" name="req_url" type="text" autocomplete="off" spellcheck="false" value="{{ form.req_url }}">
+</div>
+<div class="field">
 <label for="req_headers">Headers</label>
 <p class="muted hint">One <code>Name: value</code> per line, at most 50, no repeated names.</p>
 <textarea id="req_headers" name="req_headers" rows="3" spellcheck="false" autocomplete="off">
 {{ form.req_headers }}</textarea>
+</div>
+<div class="field">
 <label for="req_body">Body</label>
 <textarea id="req_body" name="req_body" rows="3" spellcheck="false" autocomplete="off">
 {{ form.req_body }}</textarea>
-<button type="submit" name="op" value="request" class="secondary">Check request</button>
+</div>
+<p class="actions"><button type="submit" name="op" value="request" class="secondary">Check request</button></p>
 </details>
 <p class="actions">
 <button type="submit" name="op" value="check" class="secondary">Check policy</button>

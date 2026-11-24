@@ -1,8 +1,10 @@
+<img src="../branding/assets/png/banners/ferrowarden-docs-header.png" width="100%" alt="">
+
 # Security Model
 
-This document describes what Ferrowarden protects against, what security properties it provides, the design decisions that achieve those properties, and the limits of its protection.
+This document describes what Ferrowarden is designed to protect against, the security properties it aims to provide, the design decisions behind them, and the limits of its protection. Ferrowarden is a sidecar to [Vaultwarden](https://github.com/dani-garcia/vaultwarden), not a fork or replacement, and is not affiliated with or endorsed by the Vaultwarden or Bitwarden projects. No independent security audit has been published. To report a vulnerability, follow the [Security Policy](../SECURITY.md).
 
-**Transparency is intentional.** A security tool that cannot be reasoned about cannot be trusted. Every design decision here has a rationale. If something seems like it should be here and is not, that is a gap worth reporting.
+**Transparency is intentional.** Every design decision here has a rationale, and the limits are stated next to the properties. If something seems like it should be here and is not, that is a gap worth reporting.
 
 ---
 
@@ -15,7 +17,7 @@ This document describes what Ferrowarden protects against, what security propert
 | The operator | Full trust | Holds the admin key, master password, and vault |
 | The host OS | Full trust | Ferrowarden cannot protect against OS-level compromise |
 | Vaultwarden | Full trust | Chosen by the operator; runs on the same host |
-| bw serve | Full trust | Official Bitwarden CLI; runs on the same host |
+| bw serve | Full trust | The Bitwarden CLI's vault API server; runs on the same host |
 | Docker daemon | Full trust | Same host; controls container isolation |
 
 ### Who We Do Not Trust
@@ -23,7 +25,7 @@ This document describes what Ferrowarden protects against, what security propert
 | Actor | Threat | Mitigation |
 |---|---|---|
 | The AI agent | Exfiltrates credentials through conversation or logs, or by steering the proxy (sending a credential to a host that echoes it back, or calling bw serve directly) | Agent API tokens are scoped to the proxy only; credentials are bound to the hosts in their vault item URIs; internal targets (always including bw serve) are blocked; every encoding of each substituted value is scrubbed from responses and errors |
-| The model provider | Logs prompt content including credentials | Values never enter the agent conversation |
+| The model provider | Logs prompt content including credentials | Credential values are not placed in the agent conversation by design: the agent only handles placeholders and scrubbed responses |
 | Target services | Return credential values or credential-shaped content in responses | Exact substituted values (raw, JSON-escaped, URL-encoded, base64) are scrubbed from body and headers, then common credential patterns |
 | An attacker who compromises the agent process | Reads credential values from agent memory or conversation | Same as AI agent above |
 | A network observer between agent and Ferrowarden | Reads credentials in transit | Native TLS (rustls) is enabled by default; TLS can be disabled only when both agent and Ferrowarden run on the same host |
@@ -41,7 +43,7 @@ The following threats are explicitly out of scope. Mitigation requires infrastru
 
 ## Security Properties
 
-### 1. Credentials Never Reach the Agent
+### 1. Credential Values Stay Out of the Agent's Context
 
 The agent sends `{{vault:name}}` placeholders. The substituted values are built in Ferrowarden's memory, used for one outbound HTTP request, and zeroed. Four controls stop the agent from getting a value back:
 
@@ -50,7 +52,7 @@ The agent sends `{{vault:name}}` placeholders. The substituted values are built 
 3. **Exact-value scrubbing** (property 8) — every substituted value is removed from the response body, response headers, and error messages, in its raw, JSON-escaped, URL-encoded and base64 forms.
 4. **URL-free errors** — forward errors never include the target URL, which contains substituted values.
 
-**What this means:** A model provider cannot log a credential from an agent request or response. An agent that echoes back its context cannot expose a credential value.
+**What this means:** Credential values are not part of the agent's request or response, so a model provider logging the conversation does not see them, and an agent that echoes back its context does not echo a value. This holds while the controls above are in place and the credential is bound only to services that do not transform and return it (see below).
 
 **What this does not mean:** It does not prevent the agent from learning that a credential exists (it can list credential names). A target that is *bound* to a credential could still transform it into an unrecognisable form (e.g. reversed, or base64 inside a larger string) and return it — only bind credentials to the services they belong to. It does not prevent the agent from making API calls that would indirectly expose data.
 
@@ -110,9 +112,9 @@ This hop only carries Vaultwarden's end-to-end-encrypted vault data and API-key 
 
 ### 7. No Redirect Following
 
-Ferrowarden's HTTP client is configured with `redirect::Policy::none()`. It never follows HTTP redirects.
+Ferrowarden's HTTP client is configured with `redirect::Policy::none()`, so it does not follow HTTP redirects.
 
-**Why this matters:** A target service could respond with a redirect to an attacker-controlled URL. If Ferrowarden followed the redirect, the credential value in the original request's Authorization header could be forwarded to that URL. With redirect following disabled, this attack is not possible — the agent receives the redirect response and decides whether to follow it.
+**Why this matters:** A target service could respond with a redirect to an attacker-controlled URL. If Ferrowarden followed the redirect, the credential value in the original request's Authorization header could be forwarded to that URL. With redirect following disabled, this attack does not apply — the agent receives the redirect response and decides whether to follow it.
 
 ### 8. Response Scrubbing
 
@@ -157,7 +159,7 @@ When TLS is disabled, Ferrowarden logs a prominent multi-line warning at startup
 
 **Crypto backend:** We use `axum-server` with the `tls-rustls-ring` feature (ring crypto provider). This is preferred over the `aws-lc-rs` backend for easier cross-platform builds, particularly on Windows development environments with MinGW toolchains.
 
-### 11. Agent Key Persistence: SHA-256 Hashing, Never Plaintext
+### 11. Agent Key Persistence: SHA-256 Hashing, No Plaintext on Disk
 
 When `FERROWARDEN_KEYS_FILE` is configured, agent keys survive container restarts. Only the SHA-256 hash of each token is written to disk — the plaintext token is never stored.
 
@@ -165,7 +167,7 @@ When `FERROWARDEN_KEYS_FILE` is configured, agent keys survive container restart
 
 **What is stored:** A JSON array of `{ id, name, token_hash, created_at }` entries. The `token_hash` is the hex-encoded SHA-256 of the plaintext token. The plaintext is gone after the create response — it is not stored anywhere, including memory.
 
-**Atomic writes:** The key file is written via a rename (write to `.tmp`, then `rename`). A crash or power loss during a write cannot produce a corrupt key file — the rename is atomic at the OS level. The old file remains until the rename succeeds.
+**Atomic writes:** The key file is written via a rename (write to `.tmp`, then `rename`). A crash or power loss during a write should not leave a corrupt key file — the rename is atomic on the OS filesystems Ferrowarden targets. The old file remains until the rename succeeds.
 
 **Key revocation** removes the entry from the file. Revoked keys are not reloaded on restart.
 

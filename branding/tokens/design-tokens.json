@@ -1,0 +1,54 @@
+{
+  "$schema": "https://design-tokens.github.io/community-group/format/",
+  "color": {
+    "iron": {
+      "$type": "color",
+      "$value": "#17212B"
+    },
+    "steel": {
+      "$type": "color",
+      "$value": "#3D5967"
+    },
+    "copper": {
+      "$type": "color",
+      "$value": "#CB7545"
+    },
+    "paper": {
+      "$type": "color",
+      "$value": "#F6F8F9"
+    },
+    "mist": {
+      "$type": "color",
+      "$value": "#A6B7C4"
+    },
+    "deep_iron": {
+      "$type": "color",
+      "$value": "#101820"
+    },
+    "dark_steel": {
+      "$type": "color",
+      "$value": "#7797A8"
+    }
+  },
+  "typography": {
+    "family": {
+      "$type": "fontFamily",
+      "$value": "Inter, system-ui, sans-serif"
+    },
+    "weights": {
+      "body": {
+        "$value": 400
+      },
+      "medium": {
+        "$value": 500
+      },
+      "heading": {
+        "$value": 700
+      }
+    }
+  },
+  "brand": {
+    "name": "Ferrowarden",
+    "tagline": "The credential boundary for AI agents"
+  }
+}

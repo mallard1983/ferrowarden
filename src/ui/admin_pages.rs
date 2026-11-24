@@ -12,7 +12,11 @@
 //! * everything shown goes through askama's escaping; names from the vault,
 //!   key names and event contents are never trusted;
 //! * a new token is rendered once, in the response to the POST that created
-//!   the key: never in a redirect, URL, event or log line.
+//!   the key: never in a redirect, URL, event or log line;
+//! * the create form carries a single-use id, so reloading or re-sending the
+//!   page that follows it cannot create a second key;
+//! * a Save or Create after the sudo window ran out parks the draft (see
+//!   `ui::drafts`) and restores it, unsaved, after the next sign-in.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -24,7 +28,7 @@ use axum::{
     extract::{Extension, Path, Request, State},
     http::{HeaderMap, StatusCode, Uri},
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::api::key_service::{self, AuditFilter, Caller, KeySummary, Preview, Via};
 use crate::error::FerroError;
@@ -32,18 +36,19 @@ use crate::events::{Action, Outcome};
 use crate::middleware::request_context::RequestContext;
 use crate::policy::{KeyPolicy, Patch, METHODS};
 use crate::proxy::forward::ProxyRequest;
+use crate::ui::drafts::{DraftTarget, RequestDraft, SavedDraft};
 use crate::ui::handlers::{page, Reply};
 use crate::ui::pages::{
-    AuditPage, AuditRow, CredRow, DraftForm, KeyFacts, KeyNewPage, KeyPage, KeyRevokePage, KeyRow,
-    KeyTokenPage, KeysPage, LimitOpt, MethodBox, Nav, Opt, PolicyView, PreviewView,
-    RequestCheckView,
+    AuditPage, AuditRow, CredRow, DraftForm, KeyFacts, KeyFormUsedPage, KeyNewPage, KeyPage,
+    KeyRevokePage, KeyRow, KeyTokenPage, KeysPage, LimitOpt, MethodBox, Nav, Opt, PolicyView,
+    PreviewView, RequestCheckView,
 };
 use crate::ui::session::{secrets_equal, SessionView};
 use crate::ui::web::{
-    is_form_content_type, origin_ok, parse_form, parse_form_limited, read_body, Form, Transport,
-    MAX_ADMIN_FORM_BYTES,
+    is_form_content_type, origin_ok, parse_form, parse_form_limited, read_body, safe_next, Form,
+    Transport, MAX_ADMIN_FORM_BYTES,
 };
-use crate::ui::UiState;
+use crate::ui::{lock, UiState};
 
 const MSG_BAD: &str = "The request could not be understood.";
 const MSG_FAILED: &str = "Ferrowarden could not complete that. See the logs and try again.";
@@ -58,8 +63,19 @@ const MAX_REQUEST_HEADERS: usize = 50;
 const AUDIT_LIMITS: [usize; 3] = [25, 100, 500];
 const AUDIT_DEFAULT_LIMIT: usize = 100;
 
-const NEW_FIELDS: [&str; 11] = [
+/// Shown above the editor when a parked draft was put back.
+const NOTICE_DRAFT_RESTORED: &str =
+    "Your unsaved changes were restored. Review them and save again.";
+/// Shown when the draft a sign-in came back for is gone.
+const NOTICE_DRAFT_EXPIRED: &str =
+    "The unsaved changes could not be restored: they expired, were already restored, or were made from another address. This is the saved policy.";
+
+const NOTICE_DRAFT_EXPIRED_NEW: &str = "The unsaved form could not be restored: it expired, was \
+already restored, or was made from another address. Fill in the form again.";
+
+const NEW_FIELDS: [&str; 12] = [
     "csrf",
+    "form_id",
     "name",
     "credentials",
     "m_GET",
@@ -194,6 +210,15 @@ fn validation_text(e: &FerroError) -> Option<String> {
     }
 }
 
+/// A draft id from the URL: base64url, as `random_token` makes them.
+fn valid_token(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// A key id from the URL: the UUIDs we generate, nothing else.
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -213,6 +238,15 @@ fn methods_label(methods: &[String]) -> String {
         [] => "none".to_string(),
         [one] if one == "*" => "all methods (*)".to_string(),
         many => many.join(", "),
+    }
+}
+
+/// The same as chips: `none`, `all (*)`, or one per method.
+fn method_chips(methods: &[String]) -> Vec<String> {
+    match methods {
+        [] => vec!["none".to_string()],
+        [one] if one == "*" => vec!["all (*)".to_string()],
+        many => many.to_vec(),
     }
 }
 
@@ -302,6 +336,59 @@ impl Draft {
         }
     }
 
+    /// An empty draft (the blank create form).
+    fn blank() -> Self {
+        Self {
+            patterns: Vec::new(),
+            methods: Vec::new(),
+            checked: vec![false; METHODS.len()],
+            all: false,
+        }
+    }
+
+    /// The draft a parked [`SavedDraft`] holds.
+    fn from_saved(saved: &SavedDraft) -> Self {
+        let mut checked = saved.checked.clone();
+        checked.resize(METHODS.len(), false);
+        let mut methods: Vec<String> = METHODS
+            .iter()
+            .zip(&checked)
+            .filter(|(_, on)| **on)
+            .map(|(m, _)| m.to_string())
+            .collect();
+        if saved.all_methods {
+            methods.push("*".to_string());
+        }
+        Self {
+            patterns: saved.patterns.clone(),
+            methods,
+            checked,
+            all: saved.all_methods,
+        }
+    }
+
+    /// What to park when the sign-in has to be repeated first.
+    fn to_saved(
+        &self,
+        target: DraftTarget,
+        name: &str,
+        request: Option<&RequestFields>,
+    ) -> SavedDraft {
+        SavedDraft {
+            target,
+            name: name.to_string(),
+            patterns: self.patterns.clone(),
+            checked: self.checked.clone(),
+            all_methods: self.all,
+            request: request.map(|r| RequestDraft {
+                method: r.method.clone(),
+                url: Zeroizing::new(r.url.clone()),
+                headers: Zeroizing::new(r.headers.clone()),
+                body: Zeroizing::new(r.body.clone()),
+            }),
+        }
+    }
+
     fn method_boxes(&self) -> Vec<MethodBox> {
         METHODS
             .iter()
@@ -357,6 +444,18 @@ impl RequestFields {
             headers: text(form, "req_headers"),
             body: text(form, "req_body"),
         })
+    }
+
+    fn from_saved(saved: &SavedDraft) -> Self {
+        match &saved.request {
+            Some(r) => Self {
+                method: r.method.clone(),
+                url: r.url.to_string(),
+                headers: r.headers.to_string(),
+                body: r.body.to_string(),
+            },
+            None => Self::default(),
+        }
     }
 
     fn method_options(&self) -> Vec<Opt> {
@@ -444,7 +543,7 @@ pub async fn keys_list(
             name: k.name.clone(),
             created: fmt_time(k.created_at),
             policy_set: k.policy_set,
-            methods: methods_label(&k.methods),
+            method_chips: method_chips(&k.methods),
             shown: k.credentials.iter().take(PATTERNS_SHOWN).cloned().collect(),
             more: k.credentials.len().saturating_sub(PATTERNS_SHOWN),
             count: k.credentials.len(),
@@ -466,30 +565,91 @@ pub async fn keys_list(
 
 // -- Create ---------------------------------------------------------------------------
 
-fn new_form_page(
-    ui: &UiState,
-    view: &SessionView,
-    email: &str,
+/// What the create form shows besides the key's own fields.
+struct NewForm<'a> {
     status: StatusCode,
-    error: Option<&str>,
-    name: &str,
-    draft: &Draft,
-) -> Reply {
+    notice: Option<&'a str>,
+    error: Option<&'a str>,
+    name: &'a str,
+    draft: &'a Draft,
+    /// The single-use id this form submits.
+    form_id: &'a str,
+}
+
+fn new_form_page(ui: &UiState, view: &SessionView, email: &str, form: NewForm<'_>) -> Reply {
     page(
-        status,
+        form.status,
         KeyNewPage {
             css_path: &ui.css_path,
             nav: nav("keys", email, view),
             sudo: ui.sudo_info(view),
             csrf: &view.csrf,
-            error,
-            name,
-            patterns: &draft.patterns_text(),
-            methods: draft.method_boxes(),
-            all_methods: draft.all,
+            form_id: form.form_id,
+            notice: form.notice,
+            error: form.error,
+            name: form.name,
+            patterns: &form.draft.patterns_text(),
+            methods: form.draft.method_boxes(),
+            all_methods: form.draft.all,
         }
         .render(),
     )
+}
+
+/// A fresh single-use id for the create form of this session.
+fn issue_form_id(ui: &UiState, view: &SessionView) -> Option<Zeroizing<String>> {
+    lock(&ui.sessions).issue_form_id(view)
+}
+
+/// The page for a create POST whose form id is unknown or used up: nothing
+/// is created, and the token of a key made by the first submission is not
+/// shown again.
+async fn form_used(ui: &UiState, view: &SessionView) -> Reply {
+    let email = ui.account_email().await.unwrap_or_default();
+    page(
+        StatusCode::CONFLICT,
+        KeyFormUsedPage {
+            css_path: &ui.css_path,
+            nav: nav("keys", &email, view),
+        }
+        .render(),
+    )
+}
+
+/// Park an unsaved draft and send the browser to sign in again, to come back
+/// to the draft's URL. Without room for a draft (RNG failure) it is the plain
+/// redirect to sign in, which comes back to the form itself.
+fn park_and_redirect(
+    ui: &UiState,
+    ctx: &RequestContext,
+    view: &SessionView,
+    saved: SavedDraft,
+) -> Reply {
+    let target = saved.target.clone();
+    let parked = lock(&ui.drafts).park(saved, ctx.client_ip, ui.now());
+    let plain = match &target {
+        DraftTarget::NewKey => "/ui/keys/new".to_string(),
+        DraftTarget::Key(id) => format!("/ui/keys/{id}"),
+    };
+    let next = match parked {
+        Some(draft_id) => match &target {
+            DraftTarget::NewKey => format!("/ui/keys/new/draft/{}", draft_id.as_str()),
+            DraftTarget::Key(id) => format!("/ui/keys/{id}/draft/{}", draft_id.as_str()),
+        },
+        None => plain.clone(),
+    };
+    // The draft URL has to pass the same validator as any `next`; if it ever
+    // did not, the plain page is the safe fallback.
+    let next = if safe_next(&next).is_some() {
+        next
+    } else {
+        plain
+    };
+    match ui.require_sudo(view, &next) {
+        Err(redirect) => redirect,
+        // Cannot happen (the caller saw a stale sign-in); go to the page.
+        Ok(()) => Reply::redirect(&next),
+    }
 }
 
 pub async fn key_new_get(
@@ -505,13 +665,62 @@ pub async fn key_new_get(
         return redirect;
     }
     let email = ui.account_email().await.unwrap_or_default();
-    let draft = Draft {
-        patterns: Vec::new(),
-        methods: Vec::new(),
-        checked: vec![false; METHODS.len()],
-        all: false,
+    let Some(form_id) = issue_form_id(&ui, &view) else {
+        return failed(&ui, &view, &FerroError::Internal("no random id".into())).await;
     };
-    new_form_page(&ui, &view, &email, StatusCode::OK, None, "", &draft)
+    new_form_page(
+        &ui,
+        &view,
+        &email,
+        NewForm {
+            status: StatusCode::OK,
+            notice: None,
+            error: None,
+            name: "",
+            draft: &Draft::blank(),
+            form_id: &form_id,
+        },
+    )
+}
+
+/// The create form after a sign-in that came back for a parked draft:
+/// pre-filled, not submitted.
+pub async fn key_new_draft(
+    State(ui): State<Arc<UiState>>,
+    ctx: RequestContext,
+    headers: HeaderMap,
+    Path(draft_id): Path<String>,
+) -> Reply {
+    let view = match ui.require_session(&headers, &ctx) {
+        Ok(view) => view,
+        Err(redirect) => return redirect,
+    };
+    let saved = if valid_token(&draft_id) {
+        lock(&ui.drafts).take(&draft_id, &DraftTarget::NewKey, ctx.client_ip, ui.now())
+    } else {
+        None
+    };
+    let email = ui.account_email().await.unwrap_or_default();
+    let Some(form_id) = issue_form_id(&ui, &view) else {
+        return failed(&ui, &view, &FerroError::Internal("no random id".into())).await;
+    };
+    let (notice, name, draft) = match &saved {
+        Some(s) => (NOTICE_DRAFT_RESTORED, s.name.as_str(), Draft::from_saved(s)),
+        None => (NOTICE_DRAFT_EXPIRED_NEW, "", Draft::blank()),
+    };
+    new_form_page(
+        &ui,
+        &view,
+        &email,
+        NewForm {
+            status: StatusCode::OK,
+            notice: Some(notice),
+            error: None,
+            name,
+            draft: &draft,
+            form_id: &form_id,
+        },
+    )
 }
 
 pub async fn key_new_post(
@@ -525,13 +734,34 @@ pub async fn key_new_post(
             Ok(ok) => ok,
             Err(reply) => return reply,
         };
-    if let Err(redirect) = ui.require_sudo(&view, "/ui/keys/new") {
-        return redirect;
-    }
+    let form_id = form
+        .take("form_id")
+        .map(|v| v.to_string())
+        .unwrap_or_default();
     let name = form.take("name").map(|v| v.to_string()).unwrap_or_default();
     let Ok(draft) = Draft::from_form(&mut form) else {
         return bad_request(&ui, &view).await;
     };
+
+    // An id that is unknown, used up or from another session creates
+    // nothing, whatever else is in the form.
+    if !lock(&ui.sessions).form_id_valid(&view, &form_id) {
+        return form_used(&ui, &view).await;
+    }
+    // A stale sign-in: keep what was typed and come back to it, unsaved.
+    if !view.sudo_active(ui.now()) {
+        return park_and_redirect(
+            &ui,
+            &ctx,
+            &view,
+            draft.to_saved(DraftTarget::NewKey, &name, None),
+        );
+    }
+    // Use the id up before creating, so of two racing submissions only one
+    // creates a key.
+    if !lock(&ui.sessions).consume_form_id(&view, &form_id) {
+        return form_used(&ui, &view).await;
+    }
 
     let created = key_service::create_key(
         &ui.app,
@@ -563,18 +793,26 @@ pub async fn key_new_post(
             created.token.zeroize();
             reply
         }
-        Err(e) => match validation_text(&e) {
-            Some(text) => new_form_page(
-                &ui,
-                &view,
-                &email,
-                StatusCode::BAD_REQUEST,
-                Some(&text),
-                &name,
-                &draft,
-            ),
-            None => failed(&ui, &view, &e).await,
-        },
+        Err(e) => {
+            // Nothing was created: the form on screen stays usable.
+            lock(&ui.sessions).restore_form_id(&view, &form_id);
+            match validation_text(&e) {
+                Some(text) => new_form_page(
+                    &ui,
+                    &view,
+                    &email,
+                    NewForm {
+                        status: StatusCode::BAD_REQUEST,
+                        notice: None,
+                        error: Some(&text),
+                        name: &name,
+                        draft: &draft,
+                        form_id: &form_id,
+                    },
+                ),
+                None => failed(&ui, &view, &e).await,
+            }
+        }
     }
 }
 
@@ -715,6 +953,62 @@ pub async fn key_get(
     )
 }
 
+/// The editor after a sign-in that came back for a parked draft: the draft is
+/// in the form, nothing is saved. A draft that is gone (expired, used,
+/// another address) gives the saved policy and says so.
+pub async fn key_draft(
+    State(ui): State<Arc<UiState>>,
+    ctx: RequestContext,
+    headers: HeaderMap,
+    Path((id, draft_id)): Path<(String, String)>,
+) -> Reply {
+    let view = match ui.require_session(&headers, &ctx) {
+        Ok(view) => view,
+        Err(redirect) => return redirect,
+    };
+    if !valid_id(&id) {
+        return not_found(&ui, &view).await;
+    }
+    let Ok(key) = key_service::get_key(&ui.app, &id).await else {
+        return not_found(&ui, &view).await;
+    };
+    let saved = if valid_token(&draft_id) {
+        lock(&ui.drafts).take(
+            &draft_id,
+            &DraftTarget::Key(id.clone()),
+            ctx.client_ip,
+            ui.now(),
+        )
+    } else {
+        None
+    };
+    let email = ui.account_email().await.unwrap_or_default();
+    let (notice, draft, request) = match &saved {
+        Some(s) => (
+            NOTICE_DRAFT_RESTORED,
+            Draft::from_saved(s),
+            RequestFields::from_saved(s),
+        ),
+        None => (
+            NOTICE_DRAFT_EXPIRED,
+            Draft::from_key(&key),
+            RequestFields::default(),
+        ),
+    };
+    key_page(
+        &ui,
+        &view,
+        &email,
+        &key,
+        &draft,
+        &request,
+        KeyExtras {
+            notice: Some(notice),
+            ..KeyExtras::default()
+        },
+    )
+}
+
 pub async fn key_post(
     State(ui): State<Arc<UiState>>,
     ctx: RequestContext,
@@ -818,8 +1112,15 @@ pub async fn key_post(
         }
         _ => {
             // Save. Sudo first: a stale sign-in never gets as far as a diff.
-            if let Err(redirect) = ui.require_sudo(&view, &format!("/ui/keys/{id}")) {
-                return redirect;
+            // What was typed is parked, and comes back unsaved after the
+            // sign-in.
+            if !view.sudo_active(ui.now()) {
+                return park_and_redirect(
+                    &ui,
+                    &ctx,
+                    &view,
+                    draft.to_saved(DraftTarget::Key(id.clone()), "", Some(&request)),
+                );
             }
             let saved = KeyPolicy {
                 credentials: key.credentials.clone(),
@@ -1024,9 +1325,9 @@ pub async fn audit_get(
     let rows = events
         .iter()
         .map(|e| AuditRow {
-            time: e
-                .timestamp
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            // Readable and short enough not to wrap; the exact RFC 3339
+            // timestamp is in the event JSON under Details.
+            time: e.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
             action: e.event.action.as_str().to_string(),
             outcome: e.event.outcome.as_str().to_string(),
             reason: e

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Ferrowarden is a credential proxy — a small HTTP service that sits between an AI agent and the services it needs to call. The agent never receives credential values. Instead, it sends requests with named placeholders; Ferrowarden looks up the real values, makes the call on the agent's behalf, and returns the response with any credential-shaped content scrubbed out.
+Ferrowarden is an open-source credential proxy — a small HTTP service that sits between an AI agent and the services it needs to call. It runs as a sidecar to [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (it is not a fork or replacement, and is not affiliated with Vaultwarden or Bitwarden). By design, the agent is never handed credential values. Instead, it sends requests with named placeholders; Ferrowarden looks up the real values, makes the call on the agent's behalf, and returns the response with known credential values and common credential patterns scrubbed out.
 
 ---
 
@@ -14,7 +14,7 @@ AI agents that manage infrastructure need credentials to do their job. The obvio
 - **Pass credentials in tool call arguments**: They appear in the conversation history.
 - **Have the agent retrieve credentials itself**: Any retrieval response containing a value can be echoed back.
 
-Ferrowarden eliminates the exposure surface by ensuring the agent never receives a value — only the name of a credential and the result of an API call that used it.
+Ferrowarden reduces this exposure by design: the agent works with the name of a credential and the result of an API call that used it, and is not handed the value. [Security Model](security.md) describes the controls and their limits.
 
 ---
 
@@ -28,26 +28,26 @@ Vaultwarden is a self-hosted, open-source Bitwarden-compatible server written in
 - The human-facing web UI for managing credential names and values
 - Multi-device sync for the vault operator
 
-Ferrowarden never talks directly to Vaultwarden. Only the Bitwarden CLI (`bw serve`) does.
+Ferrowarden does not talk to Vaultwarden to read credentials: only the Bitwarden CLI (`bw serve`) does. The one exception is the optional [admin web UI](admin-ui.md), which sends an operator's sign-in to Vaultwarden to be verified.
 
 **Why Vaultwarden instead of a database?**
-Using an existing, audited password manager means we do not have to implement encrypted credential storage ourselves. Vaultwarden has been in production use since 2018, has an active security community, and handles the hard parts: key derivation, encryption, authenticated sync. Building equivalent storage from scratch would introduce far more risk.
+Using an existing, widely deployed password manager means we do not have to implement encrypted credential storage ourselves. Vaultwarden is an independent, community-maintained implementation of the Bitwarden server API, and it handles the hard parts: key derivation, encryption, authenticated sync. Building equivalent storage from scratch would introduce far more risk.
 
 ### bw serve
 
-`bw serve` is the official Bitwarden CLI running in server mode. It exposes a local REST API on port 8087 (default) for the locked/unlocked vault:
+`bw serve` is the Bitwarden CLI (`bw`) running in server mode. It exposes a local REST API on port 8087 (default) for the locked/unlocked vault:
 
 - `POST /unlock` — unlock the vault session with the master password
 - `POST /sync` — pull the latest vault contents from Vaultwarden
 - `GET /list/object/items` — list items (Ferrowarden keeps only names, ids and URIs)
 - `GET /object/password/:id` — retrieve a credential value by item id
 
-The key property: `bw serve` performs decryption locally. Credential values are decrypted on the host, in memory, and never transmitted over a network connection. The only network traffic between `bw serve` and Vaultwarden is the encrypted vault sync, which runs over HTTPS on the internal network (current CLI releases refuse plain HTTP). A one-shot `internal-certs` service issues Vaultwarden's certificate from a private CA kept in the `internal-pki` volume; see [Security Model §6a](security.md#6a-internal-tls-between-bw-serve-and-vaultwarden).
+The key property: `bw serve` performs decryption locally. Credential values are decrypted on the host, in memory; the only network traffic between `bw serve` and Vaultwarden is the encrypted vault sync, which runs over HTTPS on the internal network (current CLI releases refuse plain HTTP). A one-shot `internal-certs` service issues Vaultwarden's certificate from a private CA kept in the `internal-pki` volume; see [Security Model §6a](security.md#6a-internal-tls-between-bw-serve-and-vaultwarden).
 
 Ferrowarden talks to `bw serve` over plain HTTP on the `vault-internal` network. `bw serve` only accepts requests addressed to `localhost` or to the `--hostname` it was started with, so in Docker Compose it runs with `--hostname bw-serve`.
 
 **Why bw serve instead of Vaultwarden's HTTP API directly?**
-Vaultwarden's vault API works with encrypted blobs. Decryption requires the master password and client-side cryptography. Implementing the full Bitwarden crypto stack (PBKDF2, AES-CBC, RSA) in Ferrowarden would significantly increase code complexity and the risk of cryptographic mistakes. `bw serve` is the officially maintained implementation of that logic.
+Vaultwarden's vault API works with encrypted blobs. Decryption requires the master password and client-side cryptography. Implementing the full Bitwarden crypto stack (PBKDF2, AES-CBC, RSA) in Ferrowarden would significantly increase code complexity and the risk of cryptographic mistakes. `bw serve` is the Bitwarden project's own implementation of that logic.
 
 ### Ferrowarden
 
@@ -120,7 +120,7 @@ The credential value exists in Ferrowarden's memory between steps 4 and 7. It is
 5. **In the forwarded request**: Sent as a header or body value to the target service over HTTP/HTTPS. The connection is initiated by Ferrowarden's HTTP client; the value is not stored after the request is sent.
 6. **In the response**: The scrubber removes credential-shaped content from the response body before it is returned to the agent.
 
-The agent never touches steps 1–5.
+By design, the agent is not part of steps 1–5.
 
 ---
 
@@ -128,8 +128,8 @@ The agent never touches steps 1–5.
 
 The language choice was deliberate for a security-sensitive component:
 
-- **Memory safety**: Rust's ownership model eliminates use-after-free, double-free, and buffer overflow classes of bugs at compile time — without a garbage collector that might delay memory clearing.
-- **`Zeroizing`**: The `zeroize` crate provides guaranteed memory zeroing on drop. In garbage-collected languages, there is no equivalent guarantee: the runtime may move objects, delay collection, or leave copies in memory at unpredictable times.
+- **Memory safety**: In safe Rust, the ownership model rules out use-after-free, double-free, and buffer overflow classes of bugs at compile time — without a garbage collector that might delay memory clearing.
+- **`Zeroizing`**: The `zeroize` crate provides explicit memory zeroing on drop that the compiler is not allowed to optimise away. In garbage-collected languages, there is no equivalent control: the runtime may move objects, delay collection, or leave copies in memory at unpredictable times.
 - **No null pointer exceptions, no data races**: The type system enforces these at compile time.
 - **Explicit error handling**: `Result<T, E>` forces every error path to be handled. No unchecked exceptions can bypass security checks.
 - **Minimal runtime**: No JVM, no interpreter, no runtime that adds its own attack surface.

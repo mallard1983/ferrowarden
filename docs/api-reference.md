@@ -1,3 +1,5 @@
+<img src="../branding/assets/png/banners/ferrowarden-docs-header.png" width="100%" alt="">
+
 # API Reference
 
 All requests require an authentication header. The header name depends on the endpoint:
@@ -19,7 +21,7 @@ Responses are JSON. Errors follow a consistent shape:
 
 **Strict JSON input.** Request bodies are parsed strictly. A body is rejected with `400` if it has a duplicate object key at any depth (keys are compared after unescaping, so `"a"` and `"a"` clash), an unknown field, trailing data, invalid UTF-8, nesting deeper than 64 levels, or a content type other than `application/json`. In `headers`, names that differ only by case (`Authorization` and `authorization`) count as duplicates. Error messages name the offending key or field and the line and column, never a value from the body. Query parameters are strict too: see `GET /v1/credentials` and `GET /v1/admin/audit`.
 
-**Authentication comes first.** The key is checked before the body or query is examined. A request without a valid key gets `401` even if its body is malformed, so an unauthenticated caller never sees parse errors; the `400` responses described below apply to authenticated requests. Failed authentication is recorded as a security event (see [events.md](events.md)).
+**Authentication comes first.** The key is checked before the body or query is examined. A request without a valid key gets `401` even if its body is malformed, so an unauthenticated caller does not see parse errors; the `400` responses described below apply to authenticated requests. Failed authentication is recorded as a security event (see [events.md](events.md)).
 
 ---
 

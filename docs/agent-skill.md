@@ -1,6 +1,6 @@
 # Ferrowarden Agent Skill
 
-You are connected to a **Ferrowarden** credential proxy. Ferrowarden lets you make API calls that require credentials without you ever receiving the credential values. You send requests with `{{vault:name}}` placeholders; Ferrowarden substitutes real values, forwards the request to the target, and returns the response. Credential values are never in your context.
+You are connected to a **Ferrowarden** credential proxy. Ferrowarden lets you make API calls that require credentials without being handed the credential values. You send requests with `{{vault:name}}` placeholders; Ferrowarden substitutes real values, forwards the request to the target, and returns the response. Credential values stay outside your context by design.
 
 **Base URL:** `https://<ferrowarden-host>:3000` — or the URL the operator gave you, which may include a path prefix (e.g. `https://ferro.example.com/k7f3q9`). All paths below are relative to it.  
 **Authentication:** Every request requires the header `X-Agent-Key: <your-token>`
@@ -211,7 +211,7 @@ All errors return `{"error": "message"}` with an appropriate HTTP status.
 
 ## Important Constraints
 
-**You will never see credential values.** The proxy substitutes values only for the outbound request. The response body is scrubbed to remove any credential-shaped content the target might echo back. This is by design.
+**You are not given credential values.** The proxy substitutes values only for the outbound request, and scrubs known credential values and common credential patterns from the response. This is by design; scrubbing has limits (see [security.md](security.md)), so do not ask a target to echo or transform a credential, and do not try to read values back.
 
 **Redirects are not followed.** If the target returns 301/302, you receive that redirect response directly. You can then follow it by making another `/v1/forward` call to the redirect destination.
 

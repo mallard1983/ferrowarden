@@ -1,0 +1,672 @@
+{
+  "project": "Ferrowarden",
+  "identity": "Approved hybrid",
+  "file_count_excluding_manifest": 133,
+  "files": [
+    {
+      "path": "README.md",
+      "size_bytes": 4013,
+      "sha256": "1092e09e0d47f28699965a2763b8f90c80a0f602f8395871307fd22eaea1a46e"
+    },
+    {
+      "path": "assets/favicons/android-chrome-192x192.png",
+      "size_bytes": 3827,
+      "sha256": "7baf3f7a289c4502d666ccdde71deec255eb812e3784fb514af9f55211d64266"
+    },
+    {
+      "path": "assets/favicons/android-chrome-512x512.png",
+      "size_bytes": 10801,
+      "sha256": "16f2ca5f3af4c75545d997a5457a20ede7da9eb3adcfaa4af3a78ab0e01703e3"
+    },
+    {
+      "path": "assets/favicons/android-maskable-512x512.png",
+      "size_bytes": 5911,
+      "sha256": "583b0fba993afd330c64570f73d0b1b07548ef85591de8590589e5e1ac603acd"
+    },
+    {
+      "path": "assets/favicons/apple-touch-icon.png",
+      "size_bytes": 3570,
+      "sha256": "d0772f6b42b0cf23be44424a1bd06d6c0c90685ee2b26b66410e5b744d2ee1aa"
+    },
+    {
+      "path": "assets/favicons/favicon-16.png",
+      "size_bytes": 494,
+      "sha256": "ebbc7c6186d6f886128c173fe03a1b361a510edc39bf64cb489c285df4942234"
+    },
+    {
+      "path": "assets/favicons/favicon-32.png",
+      "size_bytes": 789,
+      "sha256": "713964ccc1b2fc4047174e2d529014296c7b0ec15d08c2090debf6152ffe862a"
+    },
+    {
+      "path": "assets/favicons/favicon-48.png",
+      "size_bytes": 1150,
+      "sha256": "d9f0cda1ecdd06b3355ce970021570929f7f0d8d8052e668ffeb4107122760b5"
+    },
+    {
+      "path": "assets/favicons/favicon.ico",
+      "size_bytes": 6836,
+      "sha256": "5dfaa617c0238402296577197677597a2df37a863a81d50cc7da9b97ae040343"
+    },
+    {
+      "path": "assets/favicons/github-avatar-512.png",
+      "size_bytes": 10844,
+      "sha256": "7449751cbe60a6bb70b3f91910a51fe51394e6f621f893277a94792b21a91b05"
+    },
+    {
+      "path": "assets/favicons/safari-pinned-tab.svg",
+      "size_bytes": 759,
+      "sha256": "7dac3a816c3c7f6a60c4bea036fd845df35d6d59af883ef1624aa68aa2ccbcce"
+    },
+    {
+      "path": "assets/favicons/site.webmanifest",
+      "size_bytes": 577,
+      "sha256": "8ef65a0dbc3d8f36ea0a0cb5b1597523c585d33a93bcd28ebc6f161c0b903a07"
+    },
+    {
+      "path": "assets/png/banners/ferrowarden-dashboard-header.png",
+      "size_bytes": 37374,
+      "sha256": "392d94d44374f7ffb350791b3257a19b086904e7cc1064864dd5e6219b23248e"
+    },
+    {
+      "path": "assets/png/banners/ferrowarden-docs-header.png",
+      "size_bytes": 32091,
+      "sha256": "d5073ed28134994febc64241c139eaef36e885e8afc72a575c056c528d3e223b"
+    },
+    {
+      "path": "assets/png/banners/ferrowarden-readme-dark.png",
+      "size_bytes": 27509,
+      "sha256": "aa8340387dcd9a3949370e382b75aed4d2ad4b571b3a33dbea8c179b5d4b6960"
+    },
+    {
+      "path": "assets/png/banners/ferrowarden-readme-light.png",
+      "size_bytes": 26947,
+      "sha256": "286ec8de1a954c958b1aee3967bac694f6351e0e0bc93db8d20862726f66623b"
+    },
+    {
+      "path": "assets/png/banners/ferrowarden-release-header.png",
+      "size_bytes": 31161,
+      "sha256": "58ac8d4f0f37140b0c9b3669dd48913e05762988768336136e43429cfdb2366e"
+    },
+    {
+      "path": "assets/png/banners/ferrowarden-site-hero.png",
+      "size_bytes": 42520,
+      "sha256": "3c4cd718747be73f6c48ec44f025af3f603fb59a2ce787bf2d72329aea4689c8"
+    },
+    {
+      "path": "assets/png/banners/ferrowarden-social-og.png",
+      "size_bytes": 33704,
+      "sha256": "cca66d2b4531bbe85fce97a31ea8d73c31ecf84b6ab673fc33c5b07051adb331"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-dark-1024.png",
+      "size_bytes": 18849,
+      "sha256": "d25ced1a4761be91b5dfa6e50a41041b35d607b1462e7075e02ce34524e078d6"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-dark-128.png",
+      "size_bytes": 2064,
+      "sha256": "276b677b23b2e63d246babccf1ca99252d0ec588201b2e9e3032a2ecaa56efb7"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-dark-16.png",
+      "size_bytes": 512,
+      "sha256": "6d6564de3469e1fee1acb939e1bf3f1cb36efb1379bf6f16090df680315bd775"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-dark-180.png",
+      "size_bytes": 2776,
+      "sha256": "badcb8cdbfe98b68fd6a116a0e373b6dff458aab1f0ec7e5af823ebc960daac5"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-dark-192.png",
+      "size_bytes": 3079,
+      "sha256": "2cab83f05dd5de60b5b77e64bca678e78e4c77433cbec2fce57a6cd6e9f91d3c"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-dark-24.png",
+      "size_bytes": 597,
+      "sha256": "61abfa84d255ba47135e51449a415b612251dd77abab94736c9aa8bbacc75e62"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-dark-256.png",
+      "size_bytes": 4073,
+      "sha256": "9378ffe73dda10ebb37d6a943cd7bc053ec00ed6cc92c9acdc627a8820eddb56"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-dark-32.png",
+      "size_bytes": 731,
+      "sha256": "20182a028f3c4fe4cef8978de6594fb884756c63dd687d0bb592e47d20a6d286"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-dark-48.png",
+      "size_bytes": 989,
+      "sha256": "d3335360de12850fd60e0cf243559c9157729624c6b0f816c1b3bab4f650c094"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-dark-512.png",
+      "size_bytes": 8516,
+      "sha256": "32fbb306d7f5eea35bc6a2f8bdb1343dbf043721dae11084c1e9950653a3700d"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-dark-64.png",
+      "size_bytes": 1154,
+      "sha256": "806f3c47fda7f8bc9d8fd3d4fc5978dce73236ac24d8bd09060c06fa27430f38"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-dark-96.png",
+      "size_bytes": 1635,
+      "sha256": "ad060ca05402706909cd58ef26b18e5b0678bdbda903d0c75c52a444b7612201"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-light-1024.png",
+      "size_bytes": 18978,
+      "sha256": "3f581ef2328517e017fd66707be971ba463a62935f90d24d8fdf3e72bb0dbbfe"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-light-128.png",
+      "size_bytes": 2055,
+      "sha256": "b21fd2bb6b937a8da46aef561a6272135c05f4ece56e3734da3747037eb8dbde"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-light-16.png",
+      "size_bytes": 505,
+      "sha256": "d46c4e6eb26136796867d4b31bd10601c164ca72002d769230b218386602532e"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-light-180.png",
+      "size_bytes": 2783,
+      "sha256": "f1c82ab097ba3d5de7e427565c919d2e23dd0b8c1515ffa7181d4005c2d15791"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-light-192.png",
+      "size_bytes": 3097,
+      "sha256": "f5d9157b41aed11c5477437db0679ed3d58e552df4f5267b517425f46f9a0d89"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-light-24.png",
+      "size_bytes": 605,
+      "sha256": "0562bc39c84dfca56d1de59d0d251e9e882f8e1623c3635aed7095cee2898b20"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-light-256.png",
+      "size_bytes": 4117,
+      "sha256": "8aeb4652e5e57e5334227c965247f95e145d7c87565875fea0c6acbd968a0bc5"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-light-32.png",
+      "size_bytes": 732,
+      "sha256": "481b7dc151e2409a8d15c91a132c73117620422722bf4f5d7adedec3818bf647"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-light-48.png",
+      "size_bytes": 975,
+      "sha256": "0ac4e57a8d9a0aa49c171978a5496221d6753c73c61ea26a6df07d9476b28e20"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-light-512.png",
+      "size_bytes": 8572,
+      "sha256": "5a2209ee37bd0dcf8a9e5405b81e4242951ba7692f773cd28df9abe6c25135b3"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-light-64.png",
+      "size_bytes": 1160,
+      "sha256": "07f67a7c26bed1bbd54d5852d7e00ccf055d7a41df6556aae54e9454aafbff41"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-mark-light-96.png",
+      "size_bytes": 1643,
+      "sha256": "cd479a3d93bc6d4043e74f4e166cbd7f75420fdc48467f03a7ae5bd43053a2e5"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-dark-1024.png",
+      "size_bytes": 24055,
+      "sha256": "bb3004dcc268751250726e9817c7fbf3e0c069b1767f1658e865b6b4f5010fbd"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-dark-128.png",
+      "size_bytes": 2624,
+      "sha256": "b2d697ae079e4f5f459a4617a5855c950fae7f36d2d5bea9a40d91e1ddd03cac"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-dark-16.png",
+      "size_bytes": 482,
+      "sha256": "cdcea7f1ca535df6b2dd213908299d4a33b1543be0982292fba99447ca794791"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-dark-180.png",
+      "size_bytes": 3544,
+      "sha256": "66e8110b7046f7bb18c84a2dfd3ef376f83c1767e82cfe21b3e69784a3707398"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-dark-192.png",
+      "size_bytes": 3827,
+      "sha256": "7baf3f7a289c4502d666ccdde71deec255eb812e3784fb514af9f55211d64266"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-dark-24.png",
+      "size_bytes": 655,
+      "sha256": "67dbbcabe5753f35481a1f05235a86da2aed115abff7c56a3ca60bffa7a44904"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-dark-256.png",
+      "size_bytes": 5070,
+      "sha256": "508fc26927eaea88ad6912d3c08fa33947ac862596313d5f57b75dd84d73835b"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-dark-32.png",
+      "size_bytes": 767,
+      "sha256": "7dd379fb27becd13b67422f30d4ea3915bd474ce32819831ca8e60b6560925f7"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-dark-48.png",
+      "size_bytes": 1150,
+      "sha256": "68b15d5a1f3867a90501b55b07574472a653fc1eff1dd4a0cb7e5736a86456b6"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-dark-512.png",
+      "size_bytes": 10801,
+      "sha256": "16f2ca5f3af4c75545d997a5457a20ede7da9eb3adcfaa4af3a78ab0e01703e3"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-dark-64.png",
+      "size_bytes": 1378,
+      "sha256": "2fcb0a0e07bd7a4f433da79d2af6f6c462147512c7d665105cf8d2f3f5f9058d"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-dark-96.png",
+      "size_bytes": 1966,
+      "sha256": "d4326935b0d48cff8d60cbc3ed7adec4e33a532407b096cdc3e1734fcf033251"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-light-1024.png",
+      "size_bytes": 24046,
+      "sha256": "ab696c4601bdfc91ccf81308699730e96dd3b0fe03467decfc119e8265ed9ea8"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-light-128.png",
+      "size_bytes": 2602,
+      "sha256": "9fbbb8a157de9674d5029b426d7b089706314b8f0d376b8c3bbe5490833161f1"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-light-16.png",
+      "size_bytes": 494,
+      "sha256": "ebbc7c6186d6f886128c173fe03a1b361a510edc39bf64cb489c285df4942234"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-light-180.png",
+      "size_bytes": 3570,
+      "sha256": "d0772f6b42b0cf23be44424a1bd06d6c0c90685ee2b26b66410e5b744d2ee1aa"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-light-192.png",
+      "size_bytes": 3832,
+      "sha256": "2c6a7ead3357f2ca7cb69c30035836f3714df8ba56d5de908e5e7907f82c702c"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-light-24.png",
+      "size_bytes": 641,
+      "sha256": "3a3cab9b7b4d4202391e08d4d28738ec735144652bbe8255f1a62f163844a248"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-light-256.png",
+      "size_bytes": 5072,
+      "sha256": "93ed0258e9d91ef69eebf317c520ff376e6ddf43194439f8e4d4d9578f23a294"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-light-32.png",
+      "size_bytes": 789,
+      "sha256": "713964ccc1b2fc4047174e2d529014296c7b0ec15d08c2090debf6152ffe862a"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-light-48.png",
+      "size_bytes": 1150,
+      "sha256": "d9f0cda1ecdd06b3355ce970021570929f7f0d8d8052e668ffeb4107122760b5"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-light-512.png",
+      "size_bytes": 10844,
+      "sha256": "7449751cbe60a6bb70b3f91910a51fe51394e6f621f893277a94792b21a91b05"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-light-64.png",
+      "size_bytes": 1379,
+      "sha256": "ff86405f801416f6f4b201274ca6eb279b11c1db5cc68d1dc284abf7f7763707"
+    },
+    {
+      "path": "assets/png/icons/ferrowarden-tile-light-96.png",
+      "size_bytes": 1955,
+      "sha256": "ebd51afe096a4cd0c9f49f2b3c39d5da0a320f43eb2612a24b6a840bc0c9404e"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-lockup-dark-plain-1260.png",
+      "size_bytes": 16362,
+      "sha256": "28aa044fa95f2fe8b01a8de774b13452cf51afc093e3206491afe38aa5068538"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-lockup-dark-plain-2520.png",
+      "size_bytes": 35544,
+      "sha256": "7de903b779aaf0968ef4c8d8e912ccba1e3ea310d7db20d02fcb364fc6f9d49c"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-lockup-dark-plain-630.png",
+      "size_bytes": 8235,
+      "sha256": "90d0b7715892a51f975bd4fff83793b35027e229d1e88cd58e1ffd1cf22d792c"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-lockup-dark-tagline-1260.png",
+      "size_bytes": 26698,
+      "sha256": "0a054373c754b062e22e07b944d91ee0b6a9f781368cc03fcd394ee32019b05e"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-lockup-dark-tagline-2520.png",
+      "size_bytes": 56292,
+      "sha256": "c8449fa4b750a6c2caa53c770f1541bee8251078f9c07404cadbadfe27d61ddf"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-lockup-dark-tagline-630.png",
+      "size_bytes": 13432,
+      "sha256": "09e61265fe55fa9f0e52a4ceac18f6e210190d2ab07f82db0319a890c8f5fc33"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-lockup-light-plain-1260.png",
+      "size_bytes": 16715,
+      "sha256": "a4aab5e1ea70a157f6a4e8dc645f07df9269c602f1d3216af7cb2c5e1ebf8359"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-lockup-light-plain-2520.png",
+      "size_bytes": 36345,
+      "sha256": "59e04dbb136c4cb1aba204613c8bdf16d89b83888af43c3b585f31b26a7b2870"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-lockup-light-plain-630.png",
+      "size_bytes": 8483,
+      "sha256": "f58eb73bdc2d3ba6981fdd61be8ddc6ce17728d47d4094aec3fe24b49a85236a"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-lockup-light-tagline-1260.png",
+      "size_bytes": 27041,
+      "sha256": "fdd1f819d4818bcdb8180545d320935fa8843e7346c2c7026388d2add7939116"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-lockup-light-tagline-2520.png",
+      "size_bytes": 57108,
+      "sha256": "0fcc4fb9d831722c38a16fc54d2eea16b47bb1d927e8cbe1ca660e22b3b953ee"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-lockup-light-tagline-630.png",
+      "size_bytes": 13593,
+      "sha256": "a6826b887c36f6a738baa649e64993982925c008cdb73d552905381bb8cf4db0"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-stacked-dark-940.png",
+      "size_bytes": 23004,
+      "sha256": "1323615c049bafc07fd960b0fe6d295bf21273418cfb60ed6954e31a43b4ee6c"
+    },
+    {
+      "path": "assets/png/lockups/ferrowarden-stacked-light-940.png",
+      "size_bytes": 23233,
+      "sha256": "749fc401d063de2cb2245b66d64a19fb29b65ccc41d8b3825461e992508a7fb5"
+    },
+    {
+      "path": "assets/svg/banners/ferrowarden-dashboard-header.svg",
+      "size_bytes": 1571,
+      "sha256": "b1403469853583b80e7912baa4b5424839bf3290a9ea0667ad5d4f9098f463ea"
+    },
+    {
+      "path": "assets/svg/banners/ferrowarden-docs-header.svg",
+      "size_bytes": 1299,
+      "sha256": "0ffad4ccb8152d947012798867d5d82ca6161dc05b94d9bc1c19ba610ee2780e"
+    },
+    {
+      "path": "assets/svg/banners/ferrowarden-readme-dark.svg",
+      "size_bytes": 1426,
+      "sha256": "a5e96e8fcc0ff2113d7b66dcd3b38a268b7c4acfec9949a87adbf16a9689ddb9"
+    },
+    {
+      "path": "assets/svg/banners/ferrowarden-readme-light.svg",
+      "size_bytes": 1342,
+      "sha256": "0096c9481bcadb20638c9a648fd7597533a19fd790e3c58da89d83971e975f97"
+    },
+    {
+      "path": "assets/svg/banners/ferrowarden-release-header.svg",
+      "size_bytes": 1605,
+      "sha256": "abab1ec2c7afbe7ba1bdfc864fddf527da9e680212790c02bff59018afb6cf2a"
+    },
+    {
+      "path": "assets/svg/banners/ferrowarden-site-hero.svg",
+      "size_bytes": 1586,
+      "sha256": "e5f72e60797d3e601f3ad152d1a24fe479b54fd26d3f4682cbe77066a1827f5b"
+    },
+    {
+      "path": "assets/svg/banners/ferrowarden-social-og.svg",
+      "size_bytes": 1406,
+      "sha256": "087d1545b0e5f7b9b6bb6b91d5912cd1cc50d6ea4429cca02b7e585c6b00fa0c"
+    },
+    {
+      "path": "assets/svg/banners-outlined/ferrowarden-dashboard-header.svg",
+      "size_bytes": 15476,
+      "sha256": "ce4570416bde48e0d6b6a0f7f7fdb4064fb97d509c9d192b53be735c8012ad41"
+    },
+    {
+      "path": "assets/svg/banners-outlined/ferrowarden-docs-header.svg",
+      "size_bytes": 12645,
+      "sha256": "6804f2d31e69ad84ec58d0bb29677ab346361ad50d35dd96084f039953f9d952"
+    },
+    {
+      "path": "assets/svg/banners-outlined/ferrowarden-readme-dark.svg",
+      "size_bytes": 12739,
+      "sha256": "7e77817541e083adcc9add04495b8593d38f4428f70bfcbb11604d1f01f9874c"
+    },
+    {
+      "path": "assets/svg/banners-outlined/ferrowarden-readme-light.svg",
+      "size_bytes": 12655,
+      "sha256": "21d3ce43b7f0f68d79725f4480faecf6a446a39bdb8f3b36d541c510be9b08d3"
+    },
+    {
+      "path": "assets/svg/banners-outlined/ferrowarden-release-header.svg",
+      "size_bytes": 15401,
+      "sha256": "ba773bf44a2dca97b8743bd6e573a1dcc8bc52f83817d0e8724e2238377fba69"
+    },
+    {
+      "path": "assets/svg/banners-outlined/ferrowarden-site-hero.svg",
+      "size_bytes": 21497,
+      "sha256": "a6067aa2f738fd65d6d13f1e6efa60b3d6f975acff98e8f65afdcbc43fbd76ad"
+    },
+    {
+      "path": "assets/svg/banners-outlined/ferrowarden-social-og.svg",
+      "size_bytes": 12726,
+      "sha256": "1b66ca1bb5b5fd02f315eca594900227e7c8121071c8874b30a95b9e51166be5"
+    },
+    {
+      "path": "assets/svg/lockups/ferrowarden-lockup-dark-plain.svg",
+      "size_bytes": 952,
+      "sha256": "b19a5355411bf26308cac6f9d016bbf89af6a50185a385f64ab9e53da0ffc146"
+    },
+    {
+      "path": "assets/svg/lockups/ferrowarden-lockup-dark-tagline.svg",
+      "size_bytes": 1133,
+      "sha256": "f60043743bdb4d3a76d43d33a050a07736a97f8d00710f1587cbde79f0fa8ec8"
+    },
+    {
+      "path": "assets/svg/lockups/ferrowarden-lockup-light-plain.svg",
+      "size_bytes": 954,
+      "sha256": "e70e34b1591c00ae5387cf59d124994a8cf490f14fbca1a5eeb46b5df98e2bc1"
+    },
+    {
+      "path": "assets/svg/lockups/ferrowarden-lockup-light-tagline.svg",
+      "size_bytes": 1135,
+      "sha256": "1403ee4325b88d7aade883f73163180a32cd1e5fdc526963a924fd34e2bf9884"
+    },
+    {
+      "path": "assets/svg/lockups/ferrowarden-stacked-dark.svg",
+      "size_bytes": 1146,
+      "sha256": "8b3894cff1d3ae967561f37ff697817dd01030a2fa2af14182e244c520c0fa12"
+    },
+    {
+      "path": "assets/svg/lockups/ferrowarden-stacked-light.svg",
+      "size_bytes": 1148,
+      "sha256": "028fbba02fb508662cc605fa554a5c2428b93f4187e704c56cebee18f16a5af7"
+    },
+    {
+      "path": "assets/svg/lockups-outlined/ferrowarden-lockup-dark-plain.svg",
+      "size_bytes": 3793,
+      "sha256": "d0b89e43d5c602fdc0b6e65d6054fadc8d50cac3326f5558768f2adc6c92a67f"
+    },
+    {
+      "path": "assets/svg/lockups-outlined/ferrowarden-lockup-dark-tagline.svg",
+      "size_bytes": 12487,
+      "sha256": "0f988d1f8c3f898b6f4ff2b37dd56e5c3d7bb516f0eb4a35e5f638ee7131dc5c"
+    },
+    {
+      "path": "assets/svg/lockups-outlined/ferrowarden-lockup-light-plain.svg",
+      "size_bytes": 3795,
+      "sha256": "c337b6bf89054eef83e5d6ff7a9e1883752e059a35a029da96d7662945cbf8b9"
+    },
+    {
+      "path": "assets/svg/lockups-outlined/ferrowarden-lockup-light-tagline.svg",
+      "size_bytes": 12489,
+      "sha256": "d3c0db08bd587c8dc2e7c524a3a77976388a276377a4cf564f774f7d2d9d8efc"
+    },
+    {
+      "path": "assets/svg/lockups-outlined/ferrowarden-stacked-dark.svg",
+      "size_bytes": 12460,
+      "sha256": "0f3408d192fd835c309ebeb2d2641707582879359036e00a1b660b50049ca197"
+    },
+    {
+      "path": "assets/svg/lockups-outlined/ferrowarden-stacked-light.svg",
+      "size_bytes": 12462,
+      "sha256": "8aa4a2c4de3cbebbd5e18e8ef0cc794050f2397a93f0902c81f110f2bc0f90e9"
+    },
+    {
+      "path": "assets/svg/marks/ferrowarden-mark-dark.svg",
+      "size_bytes": 781,
+      "sha256": "a9bbf465c3c4bb026d2a3a2330a908e698e686a44115dffeb6b26edff1e59c03"
+    },
+    {
+      "path": "assets/svg/marks/ferrowarden-mark-light.svg",
+      "size_bytes": 783,
+      "sha256": "3d3421f6b0898a0faceb0e5e8b03afca3717f1ab977f598e005042fad3dad814"
+    },
+    {
+      "path": "assets/svg/marks/ferrowarden-mark-mono-iron.svg",
+      "size_bytes": 777,
+      "sha256": "8a35871712d64bf020ebf4104f8a5aeee5340b0d6d508c8d14910b447c8c8326"
+    },
+    {
+      "path": "assets/svg/marks/ferrowarden-mark-mono-paper.svg",
+      "size_bytes": 779,
+      "sha256": "503606a5bb14706070c96c59e2479be9fdf7538fc44811e5503c774783a273e4"
+    },
+    {
+      "path": "assets/svg/marks/ferrowarden-tile-dark-square.svg",
+      "size_bytes": 850,
+      "sha256": "73a8d0ae57ac6801a86000cab7de0679950164926d8405054428740124cef64c"
+    },
+    {
+      "path": "assets/svg/marks/ferrowarden-tile-dark.svg",
+      "size_bytes": 837,
+      "sha256": "48feb370c14f757299d22e9887cfd5fbcc94009039f7eb91546bf4a28a5e3ec7"
+    },
+    {
+      "path": "assets/svg/marks/ferrowarden-tile-light-square.svg",
+      "size_bytes": 852,
+      "sha256": "49121431f61c114e5f29cf858fd3b97457e3190c793d13c1d55aa9714e88acc4"
+    },
+    {
+      "path": "assets/svg/marks/ferrowarden-tile-light.svg",
+      "size_bytes": 839,
+      "sha256": "3ff568cfadc6cd186457d0d7707d97702c3c3075b88f230e11a2ab66d0b1b094"
+    },
+    {
+      "path": "assets/svg/marks/ferrowarden-tile-maskable-dark.svg",
+      "size_bytes": 827,
+      "sha256": "366bbc90c38e59e2164a935d277a5eab6bc59d791569b441c5a1341de87ff217"
+    },
+    {
+      "path": "docs/ASSET_CATALOG.md",
+      "size_bytes": 5129,
+      "sha256": "b5b7b4e98c5bf4754c2e21feb39d65cb8b47748c29efedda353622b3ba471879"
+    },
+    {
+      "path": "docs/BRAND_GUIDE.md",
+      "size_bytes": 8824,
+      "sha256": "99dc56a5a7c67c827f4a91cf47af952bdcc32bebebc72d74411c27195da93b3a"
+    },
+    {
+      "path": "docs/IMPLEMENTATION.md",
+      "size_bytes": 4408,
+      "sha256": "0890237d98096132b3c02e3a16880643ebf6319c62e772aa4833cb0e155c8043"
+    },
+    {
+      "path": "docs/LOGO_USAGE.md",
+      "size_bytes": 2960,
+      "sha256": "414bff65441f1a3a7603adaf6a33ca600a6a56d811a2009fa80ff4f7c0dcb95e"
+    },
+    {
+      "path": "docs/MAINTAINING_ASSETS.md",
+      "size_bytes": 3036,
+      "sha256": "1abe1786b7fc74d69b4e8f79271127cc73c36431260151ed744938849a03e8d5"
+    },
+    {
+      "path": "docs/README_HEADER_SNIPPET.md",
+      "size_bytes": 586,
+      "sha256": "d7a91a5208d1ee464d599dae7bf0f6ceae13844a0a6b686caade792b989b96da"
+    },
+    {
+      "path": "docs/RELEASE_CHECKLIST.md",
+      "size_bytes": 1805,
+      "sha256": "e0a9ff80fcbdfbd3cbf31918bf4ff9531154fd4f2b41d3a3eaffca1c118b3385"
+    },
+    {
+      "path": "docs/VOICE_AND_MESSAGING.md",
+      "size_bytes": 4397,
+      "sha256": "43815e58870747f182e8674757fe94a0966fa15201be52e7e8ef52b591ff9ca7"
+    },
+    {
+      "path": "previews/brand-kit-overview.png",
+      "size_bytes": 171250,
+      "sha256": "60d553167bdbcc2879f0f647fc43d805d4a9ee4199069a5c679b68a9d63339c1"
+    },
+    {
+      "path": "requirements.txt",
+      "size_bytes": 50,
+      "sha256": "0be508b97ac918a42b73ae55ccbcc6a8666711efcc9ee3845a6e24dc67e6b2cc"
+    },
+    {
+      "path": "scripts/build_assets.py",
+      "size_bytes": 14593,
+      "sha256": "8f6bd3b234cc38ebd98505e686ae11f7a513380fb94f54df42eda908d0caddc3"
+    },
+    {
+      "path": "scripts/check_assets.py",
+      "size_bytes": 2775,
+      "sha256": "7a9d184f4fa5a28e0d1bbf0b80469fe7cfa40537e4852f397baf4ec69bca16ab"
+    },
+    {
+      "path": "scripts/outline_svg_text.py",
+      "size_bytes": 2854,
+      "sha256": "7a2b0713314e02c75dfa65af06b1812ae0058c8ce72217af94cfc3042cc0e4c6"
+    },
+    {
+      "path": "source/approved-icon-crop.png",
+      "size_bytes": 153168,
+      "sha256": "b8ce5c3d224369d6316d49cd0ca4f8bbd01d2005427cca07a1bc2e65d4a232e4"
+    },
+    {
+      "path": "source/approved-reference.png",
+      "size_bytes": 1917535,
+      "sha256": "ae3ec8dbcf8b42536d2be4a80b407b8b68ea05b2ab8554611b3b6c62ebdab678"
+    },
+    {
+      "path": "tokens/design-tokens.json",
+      "size_bytes": 994,
+      "sha256": "68ad51fc1a8770eeecb5829b8a238383b61a15c314814c48b7065da444f6e615"
+    },
+    {
+      "path": "tokens/ferrowarden.css",
+      "size_bytes": 553,
+      "sha256": "dbbc5dbb89899e00a7c2d3f97e4a089cd5312b7a0478cbab69173540977edb87"
+    }
+  ]
+}
