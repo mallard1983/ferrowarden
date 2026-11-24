@@ -682,16 +682,19 @@ async fn missing_expired_and_foreign_drafts_give_the_saved_policy() {
     };
 
     // Unknown ids, odd ids, another key's page: the saved policy and a notice.
-    for path in [
+    for (case, path) in [
         format!("/ui/keys/{a}/draft/{}", "A".repeat(43)),
         format!("/ui/keys/{a}/draft/short"),
         format!("/ui/keys/{a}/draft/{}", "x".repeat(100)),
         format!("/ui/keys/{a}/draft/bad%21id"),
         // The right id on the wrong key does not give it up ...
         format!("/ui/keys/{z}/draft/{draft_id}"),
-    ] {
-        let r = owner.get(&h, &path).await;
-        assert_eq!(r.status, StatusCode::OK, "{path}");
+    ]
+    .iter()
+    .enumerate()
+    {
+        let r = owner.get(&h, path).await;
+        assert_eq!(r.status, StatusCode::OK, "draft case {case}");
         expired(&r.body);
     }
     // ... and for the key and form it is not (a key that is not there).
