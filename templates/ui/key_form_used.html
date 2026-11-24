@@ -1,0 +1,9 @@
+{% extends "ui/base.html" %}
+{% block title %}Form already submitted{% endblock %}
+{% block main_class %}narrow{% endblock %}
+{% block content %}
+<h1>This form was already submitted</h1>
+<p class="alert warn" role="status">No key was created from this request. The form was either submitted already or it expired.</p>
+<p>If the key was created, its token was shown once on the page that followed the first submission. It cannot be shown again: Ferrowarden keeps only a hash. If you did not copy it, revoke that key and create a new one.</p>
+<p class="actions"><a class="button" href="/ui/keys">Back to keys</a><a class="button secondary" href="/ui/keys/new">Create another key</a></p>
+{% endblock %}

@@ -168,13 +168,15 @@ async fn pages_need_a_session_and_carry_the_navigation() {
 async fn creating_a_key_shows_the_token_once() {
     let h = harness(full_opts()).await;
     let mut b = signed_in(&h).await;
-    let csrf = b.get(&h, "/ui/keys/new").await.csrf();
+    let form = b.get(&h, "/ui/keys/new").await;
+    let (csrf, fid) = (form.csrf(), form.form_id());
     let r = b
         .post(
             &h,
             "/ui/keys/new",
             &[
                 ("csrf", &csrf),
+                ("form_id", &fid),
                 ("name", "  homelab  "),
                 ("credentials", "lab_*\r\n\r\n  uptime_ \r\n"),
                 ("m_GET", "1"),
@@ -241,7 +243,8 @@ async fn key_id_of(h: &Harness, name: &str) -> String {
 async fn create_errors_keep_the_input_escaped() {
     let h = harness(full_opts()).await;
     let mut b = signed_in(&h).await;
-    let csrf = b.get(&h, "/ui/keys/new").await.csrf();
+    let form = b.get(&h, "/ui/keys/new").await;
+    let (csrf, fid) = (form.csrf(), form.form_id());
     // "All methods" together with a method is ambiguous.
     let r = b
         .post(
@@ -249,6 +252,7 @@ async fn create_errors_keep_the_input_escaped() {
             "/ui/keys/new",
             &[
                 ("csrf", &csrf),
+                ("form_id", &fid),
                 ("name", "\"><b>x</b>"),
                 ("credentials", "a<b>\nb"),
                 ("m_GET", "1"),
@@ -281,6 +285,7 @@ async fn create_errors_keep_the_input_escaped() {
                 "/ui/keys/new",
                 &[
                     ("csrf", &csrf),
+                    ("form_id", &fid),
                     ("name", name),
                     ("credentials", creds),
                     ("m_GET", "1"),
@@ -292,7 +297,11 @@ async fn create_errors_keep_the_input_escaped() {
     assert_eq!(key_count(&h), 0);
     // No methods and no patterns is a valid, deny-everything key.
     let r = b
-        .post(&h, "/ui/keys/new", &[("csrf", &csrf), ("name", "none")])
+        .post(
+            &h,
+            "/ui/keys/new",
+            &[("csrf", &csrf), ("form_id", &fid), ("name", "none")],
+        )
         .await;
     assert_eq!(r.status, StatusCode::OK);
     assert_eq!(key_count(&h), 1);
@@ -307,7 +316,8 @@ async fn sensitive_actions_need_a_recent_sign_in_on_get_and_post() {
     let (id, _) = api_key(&h, "victim", &["lab_*"], &["GET"]).await;
     let mut b = signed_in(&h).await;
     // Forms fetched while fresh.
-    let csrf = b.get(&h, "/ui/keys/new").await.csrf();
+    let form = b.get(&h, "/ui/keys/new").await;
+    let (csrf, fid) = (form.csrf(), form.form_id());
 
     h.ui.advance(Duration::from_secs(9 * 60 + 59));
     assert_eq!(b.get(&h, "/ui/keys/new").await.status, StatusCode::OK);
@@ -327,8 +337,12 @@ async fn sensitive_actions_need_a_recent_sign_in_on_get_and_post() {
     let mut attempts = vec![
         (
             new_path.to_string(),
-            new_path.to_string(),
-            (vec![("csrf", csrf.as_str()), ("name", "n")]),
+            "/ui/keys/new/draft/".to_string(),
+            (vec![
+                ("csrf", csrf.as_str()),
+                ("form_id", fid.as_str()),
+                ("name", "n"),
+            ]),
         ),
         (
             revoke_path.clone(),
@@ -337,7 +351,7 @@ async fn sensitive_actions_need_a_recent_sign_in_on_get_and_post() {
         ),
         (
             edit_path.clone(),
-            edit_path.clone(),
+            format!("{edit_path}/draft/"),
             (vec![
                 ("csrf", csrf.as_str()),
                 ("op", "save"),
@@ -349,7 +363,14 @@ async fn sensitive_actions_need_a_recent_sign_in_on_get_and_post() {
     for (path, next, fields) in attempts.drain(..) {
         let r = b.post(&h, &path, &fields).await;
         assert_eq!(r.status, StatusCode::SEE_OTHER, "{path}");
-        assert_eq!(r.location(), format!("/ui/login?m=sudo&next={next}"));
+        if next.ends_with("/draft/") {
+            // The unsaved form is parked, and the sign-in comes back to it.
+            let prefix = format!("/ui/login?m=sudo&next={next}");
+            assert!(r.location().starts_with(&prefix), "{}", r.location());
+            assert_eq!(r.location().len(), prefix.len() + 43);
+        } else {
+            assert_eq!(r.location(), format!("/ui/login?m=sudo&next={next}"));
+        }
     }
     // Nothing happened.
     assert_eq!(key_count(&h), 1);
@@ -954,7 +975,9 @@ async fn the_audit_page_filters_and_is_strict() {
         let rows = r.body.matches("<tr class=\"detail\">").count();
         (
             rows,
-            r.body.contains(&format!("<td><code>{action}</code></td>")),
+            r.body.contains(&format!(
+                "<td data-label=\"Action\"><code>{action}</code></td>"
+            )),
         )
     };
     let r = b
@@ -964,7 +987,9 @@ async fn the_audit_page_filters_and_is_strict() {
         )
         .await;
     assert_eq!(only(&r, "key_create"), (2, true));
-    assert!(!r.body.contains("<td><code>forward</code></td>"));
+    assert!(!r
+        .body
+        .contains("<td data-label=\"Action\"><code>forward</code></td>"));
     let r = b.get(&h, "/ui/audit?outcome=failure").await;
     assert_eq!(only(&r, "admin_auth"), (1, true));
     let r = b.get(&h, "/ui/audit?ip=203.0.113.9").await;
@@ -1266,13 +1291,15 @@ async fn hostile_key_names_only_appear_escaped_on_every_page() {
     }
     assert!(pages[0].body.contains("&#60;script&#62;alert(1)"));
     // A key created through the UI with a hostile name, on the token page.
-    let csrf = b.get(&h, "/ui/keys/new").await.csrf();
+    let form = b.get(&h, "/ui/keys/new").await;
+    let (csrf, fid) = (form.csrf(), form.form_id());
     let r = b
         .post(
             &h,
             "/ui/keys/new",
             &[
                 ("csrf", &csrf),
+                ("form_id", &fid),
                 ("name", "\" onfocus=\"alert(1)<img src=x>"),
             ],
         )
@@ -1281,12 +1308,14 @@ async fn hostile_key_names_only_appear_escaped_on_every_page() {
     assert_escaped(&r.body, "token page");
     assert!(!r.body.contains("\" onfocus=\""));
     // The create form echoes a hostile name escaped, inside the attribute.
+    let fid = b.get(&h, "/ui/keys/new").await.form_id();
     let r = b
         .post(
             &h,
             "/ui/keys/new",
             &[
                 ("csrf", &csrf),
+                ("form_id", &fid),
                 ("name", "\" onfocus=\"x"),
                 ("m_all", "1"),
                 ("m_GET", "1"),

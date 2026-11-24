@@ -11,9 +11,23 @@ The UI is **off by default**. When you turn it on, it listens on its own port, s
 - **Sign in with your Vaultwarden master password**, including two-step login (authenticator app, email code or YubiKey OTP). Vaultwarden itself checks the password; Ferrowarden has no password of its own to guard.
 - A **status page**: vault locked or unlocked, credential count, last sync, Ferrowarden version, TLS/HTTPS state, agent key count and how many keys have **no policy** (those keys are deny-all until a policy is set), events dropped, the signed-in account and when your session ends. A **Sign out** button.
 - **Keys, policy editor and audit pages**, described under [Managing keys](#managing-keys) and [Audit view](#audit-view).
-- No JavaScript, no external fonts, scripts or CDNs. Works at phone width and in light and dark mode.
+- No JavaScript, no external scripts, fonts or CDNs. Works at phone width and follows your system's light or dark setting. See [Appearance](#appearance).
 
 The UI accepts the vault master password, so it is the most sensitive part of Ferrowarden. Read [What the UI does with your password](#what-the-ui-does-with-your-password) and the [threat model](security.md#16-the-admin-web-ui) before exposing it.
+
+---
+
+## Appearance
+
+The UI follows the Ferrowarden brand kit: Paper and Deep Iron surfaces, Steel and Mist text, with copper kept for the mark, focus rings and small highlights. The **theme follows your system** (`prefers-color-scheme`); there is no toggle, because there is no JavaScript to remember one. The font is Inter, served from the UI's own origin together with the icons (`/ui/static/`, no session needed, cached for a day), so nothing is fetched from a third party and the browser never needs an outside connection to draw a page. Inter is under the SIL Open Font License (`src/ui/assets/fonts/OFL-Inter.txt`).
+
+The layout is made for phones as well as desktops:
+
+- The header shows the mark, the name and an "Admin" label; below about 720 px the navigation moves to its own row with 44 px tap targets, and a long account email is cut with an ellipsis instead of pushing the layout.
+- The keys list becomes one card per key below about 720 px, and the audit list one card per event below about 1120 px (it has more columns). Wide screens keep a real table. Ids, request ids, URLs, patterns and placeholders wrap; they are never cut off.
+- The audit filters, the key editor (the method checkboxes wrap in a grid, the action buttons wrap) and the Check policy results fit the screen without sideways scrolling.
+
+The pages are served with the same strict content security policy as before, plus `font-src 'self'` for the font. Nothing inline is allowed: no `style=` attributes and no `<style>` blocks.
 
 ---
 
@@ -79,7 +93,7 @@ A request counts as **secure** if
 
 `X-Forwarded-Proto` from any other peer is ignored, because a client could send it.
 
-If a request is not secure, every UI page except the stylesheet answers `400` with a plain page explaining how to fix it. **The sign-in form is never rendered.** The refusal is a `ui_login` event with reason `insecure_transport`, throttled to one per 30 seconds (with a `suppressed` count).
+If a request is not secure, every UI page except the static files (stylesheet, font, icons) answers `400` with a plain page explaining how to fix it. **The sign-in form is never rendered.** The refusal is a `ui_login` event with reason `insecure_transport`, throttled to one per 30 seconds (with a `suppressed` count).
 
 Cookies are always `Secure`; browsers accept `Secure` cookies on `http://localhost`.
 
@@ -156,7 +170,7 @@ The global limit means 10 bad guesses can block your own sign-in for 15 minutes;
 - Cookies: `__Host-fw_session`, `__Host-fw_pending`, `__Host-fw_login`: `HttpOnly; Secure; SameSite=Strict; Path=/`, no `Domain` (the `__Host-` prefix makes a browser refuse them otherwise, so a sibling subdomain cannot plant one). The session cookie has no `Max-Age`, so it dies with the browser.
 - **Every POST** needs a CSRF token in a hidden `csrf` field, compared in constant time, **and** a same-origin proof: `Sec-Fetch-Site: same-origin`, or, when the browser sent no `Sec-Fetch-Site`, an `Origin` equal to the request's own origin. A POST with neither is refused. Signed-in pages use a per-session token; the sign-in forms use a pre-session token (double-submit: a random value in `__Host-fw_login` and in the form). A refusal is `403`, a `request_rejected` event, and nothing reaches Vaultwarden.
 - Form bodies are parsed strictly: unknown or repeated fields, bad encodings and bodies over 8 KiB are `400`.
-- Every response carries `Content-Security-Policy: default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'` (no scripts at all), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Permissions-Policy`, `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`, `Cache-Control: no-store` (the hashed stylesheet is cacheable for a day) and, on HTTPS, `Strict-Transport-Security`.
+- Every response carries `Content-Security-Policy: default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'` (no scripts at all, nothing inline), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Permissions-Policy`, `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`, `Cache-Control: no-store` (the static files, such as the hashed stylesheet, are cacheable for a day) and, on HTTPS, `Strict-Transport-Security`.
 
 ---
 
@@ -181,9 +195,14 @@ All pages need a session. Every POST needs the per-session CSRF token and the sa
 | Page | What it does |
 |---|---|
 | `/ui/keys` | Table of keys sorted by name: name, short id, created, methods, credential patterns (first three, with a count) and links to view/edit and revoke. A key with no policy (created with 0.1.0, `policy_set = false`) carries a **"No policy: deny-all"** badge. |
-| `/ui/keys/new` | **Create** (needs a recent sign-in). Name (1 to 128), credential patterns (one per line, blank lines ignored, each trimmed) and one checkbox per method (`m_GET` to `m_OPTIONS`) plus **All methods** (`*`). Validation errors (the same messages as the API) appear next to the form with your input kept. |
+| `/ui/keys/new` | **Create** (needs a recent sign-in). Name (1 to 128), credential patterns (one per line, blank lines ignored, each trimmed) and one checkbox per method (`m_GET` to `m_OPTIONS`) plus **All methods** (`*`). Validation errors (the same messages as the API) appear next to the form with your input kept. The form is single use, see below. |
+| `/ui/keys/new/draft/{id}`, `/ui/keys/{id}/draft/{draft}` | An **unsaved form restored after a sign-in**, see [Unsaved changes survive a sign-in](#unsaved-changes-survive-a-sign-in). |
 | `/ui/keys/{id}` | The key and its saved policy, and the editor (below). |
 | `/ui/keys/{id}/revoke` | **Revoke** (needs a recent sign-in): a confirmation page naming the key, then a POST. |
+
+### The create form is single use
+
+The create form carries a hidden `form_id`: 32 random bytes (base64url), issued when the form is shown, kept in your session (at most 8 outstanding; they end with the session) and used up by the POST that creates the key. If the same form is sent again, which is what reloading the token page and answering "resend" does, **no second key is created**. The answer is a page saying that the form was already submitted (or expired), that the token cannot be shown again and where to go next (`409`). A POST with a missing, unknown or foreign form id gets the same page. A submission that fails validation creates nothing and keeps its id, so you can fix the form and send it again.
 
 ### The token is shown once
 
@@ -203,13 +222,21 @@ A key with no policy (legacy) is explained on its page: it can do nothing until 
 
 Creating a key, revoking one and saving a policy change need a sign-in within the last **10 minutes** (the "sudo window"; not configurable). A session is created at sign-in and remembers when; activity keeps the session alive but never extends the window. Viewing, Check policy, Check request and the audit view do not need it.
 
-It is enforced on **both the GET of the form and the POST**. If the sign-in is older, the browser is redirected to `/ui/login?m=sudo&next=<path>` with the message "Sign in again to continue". After a successful sign-in (password and second factor if required) a new session is created, as always, and the browser goes to `next`. A POST that arrives stale (for instance a save after a long pause) is not processed; its draft is lost, so check and save promptly. Pages with sensitive actions show "Signed in N minutes ago" and whether the window is open.
+It is enforced on **both the GET of the form and the POST**. If the sign-in is older, the browser is redirected to `/ui/login?m=sudo&next=<path>` with the message "Sign in again to continue". After a successful sign-in (password and second factor if required) a new session is created, as always, and the browser goes to `next`. A POST that arrives stale (for instance a save after a long pause) is not processed, but what you typed is kept, see below. Pages with sensitive actions show "Signed in N minutes ago" and whether the window is open.
+
+### Unsaved changes survive a sign-in
+
+When a **Save policy**, **Confirm save** or **Create key** arrives after the window ran out, Ferrowarden parks the draft instead of discarding it: for a save, the patterns, the methods and the request-check fields; for a create, the name, the patterns and the methods. It then redirects to `/ui/login?m=sudo&next=/ui/keys/{id}/draft/{draft}` (or `/ui/keys/new/draft/{draft}`). The `{draft}` part is a random 32-byte id, not your text, and the path passes the `next` rules below.
+
+After you sign in (including the second factor) you land on that URL, which shows the editor **filled in with your changes but not saved**, with the notice "Your unsaved changes were restored. Review them and save again." Then the normal path applies: you save with a fresh sign-in, and a change that gives the key more access still asks for confirmation. **Nothing is ever saved automatically.**
+
+The parked drafts live in memory only: at most 16, for 15 minutes, used up by the first visit, and **bound to your client IP**. A draft that is missing, expired, already restored, for another key or from another address is not an error: you get the normal editor (or a blank create form) with a notice that the unsaved changes could not be restored. They are lost on restart. The request-check fields are wiped from memory when the draft goes.
 
 `next` is validated, on the way in and again before the redirect: it must start with `/ui/`, be at most 200 characters, and consist only of ASCII letters, digits and `/ _ - .`. That rules out schemes, hosts, `//`, backslashes, any percent-encoding (so `%2f%2f` cannot decode into something else), `.` and `..` segments, query strings, and the sign-in and static paths. Anything else becomes `/ui/`. The sign-in form carries it in a hidden field that is re-validated on submit; for a two-step login it is kept **server-side in the pending login**, and the second-factor form does not accept a `next` field at all.
 
 ## Audit view
 
-`/ui/audit` lists the security events held in the in-memory ring buffer (the same data as `GET /v1/admin/audit`), newest first. Filters are GET parameters: `action` (a select of the known actions), `outcome` (`success`, `failure`, `unknown`), `key` (a key id or name, exact), `ip` (exact) and `limit` (25, 100 or 500; default 100). The query is parsed strictly: an unknown or repeated parameter, or a value that is not allowed, is a `400`. Columns: time, action, outcome, reason, key name, source IP, method and target host, status, request id, and a `<details>` disclosure with the event as pretty-printed JSON. Everything is HTML-escaped (the JSON sits in a `<pre>`). Reading it emits an `audit_read` event. For history beyond the buffer use the [event sinks](events.md#sinks-and-configuration).
+`/ui/audit` lists the security events held in the in-memory ring buffer (the same data as `GET /v1/admin/audit`), newest first. Filters are GET parameters: `action` (a select of the known actions), `outcome` (`success`, `failure`, `unknown`), `key` (a key id or name, exact), `ip` (exact) and `limit` (25, 100 or 500; default 100). The query is parsed strictly: an unknown or repeated parameter, or a value that is not allowed, is a `400`. Columns: time, action, outcome (with the reason below it), key name and source IP, method and target host with the status, request id, and a `<details>` disclosure with the event as pretty-printed JSON. Everything is HTML-escaped (the JSON sits in a `<pre>`). Reading it emits an `audit_read` event. For history beyond the buffer use the [event sinks](events.md#sinks-and-configuration).
 
 ### Rendering safety
 
@@ -234,7 +261,7 @@ Events never contain the password, the hash, a code, a token, a cookie or anythi
 
 ## Limits
 
-- Screens are plain forms: no live updates, no bulk actions, no key renaming.
+- Screens are plain forms: no live updates, no bulk actions, no key renaming, no theme switch (the system setting decides).
 - The audit view shows only what is in the ring buffer.
 - Sessions do not survive a restart.
 - No second-factor "remember this device" (Ferrowarden never sends `twoFactorRemember`).

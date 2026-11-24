@@ -25,7 +25,6 @@ pub struct SudoInfo {
 #[template(path = "ui/login.html")]
 pub struct LoginPage<'a> {
     pub css_path: &'a str,
-    pub nav: Option<Nav<'a>>,
     pub csrf: &'a str,
     pub error: Option<&'a str>,
     pub notice: Option<&'a str>,
@@ -43,7 +42,6 @@ pub struct ProviderOption {
 #[template(path = "ui/twofactor.html")]
 pub struct TwoFactorPage<'a> {
     pub css_path: &'a str,
-    pub nav: Option<Nav<'a>>,
     pub csrf: &'a str,
     pub error: Option<&'a str>,
     pub notice: Option<&'a str>,
@@ -100,7 +98,8 @@ pub struct KeyRow {
     pub name: String,
     pub created: String,
     pub policy_set: bool,
-    pub methods: String,
+    /// The methods as chips: `none`, `all (*)` or one per method.
+    pub method_chips: Vec<String>,
     /// The first few credential patterns, and how many more there are.
     pub shown: Vec<String>,
     pub more: usize,
@@ -131,11 +130,22 @@ pub struct KeyNewPage<'a> {
     pub nav: Option<Nav<'a>>,
     pub sudo: SudoInfo,
     pub csrf: &'a str,
+    /// The single-use id of this form (see `session::issue_form_id`).
+    pub form_id: &'a str,
+    pub notice: Option<&'a str>,
     pub error: Option<&'a str>,
     pub name: &'a str,
     pub patterns: &'a str,
     pub methods: Vec<MethodBox>,
     pub all_methods: bool,
+}
+
+/// Shown instead of creating a key when the form was already submitted.
+#[derive(Template)]
+#[template(path = "ui/key_form_used.html")]
+pub struct KeyFormUsedPage<'a> {
+    pub css_path: &'a str,
+    pub nav: Option<Nav<'a>>,
 }
 
 #[derive(Template)]
@@ -312,7 +322,6 @@ mod tests {
     fn pages_carry_no_script_or_inline_style_or_external_reference() {
         let login = LoginPage {
             css_path: "/ui/static/app-x.css",
-            nav: None,
             csrf: "tok",
             error: Some("e"),
             notice: Some("n"),
@@ -336,7 +345,6 @@ mod tests {
         let page = |is_yubikey: bool| {
             TwoFactorPage {
                 css_path: "/c.css",
-                nav: None,
                 csrf: "tok",
                 error: None,
                 notice: None,

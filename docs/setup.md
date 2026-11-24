@@ -1,6 +1,8 @@
+<img src="../branding/assets/png/banners/ferrowarden-docs-header.png" width="100%" alt="">
+
 # Setup Guide
 
-This guide walks through a complete Ferrowarden deployment using Docker Compose. By the end you will have:
+This guide walks through a complete Ferrowarden deployment using Docker Compose. Ferrowarden runs as a sidecar to [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (it is not a fork or replacement, and is not affiliated with Vaultwarden or Bitwarden) and reaches your vault through the Bitwarden CLI's `bw serve`. By the end you will have:
 
 - Vaultwarden running and configured
 - The Bitwarden CLI logged in and running `bw serve`

@@ -347,6 +347,8 @@ struct Resp {
     status: StatusCode,
     headers: HeaderMap,
     body: String,
+    /// The body as sent (static assets are binary).
+    bytes: Vec<u8>,
 }
 
 impl Resp {
@@ -369,6 +371,14 @@ impl Resp {
         self.set_cookies()
             .into_iter()
             .find(|c| c.starts_with(&format!("{name}=")))
+    }
+
+    /// The single-use id in the create form's hidden field.
+    fn form_id(&self) -> String {
+        let marker = "name=\"form_id\" value=\"";
+        let start = self.body.find(marker).expect("page has a form_id field") + marker.len();
+        let end = self.body[start..].find('"').unwrap();
+        self.body[start..start + end].to_string()
     }
 
     /// The CSRF token in the page's hidden field.
@@ -453,7 +463,7 @@ impl Browser {
         let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
             .await
             .unwrap();
-        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let body = String::from_utf8_lossy(&bytes).into_owned();
 
         // Remember what the browser would keep.
         for value in headers.get_all("set-cookie") {
@@ -479,6 +489,7 @@ impl Browser {
             status,
             headers,
             body,
+            bytes: bytes.to_vec(),
         }
     }
 
@@ -619,8 +630,8 @@ fn assert_security_headers(r: &Resp) {
     let h = &r.headers;
     assert_eq!(
         h["content-security-policy"],
-        "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; \
-frame-ancestors 'none'; base-uri 'none'"
+        "default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self'; \
+form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
     );
     assert_eq!(h["x-content-type-options"], "nosniff");
     assert_eq!(h["referrer-policy"], "no-referrer");
@@ -1879,3 +1890,4 @@ fn the_provider_enum_matches_the_documented_event_names() {
 }
 
 mod admin;
+mod brand;

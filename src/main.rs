@@ -54,8 +54,59 @@ fn startup_event(
         )
 }
 
+/// What the command line asks for. Ferrowarden takes no options: configuration
+/// comes from `ferrowarden.toml` and `FERROWARDEN_*` environment variables.
+#[derive(Debug, PartialEq, Eq)]
+enum Cli {
+    /// No arguments: run the proxy.
+    Run,
+    Help,
+    Version,
+    /// An argument that is not recognised.
+    Unknown(String),
+}
+
+/// Parse the arguments after the program name. The first argument decides.
+fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Cli {
+    match args.into_iter().next().as_deref() {
+        None => Cli::Run,
+        Some("--help" | "-h") => Cli::Help,
+        Some("--version" | "-V") => Cli::Version,
+        Some(other) => Cli::Unknown(other.to_string()),
+    }
+}
+
+const USAGE: &str = "\
+Ferrowarden \u{2014} proxy authenticated API calls for agents using named vault credentials.
+
+Usage: ferrowarden [--help | --version]
+
+Ferrowarden takes no other options. Configuration comes from ferrowarden.toml
+and FERROWARDEN_* environment variables; see docs/setup.md for the full list.
+
+Options:
+  -h, --help     Print this help and exit
+  -V, --version  Print the version and exit
+";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    match parse_args(std::env::args().skip(1)) {
+        Cli::Run => {}
+        Cli::Help => {
+            print!("{USAGE}");
+            return Ok(());
+        }
+        Cli::Version => {
+            println!("ferrowarden {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Cli::Unknown(arg) => {
+            eprintln!("ferrowarden: unrecognized argument {arg:?}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+    }
+
     // Structured JSON logging — compatible with Loki/Grafana.
     // Level is controlled by FERROWARDEN_LOG_LEVEL (default: info).
     // Valid levels: trace, debug, info, warn, error.
@@ -78,7 +129,11 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer().json())
         .init();
 
-    tracing::info!("Ferrowarden starting");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "Ferrowarden {} starting \u{2014} the credential boundary for AI agents",
+        env!("CARGO_PKG_VERSION")
+    );
 
     let config = Config::load()?;
 
@@ -311,5 +366,42 @@ async fn shutdown_signal() -> &'static str {
     tokio::select! {
         name = ctrl_c => name,
         name = terminate => name,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        parse_args(args.iter().map(|a| a.to_string()))
+    }
+
+    #[test]
+    fn no_arguments_runs() {
+        assert_eq!(parse(&[]), Cli::Run);
+    }
+
+    #[test]
+    fn help_and_version_flags() {
+        assert_eq!(parse(&["--help"]), Cli::Help);
+        assert_eq!(parse(&["-h"]), Cli::Help);
+        assert_eq!(parse(&["--version"]), Cli::Version);
+        assert_eq!(parse(&["-V"]), Cli::Version);
+    }
+
+    #[test]
+    fn anything_else_is_unknown() {
+        assert_eq!(parse(&["serve"]), Cli::Unknown("serve".into()));
+        assert_eq!(parse(&["-v"]), Cli::Unknown("-v".into()));
+        assert_eq!(parse(&["--help2"]), Cli::Unknown("--help2".into()));
+    }
+
+    #[test]
+    fn usage_starts_with_the_description() {
+        assert!(USAGE.starts_with(
+            "Ferrowarden \u{2014} proxy authenticated API calls for agents using named vault credentials."
+        ));
+        assert!(USAGE.contains("docs/setup.md"));
     }
 }

@@ -1,7 +1,9 @@
 {% extends "ui/base.html" %}
 {% block title %}Two-step login{% endblock %}
-{% block main_class %}narrow{% endblock %}
+{% block header %}{% endblock %}
+{% block main_class %}auth{% endblock %}
 {% block content %}
+{% include "ui/_lockup.html" %}
 <h1>Two-step login</h1>
 <p class="muted">Your password was accepted. Enter a second factor to finish signing in. This step expires after three minutes.</p>
 {% if let Some(message) = error %}<p class="alert error" role="alert">{{ message }}</p>{% endif %}
@@ -24,12 +26,14 @@
 <input type="hidden" name="csrf" value="{{ csrf }}">
 <input type="hidden" name="provider" value="{{ selected_id }}">
 <input type="hidden" name="action" value="verify">
+<div class="field">
 <label for="code">{{ selected_label }} code</label>
 {% if is_yubikey %}
 <input id="code" name="code" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="44" required autofocus>
 {% else %}
 <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="10" required autofocus>
 {% endif %}
+</div>
 <button type="submit">Verify</button>
 </form>
 <p><a href="/ui/login">Start over</a></p>

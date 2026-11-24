@@ -40,6 +40,9 @@ pub const EMAIL_RESEND_INTERVAL: Duration = Duration::from_secs(60);
 /// Sensitive actions (creating or revoking a key, saving a policy) need a
 /// sign-in this recent: the "sudo window". Not configurable.
 pub const SUDO_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// Single-use form ids a session may hold at once (the create-key form). The
+/// oldest is dropped for a new one; they end with the session.
+pub const MAX_FORM_IDS: usize = 8;
 
 // ── Random tokens ─────────────────────────────────────────────────────────────
 
@@ -75,6 +78,8 @@ struct Session {
     authenticated_at: Instant,
     last_seen: Instant,
     csrf: Zeroizing<String>,
+    /// Digests of the issued, not yet used form ids, oldest first.
+    form_ids: Vec<[u8; 32]>,
 }
 
 /// What a handler may know about a valid session.
@@ -85,6 +90,9 @@ pub struct SessionView {
     pub expires_at: Instant,
     /// When this session's sign-in happened.
     pub authenticated_at: Instant,
+    /// Which session this is (the digest of its id), for the store's
+    /// per-session state such as form ids. Not a secret on its own.
+    handle: [u8; 32],
 }
 
 impl SessionView {
@@ -163,6 +171,7 @@ impl SessionStore {
                 authenticated_at: now,
                 last_seen: now,
                 csrf: csrf.clone(),
+                form_ids: Vec::new(),
             },
         );
         Some((id, csrf))
@@ -186,7 +195,60 @@ impl SessionStore {
             csrf: session.csrf.clone(),
             expires_at,
             authenticated_at: session.authenticated_at,
+            handle: key,
         })
+    }
+
+    /// Issue a single-use form id for the session: 32 random bytes,
+    /// base64url. At most [`MAX_FORM_IDS`] stay outstanding. `None` if the
+    /// session is gone or the OS RNG fails.
+    pub fn issue_form_id(&mut self, view: &SessionView) -> Option<Zeroizing<String>> {
+        let id = random_token()?;
+        let session = self.sessions.get_mut(&view.handle)?;
+        while session.form_ids.len() >= MAX_FORM_IDS {
+            session.form_ids.remove(0);
+        }
+        session.form_ids.push(digest(&id));
+        Some(id)
+    }
+
+    /// Is this form id issued to the session and still unused? Does not use
+    /// it up.
+    pub fn form_id_valid(&self, view: &SessionView, id: &str) -> bool {
+        let d = digest(id);
+        self.sessions
+            .get(&view.handle)
+            .is_some_and(|s| s.form_ids.contains(&d))
+    }
+
+    /// Use a form id up. `true` exactly once per issued id: of two racing
+    /// submissions only one gets `true`.
+    pub fn consume_form_id(&mut self, view: &SessionView, id: &str) -> bool {
+        let d = digest(id);
+        let Some(session) = self.sessions.get_mut(&view.handle) else {
+            return false;
+        };
+        match session.form_ids.iter().position(|x| *x == d) {
+            Some(i) => {
+                session.form_ids.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Put a form id back after a submission that created nothing (a
+    /// validation error), so the form still on screen keeps working.
+    pub fn restore_form_id(&mut self, view: &SessionView, id: &str) {
+        let d = digest(id);
+        if let Some(session) = self.sessions.get_mut(&view.handle) {
+            if !session.form_ids.contains(&d) {
+                while session.form_ids.len() >= MAX_FORM_IDS {
+                    session.form_ids.remove(0);
+                }
+                session.form_ids.push(d);
+            }
+        }
     }
 
     pub fn destroy(&mut self, id: &str) -> bool {

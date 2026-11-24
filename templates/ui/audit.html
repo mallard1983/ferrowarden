@@ -5,53 +5,62 @@
 <h1>Audit</h1>
 <p class="muted">The most recent security events held in memory, newest first. This is the same data as <code>GET /v1/admin/audit</code>; the event sinks hold the full history.</p>
 <form method="get" action="/ui/audit" class="filters">
+<div class="field">
 <label for="f-action">Action</label>
 <select id="f-action" name="action">
 <option value="">Any</option>
 {% for o in actions %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.value }}</option>
 {% endfor %}</select>
+</div>
+<div class="field">
 <label for="f-outcome">Outcome</label>
 <select id="f-outcome" name="outcome">
 <option value="">Any</option>
 {% for o in outcomes %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.value }}</option>
 {% endfor %}</select>
+</div>
+<div class="field">
 <label for="f-key">Key (id or name)</label>
 <input id="f-key" name="key" type="text" maxlength="128" autocomplete="off" value="{{ key }}">
+</div>
+<div class="field">
 <label for="f-ip">Source IP</label>
 <input id="f-ip" name="ip" type="text" maxlength="45" autocomplete="off" value="{{ ip }}">
+</div>
+<div class="field">
 <label for="f-limit">Show</label>
 <select id="f-limit" name="limit">
 {% for o in limits %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.value }}</option>
 {% endfor %}</select>
+</div>
+<div class="field">
 <button type="submit">Filter</button>
+</div>
 </form>
 <p>{{ rows.len() }} event(s).</p>
 {% if rows.is_empty() %}
 <p class="muted">No events match.</p>
 {% else %}
 <div class="scroll">
-<table class="audit">
+<table class="audit stack-wide">
 <thead>
-<tr><th scope="col">Time</th><th scope="col">Action</th><th scope="col">Outcome</th><th scope="col">Reason</th><th scope="col">Key</th><th scope="col">Source IP</th><th scope="col">Target</th><th scope="col">Status</th><th scope="col">Request id</th></tr>
+<tr><th scope="col">Time</th><th scope="col">Action</th><th scope="col">Outcome</th><th scope="col">Key and source</th><th scope="col">Target</th><th scope="col">Request id</th></tr>
 </thead>
-<tbody>
 {% for row in rows %}
+<tbody class="event card-row">
 <tr>
-<td>{{ row.time }}</td>
-<td><code>{{ row.action }}</code></td>
-<td>{{ row.outcome }}</td>
-<td>{{ row.reason }}</td>
-<td>{{ row.key_name }}</td>
-<td>{{ row.ip }}</td>
-<td>{{ row.method }} {{ row.host }}</td>
-<td>{{ row.status }}</td>
-<td><code>{{ row.request_id }}</code></td>
+<td data-label="Time" class="time">{{ row.time }}</td>
+<td data-label="Action"><code>{{ row.action }}</code></td>
+<td data-label="Outcome">{% if row.outcome == "success" %}<span class="badge ok">{{ row.outcome }}</span>{% else if row.outcome == "failure" %}<span class="badge bad">{{ row.outcome }}</span>{% else %}<span class="badge">{{ row.outcome }}</span>{% endif %}{% if !row.reason.is_empty() %}<span class="sub">{{ row.reason }}</span>{% endif %}</td>
+<td data-label="Key">{{ row.key_name }}{% if !row.ip.is_empty() %}<span class="sub mono">{{ row.ip }}</span>{% endif %}</td>
+<td data-label="Target">{{ row.method }} {{ row.host }}{% if !row.status.is_empty() %}<span class="sub">status {{ row.status }}</span>{% endif %}</td>
+<td data-label="Request id" class="reqid">{% if !row.request_id.is_empty() %}<code>{{ row.request_id }}</code>{% endif %}</td>
 </tr>
 <tr class="detail">
-<td colspan="9"><details><summary>Details</summary><pre>{{ row.json }}</pre></details></td>
+<td colspan="6" class="detail-cell"><details><summary>Details</summary><pre>{{ row.json }}</pre></details></td>
 </tr>
-{% endfor %}
 </tbody>
+{% endfor %}
 </table>
 </div>
 {% endif %}

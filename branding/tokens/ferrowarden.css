@@ -1,0 +1,22 @@
+:root {
+  --fw-iron: #17212B;
+  --fw-steel: #3D5967;
+  --fw-copper: #CB7545;
+  --fw-paper: #F6F8F9;
+  --fw-mist: #A6B7C4;
+  --fw-deep-iron: #101820;
+  --fw-dark-steel: #7797A8;
+  --fw-font: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --fw-radius-md: 12px;
+  --fw-radius-lg: 20px;
+}
+:root[data-theme="dark"] {
+  --fw-surface: var(--fw-deep-iron);
+  --fw-text: var(--fw-paper);
+  --fw-muted: var(--fw-mist);
+}
+:root:not([data-theme="dark"]) {
+  --fw-surface: var(--fw-paper);
+  --fw-text: var(--fw-iron);
+  --fw-muted: var(--fw-steel);
+}

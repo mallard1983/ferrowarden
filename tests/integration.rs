@@ -2518,6 +2518,14 @@ impl UiResp {
             .map(str::to_string)
     }
 
+    /// The single-use id in the create-key form's hidden field.
+    fn form_id(&self) -> String {
+        let marker = "name=\"form_id\" value=\"";
+        let start = self.body.find(marker).expect("page has a form_id field") + marker.len();
+        let end = self.body[start..].find('"').unwrap();
+        self.body[start..start + end].to_string()
+    }
+
     /// The CSRF token in the page's hidden field.
     fn csrf(&self) -> String {
         let marker = "name=\"csrf\" value=\"";
@@ -2640,8 +2648,8 @@ impl UiBrowser {
 fn assert_ui_security_headers(r: &UiResp) {
     assert_eq!(
         r.header("content-security-policy"),
-        "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; \
-frame-ancestors 'none'; base-uri 'none'"
+        "default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self'; \
+form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
     );
     assert_eq!(r.header("x-content-type-options"), "nosniff");
     assert_eq!(r.header("referrer-policy"), "no-referrer");
@@ -2840,6 +2848,22 @@ async fn test_ui_security_headers() {
     assert_eq!(css.status, 200);
     assert_eq!(css.header("cache-control"), "public, max-age=86400");
     assert_ui_security_headers(&css);
+
+    // The font and icons are static files too: no session, right types.
+    for (path, content_type) in [
+        ("/ui/static/inter-latin-wght.woff2", "font/woff2"),
+        ("/ui/static/favicon.ico", "image/x-icon"),
+        ("/ui/static/favicon-32.png", "image/png"),
+        ("/ui/static/apple-touch-icon.png", "image/png"),
+        ("/favicon.ico", "image/x-icon"),
+    ] {
+        let r = b.get(path).await;
+        assert_eq!(r.status, 200, "{path}");
+        assert_eq!(r.header("content-type"), content_type, "{path}");
+        assert_eq!(r.header("cache-control"), "public, max-age=86400", "{path}");
+        assert_eq!(r.header("x-content-type-options"), "nosniff", "{path}");
+        assert_ui_security_headers(&r);
+    }
 }
 
 /// The UI and the agent/admin API are separate listeners: neither router
@@ -2929,11 +2953,13 @@ async fn test_ui_key_lifecycle() {
     let form = b.get("/ui/keys/new").await;
     assert_eq!(form.status, 200);
     let csrf = form.csrf();
+    let form_id = form.form_id();
     let created = b
         .post(
             "/ui/keys/new",
             &[
                 ("csrf", &csrf),
+                ("form_id", &form_id),
                 ("name", "ui-lifecycle"),
                 ("credentials", "test_api_token\nnas_*"),
                 ("m_GET", "1"),

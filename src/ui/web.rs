@@ -334,9 +334,11 @@ pub fn safe_next(raw: &str) -> Option<String> {
 
 // ── Security headers ──────────────────────────────────────────────────────────
 
-/// No scripts at all in phase 1: `default-src 'none'`, CSS from this origin.
-pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'self'; img-src 'self'; \
-form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+/// No scripts at all: `default-src 'none'`; the stylesheet, its font and the
+/// icons come from this origin, and nothing inline (no `style=` attributes,
+/// no `<style>` blocks) is allowed.
+pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'self'; \
+font-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 fn set(headers: &mut HeaderMap, name: &'static str, value: &'static str) {
     headers.insert(
@@ -757,9 +759,13 @@ mod tests {
         apply_security_headers(&mut headers, false);
         assert_eq!(
             headers["content-security-policy"],
-            "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; \
-frame-ancestors 'none'; base-uri 'none'"
+            "default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self'; \
+form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
         );
+        assert!(headers["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("font-src 'self';"));
         assert_eq!(headers["x-content-type-options"], "nosniff");
         assert_eq!(headers["referrer-policy"], "no-referrer");
         assert_eq!(headers["x-frame-options"], "DENY");

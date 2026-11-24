@@ -292,7 +292,6 @@ impl UiState {
             status,
             LoginPage {
                 css_path: &self.css_path,
-                nav: None,
                 csrf: &token,
                 error,
                 notice,
@@ -345,7 +344,6 @@ impl UiState {
             status,
             TwoFactorPage {
                 css_path: &self.css_path,
-                nav: None,
                 csrf: &token,
                 error,
                 notice,
@@ -575,22 +573,37 @@ pub async fn fallback(
     )
 }
 
-pub async fn static_file(State(ui): State<Arc<UiState>>, Path(file): Path<String>) -> Response {
-    let expected = ui.css_path.rsplit('/').next().unwrap_or_default();
-    if file != expected {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let mut response = Response::new(Body::from(crate::ui::CSS));
+/// A static asset: no session needed, cached for a day. (`nosniff` and the
+/// other security headers are added by the gate for every response.)
+fn asset(body: Body, content_type: &'static str) -> Response {
+    let mut response = Response::new(body);
     let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/css; charset=utf-8"),
-    );
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=86400"),
     );
     response
+}
+
+/// `/ui/static/{file}`: the stylesheet (under its content-hashed name), the
+/// font and the icons. Anything else is a 404.
+pub async fn static_file(State(ui): State<Arc<UiState>>, Path(file): Path<String>) -> Response {
+    if file == ui.css_path.rsplit('/').next().unwrap_or_default() {
+        return asset(Body::from(crate::ui::CSS), "text/css; charset=utf-8");
+    }
+    match file.as_str() {
+        crate::ui::FONT_FILE => asset(Body::from(crate::ui::FONT), "font/woff2"),
+        "favicon.ico" => asset(Body::from(crate::ui::FAVICON_ICO), "image/x-icon"),
+        "favicon-32.png" => asset(Body::from(crate::ui::FAVICON_32), "image/png"),
+        "apple-touch-icon.png" => asset(Body::from(crate::ui::APPLE_TOUCH_ICON), "image/png"),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// `/favicon.ico`: browsers ask for it at the root whatever the page says.
+pub async fn favicon() -> Response {
+    asset(Body::from(crate::ui::FAVICON_ICO), "image/x-icon")
 }
 
 // ── Status page ───────────────────────────────────────────────────────────────

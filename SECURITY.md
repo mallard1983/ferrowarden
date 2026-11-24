@@ -1,6 +1,6 @@
 # Security Policy
 
-Ferrowarden exists to keep credentials away from AI agents, so security reports are very welcome.
+Ferrowarden is built to keep credential values out of AI agents' context, so security reports are very welcome. Ferrowarden is an independent project, not affiliated with Vaultwarden or Bitwarden; report vulnerabilities in those projects upstream.
 
 ## Reporting a vulnerability
 

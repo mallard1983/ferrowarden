@@ -29,7 +29,7 @@ Response: `{ "status": 200, "headers": {...}, "body": "..." }`
 
 ## Why
 
-Credential values never enter the agent context. Ferrowarden substitutes `{{vault:name}}` after authentication and zeroes the values from memory after the outbound request completes. The response body is scrubbed before being returned.
+Credential values stay outside the agent context by design. Ferrowarden substitutes `{{vault:name}}` after authentication and zeroes the values from memory after the outbound request completes. The response body is scrubbed before being returned.
 
 ## Workflow
 

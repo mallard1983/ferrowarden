@@ -13,10 +13,13 @@
 //! * every POST needs a CSRF token and a same-origin proof;
 //! * wrong passwords and codes are rate-limited before any key derivation or
 //!   upstream call;
-//! * no scripts, no external assets, strict security headers.
+//! * no scripts, no external assets (the stylesheet, its font and the icons
+//!   are embedded and served from the UI's own origin), strict security
+//!   headers.
 
 mod admin_pages;
 pub mod crypto;
+mod drafts;
 mod handlers;
 pub mod lockout;
 mod pages;
@@ -46,12 +49,21 @@ use crate::middleware::request_context::{request_context, RequestContext, Truste
 use crate::net::Cidr;
 use crate::state::AppState;
 use crate::vault::VaultClient;
+use drafts::DraftStore;
 use lockout::Lockouts;
 use session::{PendingSlot, SessionStore};
 use vw_login::VwClient;
 use web::Transport;
 
 pub(crate) const CSS: &str = include_str!("app.css");
+/// Inter (variable, latin subset; SIL OFL, see `assets/fonts/OFL-Inter.txt`).
+pub(crate) const FONT_FILE: &str = "inter-latin-wght.woff2";
+pub(crate) const FONT: &[u8] = include_bytes!("assets/fonts/inter-latin-wght.woff2");
+/// The brand kit's favicons (`branding/assets/favicons`), copied next to the
+/// sources so the Docker build (which only copies `src/`) can embed them.
+pub(crate) const FAVICON_ICO: &[u8] = include_bytes!("assets/favicons/favicon.ico");
+pub(crate) const FAVICON_32: &[u8] = include_bytes!("assets/favicons/favicon-32.png");
+pub(crate) const APPLE_TOUCH_ICON: &[u8] = include_bytes!("assets/favicons/apple-touch-icon.png");
 
 /// One "insecure transport" event per this long (with a count of the rest).
 const INSECURE_EVENT_INTERVAL: Duration = Duration::from_secs(30);
@@ -70,6 +82,8 @@ pub struct UiState {
     pub(crate) sessions: Mutex<SessionStore>,
     pub(crate) pending: Mutex<PendingSlot>,
     pub(crate) lockouts: Mutex<Lockouts>,
+    /// Unsaved key forms parked while the operator signs in again.
+    pub(crate) drafts: Mutex<DraftStore>,
     /// One password verification at a time. Lockouts only count failures
     /// once Vaultwarden has answered, so without this a burst of concurrent
     /// submissions would all pass the lockout check: each would run a KDF
@@ -115,6 +129,7 @@ impl UiState {
             )),
             pending: Mutex::new(PendingSlot::new()),
             lockouts: Mutex::new(Lockouts::new()),
+            drafts: Mutex::new(DraftStore::new()),
             login_gate: tokio::sync::Semaphore::new(1),
             email: Mutex::new(None),
             trusted,
@@ -203,7 +218,8 @@ async fn gate(State(ui): State<Arc<UiState>>, mut request: Request, next: Next) 
         &ui.trusted,
     );
     let secure = transport.secure;
-    let is_static = request.uri().path().starts_with("/ui/static/");
+    let is_static =
+        request.uri().path().starts_with("/ui/static/") || request.uri().path() == "/favicon.ico";
 
     let mut response = if !secure && !ui.insecure_http && !is_static {
         ui.note_insecure_request(&ctx);
@@ -239,8 +255,16 @@ pub fn router(ui: Arc<UiState>) -> Router {
             get(admin_pages::key_new_get).post(admin_pages::key_new_post),
         )
         .route(
+            "/ui/keys/new/draft/{draft_id}",
+            get(admin_pages::key_new_draft),
+        )
+        .route(
             "/ui/keys/{id}",
             get(admin_pages::key_get).post(admin_pages::key_post),
+        )
+        .route(
+            "/ui/keys/{id}/draft/{draft_id}",
+            get(admin_pages::key_draft),
         )
         .route(
             "/ui/keys/{id}/revoke",
@@ -248,6 +272,7 @@ pub fn router(ui: Arc<UiState>) -> Router {
         )
         .route("/ui/audit", get(admin_pages::audit_get))
         .route("/ui/static/{file}", get(handlers::static_file))
+        .route("/favicon.ico", get(handlers::favicon))
         .fallback(handlers::fallback)
         .with_state(ui.clone())
         .layer(middleware::from_fn_with_state(ui, gate))
