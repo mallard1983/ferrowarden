@@ -12,8 +12,8 @@ info:
 
     Operations are grouped by who calls them. Agent operations authenticate with an agent key (`X-Agent-Key`). Request bodies are parsed strictly: duplicate object keys, unknown fields, trailing data, a body nested deeper than 64 levels, and a content type other than `application/json` are rejected with `400`. The key is checked before the body or query string is read, so a request without a valid key gets `401` whatever it contains.
   license:
-    name: MIT
-    identifier: MIT
+    name: Functional Source License, Version 1.1, ALv2 Future License
+    identifier: FSL-1.1-ALv2
   contact:
     name: Ferrowarden on GitHub
     url: https://github.com/mallard1983/ferrowarden

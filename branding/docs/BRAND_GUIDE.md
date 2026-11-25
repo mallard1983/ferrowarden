@@ -9,7 +9,7 @@
 
 ## 1. What Ferrowarden is
 
-Ferrowarden is an **open-source credential proxy for AI agents**, deployed alongside Vaultwarden. An agent sends an outbound API request containing a named placeholder such as `{{vault:name}}`. Ferrowarden resolves the credential through the vault API layer, makes the outbound request, and scrubs credential values from the response before returning it. The agent receives a proxy-scoped credential rather than direct vault access.
+Ferrowarden is a **source-available credential proxy for AI agents**, deployed alongside Vaultwarden. An agent sends an outbound API request containing a named placeholder such as `{{vault:name}}`. Ferrowarden resolves the credential through the vault API layer, makes the outbound request, and scrubs credential values from the response before returning it. The agent receives a proxy-scoped credential rather than direct vault access.
 
 **One-sentence description:** Ferrowarden lets AI agents use named credentials to make API calls without exposing credential values to the agent.
 
@@ -94,7 +94,7 @@ The approved mark should retain its proportions and internal spacing regardless 
 
 ## 7. Brand tone
 
-Use a restrained, competent, open-source engineering voice. Describe how the proxy works and what users control. Prefer specific architectural wording over generic security superlatives.
+Use a restrained, competent, transparent engineering voice. Describe how the proxy works and what users control. Prefer specific architectural wording over generic security superlatives.
 
 **Use:** “Credential values stay outside the agent's conversation context by design”; “Scoped agent keys”; “Named credential references”; “Proxy-mediated requests.”
 

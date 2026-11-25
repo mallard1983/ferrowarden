@@ -6,9 +6,9 @@
 # Ferrowarden
 
 [![Test](https://github.com/mallard1983/ferrowarden/actions/workflows/test.yml/badge.svg)](https://github.com/mallard1983/ferrowarden/actions/workflows/test.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE)
 
-**The credential boundary for AI agents.** Ferrowarden is an open-source credential proxy that sits alongside Vaultwarden. AI agents send requests using `{{vault:name}}` placeholders; Ferrowarden resolves credentials and forwards requests, without returning the secret values to the agent by design.
+**The credential boundary for AI agents.** Ferrowarden is a source-available credential proxy that sits alongside Vaultwarden. AI agents send requests using `{{vault:name}}` placeholders; Ferrowarden resolves credentials and forwards requests, without returning the secret values to the agent by design.
 
 Ferrowarden resolves the credential through the Bitwarden CLI's vault API (`bw serve`), makes the outbound call, and scrubs known credential values from the response. The agent uses a scoped proxy key instead of direct vault access.
 
@@ -197,4 +197,11 @@ Contributions are welcome — bug reports, docs, tests and code. See [CONTRIBUTI
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Ferrowarden is **source-available** under the [Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (FSL-1.1-ALv2):
+
+- You may use, copy, modify and redistribute it for any purpose **except a Competing Use**: offering it, or something substantially similar, to others as a commercial product or service.
+- Self-hosting it for your own or your organisation's internal use, non-commercial education and research, and professional services for a licensee are explicitly permitted.
+- Each release **becomes Apache-2.0 two years after it is published**.
+- Releases up to and including **v0.1.0 remain under the MIT License** they were published with.
+
+For commercial licensing, open an issue or contact the maintainer. Contributions are accepted under the [Contributor License Agreement](CLA.md).

@@ -4,7 +4,7 @@
 
 **Project:** Ferrowarden  
 **Tagline:** The credential boundary for AI agents  
-**Category:** Open-source credential proxy for AI agents
+**Category:** Source-available credential proxy for AI agents
 
 ### Approved positioning language
 
@@ -35,11 +35,11 @@ Prefer short declarative sentences, examples with real syntax, and concise reaso
 
 ### GitHub About description
 
-> Open-source credential proxy for AI agents. Use named vault placeholders instead of exposing secrets to model context.
+> Source-available credential proxy for AI agents. Use named vault placeholders instead of exposing secrets to model context.
 
 ### README opening
 
-> **The credential boundary for AI agents.** Ferrowarden is an open-source credential proxy that sits alongside Vaultwarden. AI agents send requests using `{{vault:name}}` placeholders; Ferrowarden resolves credentials and forwards requests, without returning the secret values to the agent by design.
+> **The credential boundary for AI agents.** Ferrowarden is a source-available credential proxy that sits alongside Vaultwarden. AI agents send requests using `{{vault:name}}` placeholders; Ferrowarden resolves credentials and forwards requests, without returning the secret values to the agent by design.
 
 ### Website intro
 

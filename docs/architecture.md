@@ -2,7 +2,7 @@
 
 ## Overview
 
-Ferrowarden is an open-source credential proxy — a small HTTP service that sits between an AI agent and the services it needs to call. It runs as a sidecar to [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (it is not a fork or replacement, and is not affiliated with Vaultwarden or Bitwarden). By design, the agent is never handed credential values. Instead, it sends requests with named placeholders; Ferrowarden looks up the real values, makes the call on the agent's behalf, and returns the response with known credential values and common credential patterns scrubbed out.
+Ferrowarden is a source-available credential proxy — a small HTTP service that sits between an AI agent and the services it needs to call. It runs as a sidecar to [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (it is not a fork or replacement, and is not affiliated with Vaultwarden or Bitwarden). By design, the agent is never handed credential values. Instead, it sends requests with named placeholders; Ferrowarden looks up the real values, makes the call on the agent's behalf, and returns the response with known credential values and common credential patterns scrubbed out.
 
 ---
 

@@ -2,7 +2,7 @@
 
 **The credential boundary for AI agents**
 
-This package contains editable, scalable logos and ready-to-use exported assets for the open-source [Ferrowarden](https://github.com/mallard1983/ferrowarden) project, plus written documentation. The design follows the **user-approved hybrid logo reference** included at `source/approved-reference.png`; the logo is **not** the earlier crenellated or original concept.
+This package contains editable, scalable logos and ready-to-use exported assets for the source-available [Ferrowarden](https://github.com/mallard1983/ferrowarden) project, plus written documentation. The design follows the **user-approved hybrid logo reference** included at `source/approved-reference.png`; the logo is **not** the earlier crenellated or original concept.
 
 ![Approved Ferrowarden light and dark logo variants](previews/brand-kit-overview.png)
 

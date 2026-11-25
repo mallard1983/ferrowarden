@@ -69,6 +69,12 @@ cargo test --test integration -- --test-threads=1
 
 The [`branding/`](branding/README.md) kit is the source of truth for the Ferrowarden logo, colours, typography and voice (see [`branding/docs/VOICE_AND_MESSAGING.md`](branding/docs/VOICE_AND_MESSAGING.md) for the claims rules: no absolute security guarantees, no implied affiliation with Vaultwarden or Bitwarden). Use its assets as they are, regenerate exported files with the scripts in `branding/scripts/` (see [`branding/docs/MAINTAINING_ASSETS.md`](branding/docs/MAINTAINING_ASSETS.md)), and do not hand-edit exported PNG, SVG or favicon files.
 
-## Licence
+## Licence and Contributor License Agreement
 
-By contributing, you agree that your contributions are licensed under the project's [MIT License](LICENSE).
+Ferrowarden is source-available under the [FSL-1.1-ALv2](LICENSE) licence (each release becomes Apache-2.0 two years after publication).
+
+**Every contribution needs the [Contributor License Agreement](CLA.md).** It lets the maintainer distribute your contribution under the project licence and relicense or commercially license the project later; you keep the copyright in your work. To agree, add this line to the description of your first pull request:
+
+> I have read the Ferrowarden CLA (CLA.md) and agree to its terms for this and all my future contributions to Ferrowarden.
+
+Pull requests without it can't be merged. Contributions on behalf of a company need a separate agreement: open an issue first.

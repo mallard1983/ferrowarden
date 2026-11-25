@@ -38,6 +38,8 @@ All notable changes to this project are documented here. The format is based on 
 
 ### Changed
 
+- **Licence: Ferrowarden is now source-available under the Functional Source License 1.1, ALv2 Future License (FSL-1.1-ALv2).** Use, modification and redistribution are allowed for any purpose except offering it, or something substantially similar, as a commercial product or service (a "Competing Use"); self-hosting for internal use is explicitly permitted. Each release becomes Apache-2.0 two years after publication. v0.1.0 and earlier remain MIT-licensed. Contributions now require the [Contributor License Agreement](CLA.md).
+
 - **The startup log line now reads `Ferrowarden <version> starting — the credential boundary for AI agents`** (with a `version` field) instead of `Ferrowarden starting`. Update any log alert that matched the old text exactly; the `startup` security event is unchanged.
 - Revoking (or patching, or previewing) an unknown agent key id returns `404 Not Found` instead of `401`, as documented.
 - Malformed placeholders (anything starting with `{{vault:` that does not parse) are rejected with `422` instead of being forwarded as literal text.
