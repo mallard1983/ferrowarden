@@ -1,4 +1,3 @@
-
 use super::*;
 
 // Known-answer vectors. The master keys are the Bitwarden SDK's own test

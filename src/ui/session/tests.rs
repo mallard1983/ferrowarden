@@ -1,4 +1,3 @@
-
 use super::*;
 
 const IDLE: Duration = Duration::from_secs(15 * 60);

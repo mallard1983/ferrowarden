@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn client_for(url: &str) -> FerroClient {

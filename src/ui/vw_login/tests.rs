@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn classify(status: u16, body: &str) -> Result<LoginOutcome, VwError> {

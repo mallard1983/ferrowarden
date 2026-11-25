@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn base_config(mode: UnlockMode) -> Config {

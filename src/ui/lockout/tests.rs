@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn ip(n: u8) -> IpAddr {

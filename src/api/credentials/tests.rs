@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::proxy::placeholder::scan;
 use crate::vault::model::FieldInfo;

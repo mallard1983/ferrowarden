@@ -1,4 +1,3 @@
-
 use super::log_filter;
 
 #[test]

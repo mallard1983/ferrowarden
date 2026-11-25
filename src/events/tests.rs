@@ -1,4 +1,3 @@
-
 use super::*;
 use sinks::SinkKind;
 

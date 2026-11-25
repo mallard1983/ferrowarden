@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::vault::model::FieldInfo;
 use serde_json::json;

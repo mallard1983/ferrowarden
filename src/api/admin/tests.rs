@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn q(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
