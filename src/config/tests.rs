@@ -1,0 +1,817 @@
+
+use super::*;
+
+fn base_config(mode: UnlockMode) -> Config {
+    Config {
+        bind_addr: "127.0.0.1:3000".to_string(),
+        bw_serve_url: "http://127.0.0.1:8087".to_string(),
+        unlock_mode: mode,
+        unlock_file: None,
+        admin_key: "a".repeat(32).into(),
+        keys_file: None,
+        tls_enabled: false,
+        tls_cert_file: None,
+        tls_key_file: None,
+        allow_private_targets: false,
+        allowed_targets: String::new(),
+        enforce_credential_hosts: true,
+        refresh_interval_secs: 300,
+        max_response_bytes: 1024,
+        forward_timeout_secs: 30,
+        trusted_proxies: String::new(),
+        api_prefix: String::new(),
+        agent_rate_limit_per_minute: 120,
+        agent_rate_limit_burst: 20,
+        admin_rate_limit_per_minute: 30,
+        admin_rate_limit_burst: 5,
+        events: Default::default(),
+        ui: Default::default(),
+        notify: Default::default(),
+        vault: Default::default(),
+    }
+}
+
+#[test]
+fn events_defaults_match_the_documentation() {
+    let e = EventsConfig::default();
+    assert!(e.stdout);
+    assert_eq!(e.buffer_size, 1000);
+    assert_eq!(e.queue_size, 10_000);
+    assert!(e.file.is_empty() && e.syslog.is_empty() && e.syslog_ca_file.is_empty());
+    assert_eq!(e.file_max_bytes, 52_428_800);
+    assert_eq!(e.file_keep, 10);
+    assert_eq!(e.syslog_facility, "auth");
+    assert_eq!(e.enabled_sinks(), vec!["stdout"]);
+    assert!(base_config(UnlockMode::Manual).validate().is_ok());
+}
+
+#[test]
+fn events_section_deserializes_partially() {
+    let cfg: Config = config::Config::builder()
+        .add_source(config::File::from_str(
+            "unlock_mode = \"manual\"
+[events]
+file = \"/tmp/e.jsonl\"
+file_keep = 3
+",
+            config::FileFormat::Toml,
+        ))
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+    assert_eq!(cfg.events.file, "/tmp/e.jsonl");
+    assert_eq!(cfg.events.file_keep, 3);
+    assert!(cfg.events.stdout, "unspecified keys keep their defaults");
+    assert_eq!(cfg.events.buffer_size, 1000);
+}
+
+#[test]
+fn invalid_events_settings_fail_validation() {
+    type Tweak = Box<dyn Fn(&mut EventsConfig)>;
+    let bad: Vec<Tweak> = vec![
+        Box::new(|e| e.buffer_size = 0),
+        Box::new(|e| e.queue_size = 0),
+        Box::new(|e| {
+            e.file = "/tmp/e.jsonl".into();
+            e.file_keep = 0;
+        }),
+        Box::new(|e| {
+            e.file = "/tmp/e.jsonl".into();
+            e.file_max_bytes = 0;
+        }),
+        Box::new(|e| e.syslog = "http://siem:514".into()),
+        Box::new(|e| e.syslog = "udp://siem".into()),
+        Box::new(|e| {
+            e.syslog = "udp://siem:514".into();
+            e.syslog_facility = "nope".into();
+        }),
+        Box::new(|e| {
+            e.syslog = "tcp://siem:514".into();
+            e.syslog_ca_file = "/ca.pem".into();
+        }),
+    ];
+    for (i, tweak) in bad.iter().enumerate() {
+        let mut cfg = base_config(UnlockMode::Manual);
+        tweak(&mut cfg.events);
+        assert!(cfg.validate().is_err(), "case {i} should fail");
+    }
+    let mut ok = base_config(UnlockMode::Manual);
+    ok.events.syslog = "tls://siem.example:6514".into();
+    ok.events.syslog_ca_file = "/ca.pem".into();
+    ok.events.file = "/tmp/e.jsonl".into();
+    assert!(ok.validate().is_ok());
+}
+
+#[test]
+fn zero_rate_limit_fails() {
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.agent_rate_limit_burst = 0;
+    assert!(cfg
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("rate_limit"));
+}
+
+#[test]
+fn api_prefix_normalization() {
+    assert_eq!(normalize_api_prefix("").unwrap(), "");
+    assert_eq!(normalize_api_prefix("/").unwrap(), "");
+    assert_eq!(normalize_api_prefix("k7f3q9").unwrap(), "/k7f3q9");
+    assert_eq!(normalize_api_prefix("/a-b/c_d/").unwrap(), "/a-b/c_d");
+    for bad in ["/a//b", "/a b", "/a?b", "/../x", "/health", "/a.b"] {
+        assert!(normalize_api_prefix(bad).is_err(), "{bad} must be rejected");
+    }
+}
+
+#[test]
+fn invalid_trusted_proxy_fails() {
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.trusted_proxies = "10.0.0.0/8, not-an-ip".to_string();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.to_string().contains("trusted_proxies"));
+}
+
+#[test]
+fn split_list_trims_and_drops_empty() {
+    assert_eq!(
+        split_list(" a, ,b ,"),
+        vec!["a".to_string(), "b".to_string()]
+    );
+}
+
+#[test]
+fn valid_manual_mode_passes() {
+    assert!(base_config(UnlockMode::Manual).validate().is_ok());
+}
+
+#[test]
+fn valid_file_mode_passes() {
+    let mut cfg = base_config(UnlockMode::File);
+    cfg.unlock_file = Some(PathBuf::from("/run/secrets/bw_password"));
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn file_mode_without_unlock_file_fails() {
+    let cfg = base_config(UnlockMode::File);
+    let err = cfg.validate().unwrap_err();
+    assert!(err.to_string().contains("unlock_file"));
+}
+
+#[test]
+fn short_admin_key_fails() {
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.admin_key = "short".to_string().into();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.to_string().contains("32 characters"));
+}
+
+#[test]
+fn the_admin_key_file_is_read_without_touching_the_environment() {
+    // Config::load reads the real environment; this is the only test that
+    // sets FERROWARDEN_* variables, and it removes them again.
+    let key = "k".repeat(40);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("admin_key");
+    std::fs::write(
+        &path,
+        format!(
+            "{key}
+"
+        ),
+    )
+    .unwrap();
+    std::env::remove_var("FERROWARDEN_ADMIN_KEY");
+    std::env::set_var("FERROWARDEN_ADMIN_KEY_FILE", &path);
+    std::env::set_var("FERROWARDEN_TLS_ENABLED", "false");
+    std::env::set_var("FERROWARDEN_UNLOCK_MODE", "manual");
+    let loaded = Config::load();
+    // The key stays out of the process environment.
+    let leaked = std::env::var("FERROWARDEN_ADMIN_KEY");
+    let in_env_values = std::env::vars().any(|(_, v)| v == key);
+
+    // A missing file is an error, not a silent empty key.
+    std::env::set_var("FERROWARDEN_ADMIN_KEY_FILE", dir.path().join("nope"));
+    let missing = Config::load().unwrap_err().to_string();
+    // A direct variable takes precedence over the file.
+    let direct = "d".repeat(40);
+    std::env::set_var("FERROWARDEN_ADMIN_KEY", &direct);
+    let preferred = Config::load();
+    for name in [
+        "FERROWARDEN_ADMIN_KEY",
+        "FERROWARDEN_ADMIN_KEY_FILE",
+        "FERROWARDEN_TLS_ENABLED",
+        "FERROWARDEN_UNLOCK_MODE",
+    ] {
+        std::env::remove_var(name);
+    }
+
+    assert_eq!(loaded.unwrap().admin_key.as_str(), key);
+    assert!(leaked.is_err(), "the key must not be exported");
+    assert!(!in_env_values);
+    assert!(missing.contains("does not exist"), "{missing}");
+    assert_eq!(preferred.unwrap().admin_key.as_str(), direct);
+}
+
+#[test]
+fn exactly_32_char_admin_key_passes() {
+    let cfg = base_config(UnlockMode::Manual);
+    assert_eq!(cfg.admin_key.len(), 32);
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn tls_enabled_without_cert_fails() {
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.tls_enabled = true;
+    cfg.tls_key_file = Some(PathBuf::from("/certs/server.key"));
+    let err = cfg.validate().unwrap_err();
+    assert!(err.to_string().contains("tls_cert_file"));
+}
+
+#[test]
+fn tls_enabled_without_key_fails() {
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.tls_enabled = true;
+    cfg.tls_cert_file = Some(PathBuf::from("/certs/server.crt"));
+    let err = cfg.validate().unwrap_err();
+    assert!(err.to_string().contains("tls_key_file"));
+}
+
+#[test]
+fn tls_enabled_with_both_files_passes() {
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.tls_enabled = true;
+    cfg.tls_cert_file = Some(PathBuf::from("/certs/server.crt"));
+    cfg.tls_key_file = Some(PathBuf::from("/certs/server.key"));
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn tls_disabled_no_files_passes() {
+    let cfg = base_config(UnlockMode::Manual);
+    assert!(!cfg.tls_enabled);
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn ui_is_disabled_by_default_with_the_documented_defaults() {
+    let ui = UiConfig::default();
+    assert!(!ui.enabled());
+    assert_eq!(ui.bind, "");
+    assert_eq!(ui.vaultwarden_url, "https://vaultwarden");
+    assert_eq!(ui.vaultwarden_ca_file, "");
+    assert!(!ui.insecure_http);
+    assert_eq!(ui.session_idle_minutes, 15);
+    assert_eq!(ui.session_max_hours, 8);
+    assert!(base_config(UnlockMode::Manual).validate().is_ok());
+}
+
+#[test]
+fn ui_section_deserializes_partially() {
+    let ui: UiConfig = serde_json::from_str(r#"{"bind":"0.0.0.0:3001"}"#).unwrap();
+    assert!(ui.enabled());
+    assert_eq!(ui.session_idle_minutes, 15);
+}
+
+#[test]
+fn invalid_ui_settings_fail_validation() {
+    let with = |f: &dyn Fn(&mut UiConfig)| {
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.ui.bind = "0.0.0.0:3001".to_string();
+        f(&mut cfg.ui);
+        cfg.validate()
+    };
+    assert!(with(&|_| {}).is_ok());
+    assert!(with(&|u| u.bind = "not an address".into()).is_err());
+    assert!(with(&|u| u.session_idle_minutes = 0).is_err());
+    assert!(with(&|u| u.session_max_hours = 0).is_err());
+    assert!(with(&|u| u.session_idle_minutes = u64::MAX).is_err());
+    assert!(with(&|u| u.session_max_hours = u64::MAX).is_err());
+    // HTTPS only, except loopback (tests).
+    assert!(with(&|u| u.vaultwarden_url = "http://vaultwarden".into()).is_err());
+    assert!(with(&|u| u.vaultwarden_url = "http://10.0.0.5".into()).is_err());
+    assert!(with(&|u| u.vaultwarden_url = "http://127.0.0.1:8080".into()).is_ok());
+    assert!(with(&|u| u.vaultwarden_url = "http://localhost:8080".into()).is_ok());
+    assert!(with(&|u| u.vaultwarden_url = "https://vault.example.com".into()).is_ok());
+    assert!(with(&|u| u.vaultwarden_url = "ftp://vault".into()).is_err());
+    assert!(with(&|u| u.vaultwarden_url = "https://vault/?x=1".into()).is_err());
+    assert!(with(&|u| u.vaultwarden_url = "not a url".into()).is_err());
+}
+
+// ── [notify] ──────────────────────────────────────────────────────────────
+
+fn tokens_from(env: &[(&str, &str)], files: &[(&str, &[u8])]) -> FerroResult<NotifyTokens> {
+    let env: std::collections::HashMap<String, String> = env
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let files: std::collections::HashMap<String, Vec<u8>> = files
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_vec()))
+        .collect();
+    NotifyTokens::load(
+        |name| env.get(name).cloned(),
+        |path| {
+            files
+                .get(path.to_str().unwrap())
+                .cloned()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        },
+    )
+}
+
+#[test]
+fn notify_defaults_match_the_documentation() {
+    let n = NotifyConfig::default();
+    assert!(!n.enabled());
+    assert_eq!(n.events, ["blocked", "auth_failure", "vault", "system"]);
+    assert_eq!(n.min_interval_secs, 60);
+    assert_eq!(n.max_per_hour, 60);
+    assert_eq!(n.auth_failure_threshold, 5);
+    assert_eq!(n.auth_failure_window_secs, 300);
+    assert!(!n.allow_http);
+    assert!(n.ca_file.is_empty());
+    assert!(base_config(UnlockMode::Manual).validate().is_ok());
+}
+
+#[test]
+fn notify_section_deserializes_from_a_list_or_a_comma_separated_string() {
+    let from = |text: &str| -> Config {
+        config::Config::builder()
+            .add_source(config::File::from_str(text, config::FileFormat::Toml))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap()
+    };
+    let cfg = from(
+            "unlock_mode = \"manual\"\n[notify]\nwebhook_url = \"https://hooks.example.com/x\"\nevents = [\"blocked\", \"admin\"]\nmax_per_hour = 5\n",
+        );
+    assert_eq!(cfg.notify.events, ["blocked", "admin"]);
+    assert_eq!(cfg.notify.max_per_hour, 5);
+    assert_eq!(
+        cfg.notify.min_interval_secs, 60,
+        "unspecified keys keep their defaults"
+    );
+    let cfg = from("unlock_mode = \"manual\"\n[notify]\nevents = \"blocked, vault\"\n");
+    assert_eq!(cfg.notify.events, ["blocked", "vault"]);
+}
+
+#[test]
+fn notify_settings_come_from_the_environment_too() {
+    // The same builder the real loader uses, with a fake environment.
+    let mut env = std::collections::HashMap::new();
+    env.insert("FERROWARDEN_UNLOCK_MODE".to_string(), "manual".to_string());
+    env.insert(
+        "FERROWARDEN_NOTIFY__WEBHOOK_URL".to_string(),
+        "https://hooks.example.com/x".to_string(),
+    );
+    env.insert(
+        "FERROWARDEN_NOTIFY__EVENTS".to_string(),
+        "blocked,auth_failure".to_string(),
+    );
+    env.insert(
+        "FERROWARDEN_NOTIFY__MIN_INTERVAL_SECS".to_string(),
+        "5".to_string(),
+    );
+    env.insert(
+        "FERROWARDEN_NOTIFY__ALLOW_HTTP".to_string(),
+        "true".to_string(),
+    );
+    // Token variables share the prefix: they must be ignored here.
+    env.insert(
+        "FERROWARDEN_NOTIFY_GOTIFY_TOKEN".to_string(),
+        "not-a-setting".to_string(),
+    );
+    let cfg: Config = config::Config::builder()
+        .add_source(
+            config::Environment::with_prefix("FERROWARDEN")
+                .prefix_separator("_")
+                .separator("__")
+                .ignore_empty(true)
+                .source(Some(env)),
+        )
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+    assert_eq!(cfg.notify.webhook_url, "https://hooks.example.com/x");
+    assert_eq!(cfg.notify.events, ["blocked", "auth_failure"]);
+    assert_eq!(cfg.notify.min_interval_secs, 5);
+    assert!(cfg.notify.allow_http);
+    assert!(cfg.notify.tokens.gotify.is_none());
+}
+
+#[test]
+fn notifier_tokens_come_from_the_environment_or_a_file_never_both() {
+    assert!(tokens_from(&[], &[]).unwrap().gotify.is_none());
+    let t = tokens_from(&[(ENV_GOTIFY_TOKEN, "  direct-token-1 \n")], &[]).unwrap();
+    assert_eq!(
+        t.gotify.as_deref().map(String::as_str),
+        Some("direct-token-1")
+    );
+    let t = tokens_from(
+        &[("FERROWARDEN_NOTIFY_NTFY_TOKEN_FILE", "/run/secrets/ntfy")],
+        &[("/run/secrets/ntfy", b"file-token-2\r\n")],
+    )
+    .unwrap();
+    assert_eq!(t.ntfy.as_deref().map(String::as_str), Some("file-token-2"));
+    assert!(t.gotify.is_none() && t.webhook.is_none());
+
+    let both = tokens_from(
+        &[
+            (ENV_WEBHOOK_TOKEN, "tok-one-secret-value"),
+            ("FERROWARDEN_NOTIFY_WEBHOOK_TOKEN_FILE", "/f"),
+        ],
+        &[("/f", b"tok-two-secret-value")],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(both.contains("only one of"), "{both}");
+    assert!(!both.contains("secret-value"), "{both}");
+}
+
+#[test]
+fn bad_token_sources_are_errors_that_never_echo_the_value() {
+    let spaced = "s3cr3t token with spaces";
+    type Case<'a> = (Vec<(&'a str, &'a str)>, Vec<(&'a str, &'a [u8])>);
+    let cases: Vec<Case> = vec![
+        // A missing file.
+        (
+            vec![("FERROWARDEN_NOTIFY_GOTIFY_TOKEN_FILE", "/nope")],
+            vec![],
+        ),
+        // An empty file, a whitespace-only value.
+        (
+            vec![("FERROWARDEN_NOTIFY_GOTIFY_TOKEN_FILE", "/e")],
+            vec![("/e", b"\n")],
+        ),
+        (vec![(ENV_GOTIFY_TOKEN, "   ")], vec![]),
+        // Not valid UTF-8.
+        (
+            vec![("FERROWARDEN_NOTIFY_GOTIFY_TOKEN_FILE", "/b")],
+            vec![("/b", &[0xff, 0xfe, 0x41])],
+        ),
+        // Not a valid header value: spaces inside, control characters.
+        (vec![(ENV_GOTIFY_TOKEN, spaced)], vec![]),
+        (vec![(ENV_GOTIFY_TOKEN, "ab\u{1}cd")], vec![]),
+        (vec![(ENV_GOTIFY_TOKEN, "tok\u{e9}n")], vec![]),
+    ];
+    for (env, files) in cases {
+        let err = tokens_from(&env, &files).unwrap_err().to_string();
+        assert!(err.contains("FERROWARDEN_NOTIFY_GOTIFY_TOKEN"), "{err}");
+        for (_, v) in &env {
+            if v.len() > 6 && !v.starts_with('/') {
+                assert!(!err.contains(v), "{err}");
+            }
+        }
+    }
+}
+
+#[test]
+fn tokens_are_redacted_in_debug_output_and_not_read_from_the_config_file() {
+    let t = tokens_from(&[(ENV_GOTIFY_TOKEN, "gotify-secret-123456")], &[]).unwrap();
+    let shown = format!("{t:?}");
+    assert!(!shown.contains("gotify-secret"), "{shown}");
+    assert!(shown.contains("[redacted]"));
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.notify.tokens = t;
+    assert!(!format!("{cfg:?}").contains("gotify-secret"));
+
+    // A `tokens` key in the file is ignored (serde skip), not read.
+    let cfg: Config = config::Config::builder()
+        .add_source(config::File::from_str(
+            "unlock_mode = \"manual\"\n[notify.tokens]\ngotify = \"from-the-file-12345\"\n",
+            config::FileFormat::Toml,
+        ))
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+    assert!(cfg.notify.tokens.gotify.is_none());
+}
+
+fn notify_cfg(f: impl Fn(&mut NotifyConfig)) -> FerroResult<()> {
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.notify.webhook_url = "https://hooks.example.com/ferrowarden".into();
+    f(&mut cfg.notify);
+    cfg.validate()
+}
+
+#[test]
+fn notify_validation_covers_urls_categories_limits_and_tokens() {
+    assert!(notify_cfg(|_| {}).is_ok());
+    type Tweak = Box<dyn Fn(&mut NotifyConfig)>;
+    let bad: Vec<(&str, Tweak)> = vec![
+        (
+            "not a url",
+            Box::new(|n| n.webhook_url = "not a url".into()),
+        ),
+        ("no host", Box::new(|n| n.webhook_url = "https://".into())),
+        (
+            "ftp",
+            Box::new(|n| n.webhook_url = "ftp://hooks.example.com/x".into()),
+        ),
+        (
+            "http",
+            Box::new(|n| n.webhook_url = "http://hooks.example.com/x".into()),
+        ),
+        (
+            "userinfo",
+            Box::new(|n| n.webhook_url = "https://u:p@hooks.example.com/x".into()),
+        ),
+        (
+            "query",
+            Box::new(|n| n.webhook_url = "https://hooks.example.com/x?token=abc".into()),
+        ),
+        (
+            "fragment",
+            Box::new(|n| n.webhook_url = "https://hooks.example.com/x#f".into()),
+        ),
+        (
+            "bad ntfy",
+            Box::new(|n| n.ntfy_url = "ntfy.example.com/topic".into()),
+        ),
+        (
+            "gotify without token",
+            Box::new(|n| n.gotify_url = "https://gotify.example.com".into()),
+        ),
+        (
+            "unknown category",
+            Box::new(|n| n.events = vec!["blocked".into(), "everything".into()]),
+        ),
+        ("no categories", Box::new(|n| n.events = vec![])),
+        ("zero cap", Box::new(|n| n.max_per_hour = 0)),
+        ("zero threshold", Box::new(|n| n.auth_failure_threshold = 0)),
+        ("zero window", Box::new(|n| n.auth_failure_window_secs = 0)),
+        (
+            "huge window",
+            Box::new(|n| n.auth_failure_window_secs = 100_000),
+        ),
+        ("huge interval", Box::new(|n| n.min_interval_secs = 100_000)),
+        (
+            "missing ca file",
+            Box::new(|n| n.ca_file = "/no/such/ca.pem".into()),
+        ),
+    ];
+    for (name, tweak) in &bad {
+        assert!(notify_cfg(tweak).is_err(), "{name} should fail");
+    }
+    // http is fine for this machine, and anywhere with allow_http.
+    for url in [
+        "http://localhost:8080/x",
+        "http://127.0.0.1/x",
+        "http://[::1]:9/x",
+    ] {
+        assert!(notify_cfg(|n| n.webhook_url = url.into()).is_ok(), "{url}");
+    }
+    assert!(notify_cfg(|n| {
+        n.webhook_url = "http://hooks.example.com/x".into();
+        n.allow_http = true;
+    })
+    .is_ok());
+    // Gotify with its token.
+    assert!(notify_cfg(|n| {
+        n.gotify_url = "https://gotify.example.com".into();
+        n.tokens.gotify = Some(Zeroizing::new("tok".into()));
+    })
+    .is_ok());
+    // Unknown categories are an error even with no sender.
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.notify.events = vec!["nope".into()];
+    assert!(cfg.validate().unwrap_err().to_string().contains("nope"));
+    // A disabled notifier with a stray CA file is a mistake worth saying.
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.notify.ca_file = "/x.pem".into();
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn notify_endpoints_list_each_notifier_host_and_port() {
+    let n = NotifyConfig {
+        gotify_url: "https://Gotify.Example.com/".into(),
+        ntfy_url: "https://ntfy.example.com:8443/topic".into(),
+        webhook_url: "http://[::1]:7777/n".into(),
+        ..NotifyConfig::default()
+    };
+    assert_eq!(
+        n.endpoints(),
+        [
+            ("gotify.example.com".to_string(), 443),
+            ("ntfy.example.com".to_string(), 8443),
+            ("::1".to_string(), 7777)
+        ]
+    );
+    assert!(NotifyConfig::default().endpoints().is_empty());
+}
+
+#[test]
+fn a_disabled_ui_ignores_the_rest_of_its_section() {
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.ui.vaultwarden_url = "garbage".into();
+    cfg.ui.session_idle_minutes = 0;
+    assert!(cfg.validate().is_ok());
+}
+
+// ── [vault] ───────────────────────────────────────────────────────────────
+
+fn vault_creds(id: Option<&str>, secret: Option<&str>) -> VaultCredentials {
+    VaultCredentials {
+        client_id: id.map(|v| Zeroizing::new(v.to_string())),
+        client_secret: secret.map(|v| Zeroizing::new(v.to_string())),
+    }
+}
+
+#[test]
+fn vault_defaults_to_bw_serve_and_the_documented_url() {
+    let v = VaultConfig::default();
+    assert_eq!(v.backend, VaultBackend::BwServe);
+    assert_eq!(v.url, "https://vaultwarden");
+    assert_eq!(v.ca_file, "");
+    assert_eq!(VaultBackend::Native.as_str(), "native");
+    assert_eq!(VaultBackend::BwServe.as_str(), "bw-serve");
+    assert!(base_config(UnlockMode::Manual).validate().is_ok());
+}
+
+#[test]
+fn vault_backend_comes_from_the_file_or_the_environment() {
+    let v: VaultConfig =
+        serde_json::from_str(r#"{"backend":"native","url":"https://vw.example"}"#).unwrap();
+    assert_eq!(v.backend, VaultBackend::Native);
+    assert_eq!(v.url, "https://vw.example");
+    assert!(serde_json::from_str::<VaultConfig>(r#"{"backend":"nope"}"#).is_err());
+
+    let mut env = std::collections::HashMap::new();
+    env.insert("FERROWARDEN_UNLOCK_MODE".to_string(), "manual".to_string());
+    env.insert(
+        "FERROWARDEN_VAULT__BACKEND".to_string(),
+        "native".to_string(),
+    );
+    env.insert(
+        "FERROWARDEN_VAULT__CA_FILE".to_string(),
+        "/ca/ca.crt".to_string(),
+    );
+    // The API key variables share the prefix: they must be ignored here.
+    env.insert(
+        "FERROWARDEN_VAULT_CLIENT_SECRET".to_string(),
+        "not-a-setting".to_string(),
+    );
+    let cfg: Config = config::Config::builder()
+        .add_source(
+            config::Environment::with_prefix("FERROWARDEN")
+                .prefix_separator("_")
+                .separator("__")
+                .ignore_empty(true)
+                .source(Some(env)),
+        )
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+    assert_eq!(cfg.vault.backend, VaultBackend::Native);
+    assert_eq!(cfg.vault.ca_file, "/ca/ca.crt");
+    assert!(cfg.vault.credentials.client_secret.is_none());
+}
+
+#[test]
+fn native_mode_needs_a_valid_url_and_the_api_key() {
+    let native = |url: &str, id: Option<&str>, secret: Option<&str>| {
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.vault.backend = VaultBackend::Native;
+        cfg.vault.url = url.to_string();
+        cfg.vault.credentials = vault_creds(id, secret);
+        cfg.validate()
+    };
+    assert!(native("https://vaultwarden", Some("i"), Some("s")).is_ok());
+    assert!(native("http://localhost:8000", Some("i"), Some("s")).is_ok());
+    for bad in [
+        "http://vaultwarden",
+        "ftp://x",
+        "not a url",
+        "https://vw/?a=b",
+        "https://vw/#f",
+    ] {
+        let err = native(bad, Some("i"), Some("s")).unwrap_err().to_string();
+        assert!(err.contains("vault.url"), "{bad}: {err}");
+    }
+    for (id, secret) in [(None, Some("s")), (Some("i"), None), (None, None)] {
+        let err = native("https://vaultwarden", id, secret)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(ENV_VAULT_CLIENT_ID), "{err}");
+        assert!(err.contains(ENV_VAULT_CLIENT_SECRET), "{err}");
+    }
+}
+
+#[test]
+fn bw_serve_mode_does_not_need_or_check_the_native_settings() {
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.vault.url = "http://not-https-and-never-used".to_string();
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn ignored_settings_produce_warnings_in_either_mode() {
+    let mut v = VaultConfig::default();
+    assert!(v.validate(false, false).unwrap().is_empty());
+    let w = v.validate(false, true).unwrap();
+    assert!(w[0].contains("ignored"), "{w:?}");
+    v.backend = VaultBackend::Native;
+    v.credentials = vault_creds(Some("i"), Some("s"));
+    assert!(v.validate(false, true).unwrap().is_empty());
+    let w = v.validate(true, true).unwrap();
+    assert!(w[0].contains("bw_serve_url is ignored"), "{w:?}");
+}
+
+#[test]
+fn the_api_key_comes_from_the_environment_or_a_file_and_is_redacted() {
+    let load = |vars: &[(&str, &str)], files: &[(&str, &str)]| {
+        let vars: std::collections::HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let files: std::collections::HashMap<String, String> = files
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        VaultCredentials::load(
+            |n| vars.get(n).cloned(),
+            |p| {
+                files
+                    .get(p.to_str().unwrap())
+                    .map(|v| v.clone().into_bytes())
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+            },
+        )
+    };
+    let c = load(
+        &[
+            ("FERROWARDEN_VAULT_CLIENT_ID_FILE", "/run/secrets/id"),
+            ("FERROWARDEN_VAULT_CLIENT_SECRET", "direct-secret-value"),
+        ],
+        &[("/run/secrets/id", "user.abc\n")],
+    )
+    .unwrap();
+    assert_eq!(c.client_id.as_ref().unwrap().as_str(), "user.abc");
+    assert_eq!(
+        c.client_secret.as_ref().unwrap().as_str(),
+        "direct-secret-value"
+    );
+    // Never in Debug output.
+    let dbg = format!("{c:?}");
+    assert!(!dbg.contains("direct-secret-value") && !dbg.contains("user.abc"));
+    assert!(dbg.contains("[redacted]"));
+    // A missing file is an error that names the variable, not the value.
+    let err = load(&[("FERROWARDEN_VAULT_CLIENT_ID_FILE", "/nope")], &[])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("FERROWARDEN_VAULT_CLIENT_ID_FILE"), "{err}");
+    // Nothing set: both absent.
+    let none = load(&[], &[]).unwrap();
+    assert!(none.client_id.is_none() && none.client_secret.is_none());
+}
+
+#[test]
+fn deprecated_ui_settings_are_aliases_for_the_vault_settings() {
+    // Only the old names set: they are adopted, with a deprecation note.
+    let mut vault = VaultConfig::default();
+    let mut ui = UiConfig {
+        vaultwarden_url: "https://old.example".to_string(),
+        vaultwarden_ca_file: "/ca/old.crt".to_string(),
+        ..UiConfig::default()
+    };
+    let notes = vault.resolve_aliases(&mut ui);
+    assert_eq!(vault.url, "https://old.example");
+    assert_eq!(vault.ca_file, "/ca/old.crt");
+    assert_eq!(notes.len(), 2);
+    assert!(notes.iter().all(|n| n.contains("deprecated")));
+
+    // New names win when both are set and differ.
+    let mut vault = VaultConfig {
+        url: "https://new.example".to_string(),
+        ca_file: "/ca/new.crt".to_string(),
+        ..VaultConfig::default()
+    };
+    let mut ui = UiConfig {
+        vaultwarden_url: "https://old.example".to_string(),
+        vaultwarden_ca_file: "/ca/old.crt".to_string(),
+        ..UiConfig::default()
+    };
+    let notes = vault.resolve_aliases(&mut ui);
+    assert_eq!(vault.url, "https://new.example");
+    assert_eq!(ui.vaultwarden_url, "https://new.example", "written back");
+    assert_eq!(ui.vaultwarden_ca_file, "/ca/new.crt");
+    assert_eq!(notes.len(), 2);
+
+    // Only the new names, or nothing: no notes.
+    let mut vault = VaultConfig {
+        ca_file: "/ca/new.crt".to_string(),
+        ..VaultConfig::default()
+    };
+    let mut ui = UiConfig::default();
+    assert!(vault.resolve_aliases(&mut ui).is_empty());
+    assert_eq!(ui.vaultwarden_ca_file, "/ca/new.crt");
+}

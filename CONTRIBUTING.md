@@ -59,7 +59,8 @@ cargo test --test integration -- --test-threads=1
 **Generally:**
 
 - Keep pull requests focused: one change per PR, with a description of what and why.
-- Add or update tests for behaviour changes. Unit tests live next to the code; end-to-end behaviour goes in `tests/integration.rs`.
+- Add or update tests for behaviour changes. End-to-end behaviour goes in `tests/integration.rs`.
+- **Unit tests live in their own files**, never inline in production code: `src/foo/bar.rs` declares `#[cfg(test)] mod tests;` and the tests go in `src/foo/bar/tests.rs` (`src/foo/mod.rs` → `src/foo/tests.rs`). Test fixtures, keys, passwords and vectors belong there or under a `testdata/` directory, so anyone can tell test code from production code by its file name. Only small `#[cfg(test)]` hooks that need private access (an accessor, a test clock) may stay next to the code they expose, and they must not hold fixtures or secret-looking values.
 - Update the docs (`docs/`, `README.md`, `.env.example`, `ferrowarden.toml.example`, the agent skill under `.claude/skills/`) when behaviour or configuration changes.
 - Add an entry under **[Unreleased]** in [CHANGELOG.md](CHANGELOG.md); call out anything that needs action when upgrading.
 - New dependencies need a reason; prefer well-maintained crates and check them with `cargo audit`.
