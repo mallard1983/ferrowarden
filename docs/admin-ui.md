@@ -75,7 +75,9 @@ The sign-in talks to Vaultwarden over HTTPS at `ui.vaultwarden_url` (host `vault
 So the `internal-certs` one-shot copies **only `ca.crt`** into a second volume, `internal-ca-public`, and Ferrowarden mounts that read-only at `/ca-public`. The `internal-pki` volume, which holds `ca.key`, is never mounted into Ferrowarden:
 
 ```sh
-docker compose exec ferrowarden ls -l /ca-public
+# The ferrowarden image has no shell or ls: list the volume with a throwaway container
+# (the volume name is prefixed with your Compose project name).
+docker run --rm -v ferrowarden_internal-ca-public:/ca-public:ro busybox ls -l /ca-public
 # -rw-r--r-- 1 root root 639 ... ca.crt        <- and nothing else
 ```
 

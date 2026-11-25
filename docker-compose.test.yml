@@ -48,6 +48,9 @@ services:
     # against this release. Upgrade both deliberately and re-run the tests.
     image: vaultwarden/server:1.37.5
     restart: unless-stopped
+    # Same as production: the only hardening Vaultwarden gets (it binds 443 as root).
+    security_opt:
+      - "no-new-privileges:true"
     environment:
       DOMAIN: "https://vaultwarden"
       SIGNUPS_ALLOWED: "${VAULTWARDEN_SIGNUPS_ALLOWED:-false}"
@@ -71,13 +74,24 @@ services:
       dockerfile: bw-cli.Dockerfile
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    # Hardened exactly like production (docker-compose.yml), which is what
+    # the integration suite must run against.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    pids_limit: 128
+    mem_limit: 1g
     volumes:
       - ./docker/bw-entrypoint.sh:/entrypoint.sh:ro
       - internal-pki:/pki:ro
-      # Note: bw-test-data volume removed — the node user cannot write to a
-      # Docker named volume (initially root-owned). bw re-logs in on each
-      # container start using the API key secrets, which is fast enough for
-      # a test stack.
+    # bw writes only its data directory (data.json). A tmpfs here (production
+    # uses a volume) means every container start logs in again with the API
+    # key, which bw-entrypoint.sh handles ("bw login --check") and which is
+    # fast enough for a test stack. uid/gid 1000 is the image's node user.
+    tmpfs:
+      - "/home/node/.config/Bitwarden CLI:uid=1000,gid=1000,mode=0700"
     secrets:
       - bw_client_id
       - bw_client_secret
@@ -93,11 +107,30 @@ services:
       - vault-internal
     depends_on:
       - vaultwarden
+    # Same check as production. bw serve takes ~15-20 s to log in and sync.
+    healthcheck:
+      # Must use the bw-serve name: bw serve rejects other Host headers.
+      test: ["CMD", "curl", "-f", "http://bw-serve:8087/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 20s
 
   # ── Ferrowarden ─────────────────────────────────────────────────────────────
   ferrowarden:
     build: .
     restart: unless-stopped
+    # Hardened exactly like production (docker-compose.yml): scratch image,
+    # read-only root filesystem, no capabilities, no privilege escalation.
+    # Writable paths, all on the volume below: /data/agent_keys.json (and its
+    # .tmp sibling) and the event file under /data/events.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    pids_limit: 256
+    mem_limit: 1g
     secrets:
       - ferrowarden_admin_key
       - bw_master_password
@@ -134,11 +167,11 @@ services:
       # Same for the admin endpoints (default burst 5): the key lifecycle,
       # status and audit tests call them back-to-back.
       FERROWARDEN_ADMIN_RATE_LIMIT_BURST: "1000"
-      # Also write security events to a file inside the container. The writable
-      # layer is used (not a bind mount) so this works on Linux CI runners whose
-      # UID differs; scripts/check-no-secrets.sh copies it out with
-      # `docker compose cp` and scans it for secret values.
-      FERROWARDEN_EVENTS__FILE: "/tmp/ferrowarden-events/events.jsonl"
+      # Also write security events to a file. The root filesystem is read-only,
+      # so it goes on the ferrowarden-keys volume (not a bind mount, so this
+      # works on Linux CI runners whose UID differs); scripts/check-no-secrets.sh
+      # copies it out with `docker compose cp` and scans it for secret values.
+      FERROWARDEN_EVENTS__FILE: "/data/events/events.jsonl"
       # Admin web UI, for the integration tests. The test client speaks plain
       # HTTP, hence insecure_http; never do this outside a test stack.
       FERROWARDEN_UI__BIND: "0.0.0.0:3001"
@@ -170,6 +203,14 @@ services:
         condition: service_completed_successfully
       bw-serve:
         condition: service_started
+    healthcheck:
+      # The image has no curl: the binary checks itself (GET /health on its own
+      # port; TLS verified against tls_cert_file when the TLS overlay is on).
+      test: ["CMD", "/app/ferrowarden", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   # ── Mock API ─────────────────────────────────────────────────────────────────
   # Accepts any HTTP request, logs the full details (method, path, headers,

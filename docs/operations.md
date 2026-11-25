@@ -299,6 +299,51 @@ Treat a compromised admin key as a full-access breach of key management:
 
 ---
 
+## Debugging a container with no shell
+
+The `ferrowarden` image is a static binary on `scratch`: there is no `sh`, `ls`, `cat` or `curl` in it, so `docker exec -it ferrowarden sh` fails with "executable file not found". That is deliberate (see [Deployment Profiles](deployment-profiles.md)). The same goes for a custom `entrypoint:` wrapper script around the binary. `bw-serve` and `vaultwarden` are unchanged: they still have a shell.
+
+What to use instead:
+
+```sh
+# Logs: startup errors, configuration problems, security events.
+docker compose logs --tail 100 ferrowarden
+
+# Is it healthy, as Docker sees it? What did the last checks say?
+docker compose ps
+docker inspect -f '{{json .State.Health}}' $(docker compose ps -q ferrowarden)
+
+# Run the health check by hand (the binary exists, so exec works for it).
+docker compose exec ferrowarden /app/ferrowarden healthcheck; echo "exit $?"
+docker compose exec ferrowarden /app/ferrowarden --version
+
+# Copy a file out, e.g. the event file or the key store (hashes only).
+docker compose cp ferrowarden:/data/events/events.jsonl ./events.jsonl
+
+# What configuration does the container have? (Variables only; the admin key
+# is a file path, never a value.)
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $(docker compose ps -q ferrowarden)
+```
+
+For anything that needs tools, start a **temporary debug container that joins the Ferrowarden container's namespaces**. It brings its own tools and leaves the hardened container untouched:
+
+```sh
+FW=$(docker compose ps -q ferrowarden)
+
+# Network view: same IP, same ports. Test what Ferrowarden can reach, or
+# check its listener from inside.
+docker run --rm -it --network container:$FW nicolaka/netshoot \
+  curl -s http://bw-serve:8087/status
+
+# Process view: see its process (and /proc/<pid>/root, with ptrace).
+docker run --rm -it --pid container:$FW --cap-add SYS_PTRACE busybox ps
+
+# Read a volume without touching the container (the key store, read-only).
+docker run --rm -v ferrowarden_ferrowarden-keys:/data:ro busybox ls -l /data
+```
+
+Volume names are prefixed with the Compose project name (`docker volume ls`). The debug container is `--rm`: exiting removes it. Never mount the Docker socket into it.
+
 ## Monitoring
 
 ### Structured Log Output
@@ -414,9 +459,12 @@ healthcheck:
 
 ### "FERROWARDEN_ADMIN_KEY must be set"
 
-The admin key environment variable is missing. If using Docker secrets, check that:
-1. `secrets/ferrowarden_admin_key` file exists and is non-empty
-2. The `ferrowarden-entrypoint.sh` script is reading and exporting the value
+Neither `FERROWARDEN_ADMIN_KEY` nor `FERROWARDEN_ADMIN_KEY_FILE` is set. In the Compose files the second is set to `/run/secrets/ferrowarden_admin_key`. Ferrowarden reads that file itself (there is no entrypoint script) and never copies the key into its environment. Check that:
+1. `secrets/ferrowarden_admin_key` exists and is non-empty, and is listed under the service's `secrets:`
+2. On a Linux host, UID 999 can read it. The message then says `cannot read ... as UID 999`; fix it with `sudo chown 999:999 secrets/ferrowarden_admin_key`
+3. `FERROWARDEN_ADMIN_KEY_FILE` points at the mounted path (`/run/secrets/...`), not at the host path
+
+If both variables are set, `FERROWARDEN_ADMIN_KEY` wins and the file is not read.
 
 ### "FERROWARDEN_ADMIN_KEY must be at least 32 characters"
 
@@ -475,7 +523,7 @@ curl https://<ferrowarden-host>:3000/v1/credentials \
 docker compose logs bw-serve
 ```
 
-bw-serve only runs `bw login` when the CLI is not already logged in, so restarts with a persistent `bw-data` volume work. If `BW_SERVER_URL` changed (e.g. the move to `https://vaultwarden`), the entrypoint logs out and reconfigures first.
+bw-serve only runs `bw login` when the CLI is not already logged in, so restarts with a persistent `bw-data` volume work (the test stack keeps the data directory on a `tmpfs` instead and logs in again on every start). The container's root filesystem is read-only; the CLI's data directory is its only writable path. If `BW_SERVER_URL` changed (e.g. the move to `https://vaultwarden`), the entrypoint logs out and reconfigures first.
 
 - `Insecure URL not allowed. All URLs must use HTTPS.` — `BW_SERVER_URL` is `http://`. Use `https://vaultwarden`.
 - `ERROR: internal CA certificate not found at /pki/ca.crt` — the `internal-pki` volume is not mounted, or `internal-certs` has not run (`docker compose up -d` runs it automatically).

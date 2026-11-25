@@ -5,8 +5,10 @@
 # the .gitignore already excludes it.
 #
 # NEVER set admin_key here. It must come from the environment variable
-# FERROWARDEN_ADMIN_KEY. This is enforced at startup; ferrowarden will
-# refuse to start if the key is absent or fewer than 32 characters.
+# FERROWARDEN_ADMIN_KEY, or from the file that FERROWARDEN_ADMIN_KEY_FILE
+# names (a Docker secret; read by ferrowarden itself, never exported). This is
+# enforced at startup; ferrowarden will refuse to start if the key is absent
+# or fewer than 32 characters.
 #
 # All settings can also be set via environment variable using the
 # FERROWARDEN_ prefix. Environment variables override file values.

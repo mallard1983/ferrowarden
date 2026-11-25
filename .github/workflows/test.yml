@@ -115,6 +115,60 @@ jobs:
       - name: Check logs and events for secret values
         run: bash scripts/check-no-secrets.sh
 
+      # The hardened container (docs/deployment-profiles.md): the admin key is
+      # read from its secret file by the binary and never put in the process
+      # environment. /proc/<pid>/environ of a container process is readable by
+      # root on the host only, hence sudo. The key is compared with
+      # `grep -qF -f` and never printed.
+      - name: Check the admin key is not in the process environment
+        run: |
+          set -euo pipefail
+          cid="$(docker compose -f docker-compose.test.yml ps -q ferrowarden)"
+          pid="$(docker inspect -f '{{.State.Pid}}' "$cid")"
+          [ "$pid" -gt 0 ]
+          [ -s secrets/ferrowarden_admin_key ]
+          env_file="$(mktemp)"
+          trap 'rm -f "$env_file"' EXIT
+          sudo cat "/proc/$pid/environ" | tr '\0' '\n' > "$env_file"
+          # Control: this really is ferrowarden's environment, and it names
+          # the secret file (a path) instead of holding the secret.
+          grep -q '^FERROWARDEN_ADMIN_KEY_FILE=/run/secrets/ferrowarden_admin_key$' "$env_file"
+          if grep -qF -f secrets/ferrowarden_admin_key "$env_file"; then
+            echo "the admin key is in the ferrowarden process environment" >&2
+            exit 1
+          fi
+          if grep -q '^FERROWARDEN_ADMIN_KEY=' "$env_file"; then
+            echo "FERROWARDEN_ADMIN_KEY is set in the ferrowarden process environment" >&2
+            exit 1
+          fi
+          echo "OK: the process environment holds the path of the key file, not the key."
+
+      # The image is the binary and the minimal passwd/group on scratch: no
+      # shell, no package manager, no curl, and a static binary (it starts
+      # with no dynamic loader or libc).
+      - name: Check the image has no shell and nothing but the binary
+        run: |
+          set -euo pipefail
+          cid="$(docker compose -f docker-compose.test.yml ps -q ferrowarden)"
+          image="$(docker inspect -f '{{.Image}}' "$cid")"
+          if docker run --rm --entrypoint /bin/sh "$image" -c true 2>/dev/null; then
+            echo "the image contains /bin/sh" >&2
+            exit 1
+          fi
+          docker run --rm --entrypoint /app/ferrowarden "$image" --version
+          tmp="$(docker create "$image")"
+          # Docker adds the mount points and network files at container
+          # creation; anything else in the image is unexpected.
+          unexpected="$(docker export "$tmp" | tar -t | grep -v -x -E '\.dockerenv|app/|app/ferrowarden|data/|dev/|dev/console|dev/pts/|dev/shm/|etc/|etc/group|etc/hostname|etc/hosts|etc/mtab|etc/passwd|etc/resolv\.conf|proc/|sys/' || true)"
+          docker rm "$tmp" > /dev/null
+          if [ -n "$unexpected" ]; then
+            echo "unexpected files in the image:" >&2
+            echo "$unexpected" >&2
+            exit 1
+          fi
+          echo "OK: the image holds only the binary, passwd/group and /data."
+          docker image inspect -f 'image size: {{.Size}} bytes' "$image"
+
       - name: Collect logs on failure
         if: failure()
         run: docker compose -f docker-compose.test.yml logs

@@ -64,6 +64,10 @@ services:
     depends_on:
       internal-certs:
         condition: service_completed_successfully
+    # The only hardening applied here: Vaultwarden binds port 443 as root, so
+    # it keeps its capabilities and a writable filesystem (docs/deployment-profiles.md).
+    security_opt:
+      - "no-new-privileges:true"
     environment:
       # The URL you reach the web vault at (e.g. https://vault.example.com
       # behind a reverse proxy). Used for links, passkeys/WebAuthn and emails.
@@ -106,11 +110,29 @@ services:
       dockerfile: bw-cli.Dockerfile
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    # Hardening: the bw CLI and its npm tree are the stack's largest attack
+    # surface (docs/security.md). Read-only root filesystem, no capabilities,
+    # no privilege escalation, bounded processes and memory. The only path bw
+    # writes is its data directory (data.json), which is the bw-data volume
+    # below; /tmp is not written. If an update ever needs scratch space, add
+    #   tmpfs: ["/tmp"]
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    pids_limit: 128
+    # Node plus the decrypted vault in memory: 1 GiB is ample for thousands of
+    # items. Raise it for a very large vault.
+    mem_limit: 1g
     volumes:
       - ./docker/bw-entrypoint.sh:/entrypoint.sh:ro
-      # Persist the bw local vault cache across restarts. The node user can
-      # write here because the Dockerfile creates and chowns this directory
-      # before the USER switch, so Docker copies that ownership to the volume.
+      # The bw local vault cache and login state: the one writable path. A
+      # volume (not tmpfs) so the CLI keeps its device identity across
+      # restarts, instead of registering a new device with Vaultwarden each
+      # time. The node user can write here because the Dockerfile creates and
+      # chowns this directory before the USER switch, so Docker copies that
+      # ownership to the volume.
       - bw-data:/home/node/.config/Bitwarden CLI
       # Internal CA certificate (trusted via NODE_EXTRA_CA_CERTS).
       - internal-pki:/pki:ro
@@ -155,6 +177,25 @@ services:
   ferrowarden:
     build: .
     restart: unless-stopped
+    # Hardening (docs/deployment-profiles.md, "Standard"). The image is a
+    # static binary on `scratch`: no shell, no curl. Read-only root filesystem,
+    # no capabilities (port 3000 is unprivileged), no privilege escalation,
+    # bounded processes and memory. Every path ferrowarden writes is on a
+    # volume below, so no tmpfs is needed:
+    #   /data/agent_keys.json (+ .tmp, same directory, for the atomic rename)
+    #   /data/events/*        (only if the event file sink is enabled)
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    # The async runtime starts about one thread per CPU core plus a few more:
+    # 256 leaves room on large hosts and still stops a fork bomb.
+    pids_limit: 256
+    # A few tens of MiB in normal use. The admin UI sign-in derives a key with
+    # Argon2id using your Vaultwarden account's KDF memory (64 MiB by default,
+    # up to 1 GiB if you raised it), so keep 1 GiB unless you know yours is low.
+    mem_limit: 1g
     secrets:
       - ferrowarden_admin_key
       - bw_master_password
@@ -178,7 +219,8 @@ services:
       FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
       FERROWARDEN_BW_SERVE_URL: "http://bw-serve:8087"
       FERROWARDEN_BIND_ADDR: "0.0.0.0:3000"
-      # Admin key is read from Docker secret by the entrypoint script.
+      # The admin key is read from this Docker secret file by ferrowarden
+      # itself; it is never placed in the process environment.
       FERROWARDEN_ADMIN_KEY_FILE: "/run/secrets/ferrowarden_admin_key"
       FERROWARDEN_TLS_ENABLED: "true"
       FERROWARDEN_TLS_CERT_FILE: "/run/certs/server.crt"
@@ -266,9 +308,11 @@ services:
         # and fails with "connection refused" on the first boot.
         condition: service_healthy
     healthcheck:
-      # Uses the public /health endpoint (no auth required).
-      # -k accepts the self-signed TLS cert for the local health check.
-      test: ["CMD", "curl", "-f", "-k", "https://localhost:3000/health"]
+      # The image has no curl: the binary checks itself. It requests the public
+      # /health endpoint (no auth) on the port it listens on, over TLS when TLS
+      # is on, and verifies the server's certificate against the configured
+      # tls_cert_file, so nothing is skipped for a self-signed certificate.
+      test: ["CMD", "/app/ferrowarden", "healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 5

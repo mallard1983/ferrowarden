@@ -308,7 +308,7 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `bw_serve_url` | `FERROWARDEN_BW_SERVE_URL` | `http://127.0.0.1:8087` |
 | `unlock_mode` | `FERROWARDEN_UNLOCK_MODE` | *(required)* |
 | `unlock_file` | `FERROWARDEN_UNLOCK_FILE` | *(required in file mode)* |
-| *(env only)* | `FERROWARDEN_ADMIN_KEY` | *(required)* |
+| *(env or file only)* | `FERROWARDEN_ADMIN_KEY` or `FERROWARDEN_ADMIN_KEY_FILE` | *(one required)*: the file variant names a file holding the key (the Compose files use `/run/secrets/ferrowarden_admin_key`). Ferrowarden reads the file itself and never puts the key in its environment; a plain `FERROWARDEN_ADMIN_KEY` wins if both are set |
 | `keys_file` | `FERROWARDEN_KEYS_FILE` | *(optional — enables key persistence)* |
 | `tls_enabled` | `FERROWARDEN_TLS_ENABLED` | `true` |
 | `tls_cert_file` | `FERROWARDEN_TLS_CERT_FILE` | *(required when tls_enabled)* |
@@ -366,6 +366,19 @@ If you are running Ferrowarden directly on the host (not Docker), set `bind_addr
 ```toml
 bind_addr = "0.0.0.0:3443"
 ```
+
+---
+
+## The Ferrowarden container
+
+The `ferrowarden` image is a statically linked binary on `scratch`: no shell, no `curl`, no package manager. The Compose file runs it with a read-only root filesystem, no capabilities and `no-new-privileges`. Consequences you may notice:
+
+- `docker compose exec ferrowarden sh` does not work. Use logs, `docker compose cp` and a temporary debug container; see [Operations: Debugging a container with no shell](operations.md#debugging-a-container-with-no-shell).
+- The health check is `ferrowarden healthcheck`, not `curl`. If you wrote your own health check or monitoring around `curl` inside the container, switch to `["CMD", "/app/ferrowarden", "healthcheck"]`.
+- Everything Ferrowarden writes must be on a volume. The agent key file (`/data/agent_keys.json`) is on the `ferrowarden-keys` volume; if you enable the event file sink, put it under `/data` too (for example `/data/events/events.jsonl`).
+- Files you bind-mount (secrets, the TLS key) are still read as UID 999: see Steps 0 and 1.
+
+What the hardening covers, and what it does not: [Deployment Profiles](deployment-profiles.md).
 
 ---
 

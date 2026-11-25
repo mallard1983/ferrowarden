@@ -5,6 +5,9 @@ use zeroize::Zeroizing;
 
 use crate::error::{FerroError, FerroResult};
 
+pub mod secrets;
+use secrets::Both;
+
 /// How the vault master password is supplied at startup.
 /// The operator chooses one mode; both result in the same unlocked runtime state.
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -38,10 +41,11 @@ pub struct Config {
     pub unlock_file: Option<PathBuf>,
 
     /// Admin API key for managing agent keys and viewing audit logs.
-    /// Must be set via environment variable FERROWARDEN_ADMIN_KEY.
-    /// Never set this in a config file checked into version control.
+    /// Comes from FERROWARDEN_ADMIN_KEY or, in a container, from the file
+    /// named by FERROWARDEN_ADMIN_KEY_FILE (read here, never exported into
+    /// the process environment). Never a config file.
     #[serde(skip)]
-    pub admin_key: String,
+    pub admin_key: Zeroizing<String>,
 
     /// Path to the agent key store file.
     /// When set, agent keys survive container restarts. The file stores only
@@ -389,36 +393,19 @@ impl NotifyTokens {
         read: impl Fn(&std::path::Path) -> std::io::Result<Vec<u8>>,
     ) -> FerroResult<Self> {
         let one = |name: &'static str| -> FerroResult<Option<Zeroizing<String>>> {
-            let file_name = format!("{name}_FILE");
-            let direct = get(name).map(Zeroizing::new);
-            let file = get(&file_name);
-            let raw = match (direct, file) {
-                (Some(_), Some(_)) => {
-                    return Err(FerroError::Config(format!(
-                        "set only one of {name} and {file_name}, not both"
-                    )))
-                }
-                (Some(v), None) => v,
-                (None, Some(path)) => {
-                    let bytes = Zeroizing::new(read(std::path::Path::new(&path)).map_err(|e| {
-                        FerroError::Config(format!("cannot read {file_name} ({:?})", e.kind()))
-                    })?);
-                    Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|_| {
-                        FerroError::Config(format!("{file_name} does not hold valid UTF-8 text"))
-                    })?)
-                }
-                (None, None) => return Ok(None),
+            let Some(raw) = secrets::load_secret(name, Both::Error, &get, &read)? else {
+                return Ok(None);
             };
             let token = Zeroizing::new(raw.trim().to_string());
             if token.is_empty() {
                 return Err(FerroError::Config(format!(
-                    "the token from {name} (or {file_name}) is empty"
+                    "the token from {name} (or {name}_FILE) is empty"
                 )));
             }
             // Becomes a header value: visible ASCII only.
             if !token.bytes().all(|b| b.is_ascii_graphic()) {
                 return Err(FerroError::Config(format!(
-                    "the token from {name} (or {file_name}) must be printable ASCII without spaces"
+                    "the token from {name} (or {name}_FILE) must be printable ASCII without spaces"
                 )));
             }
             Ok(Some(token))
@@ -710,7 +697,9 @@ pub fn split_list(raw: &str) -> Vec<String> {
 }
 
 impl Config {
-    pub fn load() -> FerroResult<Self> {
+    /// The settings from `ferrowarden.toml` and `FERROWARDEN_*` variables,
+    /// without secrets and without validation.
+    fn load_settings() -> FerroResult<Self> {
         let settings = config::Config::builder()
             // Base config from file — ferrowarden.toml in the working directory.
             // The full file name matters: with_name("ferrowarden") also matches
@@ -733,18 +722,37 @@ impl Config {
         let mut cfg: Config = settings
             .try_deserialize()
             .map_err(|e| FerroError::Config(e.to_string()))?;
+        cfg.api_prefix = normalize_api_prefix(&cfg.api_prefix)?;
+        Ok(cfg)
+    }
 
-        // Admin key must come from the environment — never a config file.
-        cfg.admin_key = std::env::var("FERROWARDEN_ADMIN_KEY")
-            .map_err(|_| FerroError::Config("FERROWARDEN_ADMIN_KEY must be set".to_string()))?;
+    pub fn load() -> FerroResult<Self> {
+        let mut cfg = Self::load_settings()?;
+
+        // The admin key never comes from a config file: from the environment,
+        // or from the file FERROWARDEN_ADMIN_KEY_FILE names. A direct variable
+        // wins. Either way the value stays in this struct (zeroed on drop) and
+        // is not exported into the process environment.
+        cfg.admin_key = secrets::load_secret_from_env("FERROWARDEN_ADMIN_KEY", Both::DirectWins)?
+            .ok_or_else(|| {
+            FerroError::Config(
+                "FERROWARDEN_ADMIN_KEY must be set (directly or via FERROWARDEN_ADMIN_KEY_FILE)"
+                    .to_string(),
+            )
+        })?;
 
         cfg.notify.tokens = NotifyTokens::from_env()?;
-
-        cfg.api_prefix = normalize_api_prefix(&cfg.api_prefix)?;
 
         cfg.validate()?;
 
         Ok(cfg)
+    }
+
+    /// The settings `ferrowarden healthcheck` needs (bind address, TLS
+    /// certificate): no secrets are read and nothing is validated, so the
+    /// check works with the same environment as the server and no more.
+    pub fn load_for_healthcheck() -> FerroResult<Self> {
+        Self::load_settings()
     }
 
     fn validate(&self) -> FerroResult<()> {
@@ -822,7 +830,7 @@ mod tests {
             bw_serve_url: "http://127.0.0.1:8087".to_string(),
             unlock_mode: mode,
             unlock_file: None,
-            admin_key: "a".repeat(32),
+            admin_key: "a".repeat(32).into(),
             keys_file: None,
             tls_enabled: false,
             tls_cert_file: None,
@@ -977,9 +985,56 @@ file_keep = 3
     #[test]
     fn short_admin_key_fails() {
         let mut cfg = base_config(UnlockMode::Manual);
-        cfg.admin_key = "short".to_string();
+        cfg.admin_key = "short".to_string().into();
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("32 characters"));
+    }
+
+    #[test]
+    fn the_admin_key_file_is_read_without_touching_the_environment() {
+        // Config::load reads the real environment; this is the only test that
+        // sets FERROWARDEN_* variables, and it removes them again.
+        let key = "k".repeat(40);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("admin_key");
+        std::fs::write(
+            &path,
+            format!(
+                "{key}
+"
+            ),
+        )
+        .unwrap();
+        std::env::remove_var("FERROWARDEN_ADMIN_KEY");
+        std::env::set_var("FERROWARDEN_ADMIN_KEY_FILE", &path);
+        std::env::set_var("FERROWARDEN_TLS_ENABLED", "false");
+        std::env::set_var("FERROWARDEN_UNLOCK_MODE", "manual");
+        let loaded = Config::load();
+        // The key stays out of the process environment.
+        let leaked = std::env::var("FERROWARDEN_ADMIN_KEY");
+        let in_env_values = std::env::vars().any(|(_, v)| v == key);
+
+        // A missing file is an error, not a silent empty key.
+        std::env::set_var("FERROWARDEN_ADMIN_KEY_FILE", dir.path().join("nope"));
+        let missing = Config::load().unwrap_err().to_string();
+        // A direct variable takes precedence over the file.
+        let direct = "d".repeat(40);
+        std::env::set_var("FERROWARDEN_ADMIN_KEY", &direct);
+        let preferred = Config::load();
+        for name in [
+            "FERROWARDEN_ADMIN_KEY",
+            "FERROWARDEN_ADMIN_KEY_FILE",
+            "FERROWARDEN_TLS_ENABLED",
+            "FERROWARDEN_UNLOCK_MODE",
+        ] {
+            std::env::remove_var(name);
+        }
+
+        assert_eq!(loaded.unwrap().admin_key.as_str(), key);
+        assert!(leaked.is_err(), "the key must not be exported");
+        assert!(!in_env_values);
+        assert!(missing.contains("does not exist"), "{missing}");
+        assert_eq!(preferred.unwrap().admin_key.as_str(), direct);
     }
 
     #[test]

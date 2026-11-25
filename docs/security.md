@@ -64,11 +64,13 @@ Credential values fetched from bw serve are held as `Zeroizing<String>` (from th
 
 **Limitation:** The value passes through the `bw serve` HTTP response before reaching Ferrowarden. At that point it is a string in reqwest's response buffer. We zero our copy; we cannot zero reqwest's internal allocations. This is acceptable: the value is short-lived and within our process boundary.
 
-### 3. Admin Key Is Environment-Only
+### 3. Admin Key Never Comes From a Config File
 
-The `admin_key` field in the `Config` struct is marked `#[serde(skip)]`. It cannot be set from `ferrowarden.toml`. It must come from the environment variable `FERROWARDEN_ADMIN_KEY`.
+The `admin_key` field in the `Config` struct is marked `#[serde(skip)]`. It cannot be set from `ferrowarden.toml`. It comes from the environment variable `FERROWARDEN_ADMIN_KEY` or, in a container, from the file named by `FERROWARDEN_ADMIN_KEY_FILE` (a Docker secret). Ferrowarden reads that file itself, into `Zeroizing` memory, and never exports the value into its own environment. The notifier tokens and the unlock password file follow the same rules.
 
-**Why this matters:** A config file is easier to accidentally commit to version control, share, or leave world-readable. An environment variable (or Docker secret read into an env var by the entrypoint) is handled by the deployment system and is not part of the application artifact.
+**Why this matters:** A config file is easier to accidentally commit to version control, share, or leave world-readable. A secret file is handled by the deployment system and is not part of the application artifact. Reading the file in the binary, rather than in an entrypoint script that exports it, keeps the key out of `/proc/<pid>/environ`, where anything running as the same user (or anyone who can read the process environment) could take it, and out of `docker inspect`. CI checks this on every run by reading the container's `/proc/<pid>/environ` and confirming it does not contain the key.
+
+**Limit:** the key is in Ferrowarden's memory for as long as it runs (it is compared with every admin request), so an attacker with code execution in the process, or a memory dump, still gets it.
 
 **The 32-character minimum is enforced at startup.** A short key expands the brute-force search space to an attackable range. 32 random alphanumeric characters provides ~190 bits of entropy — well beyond any feasible attack.
 
@@ -242,6 +244,16 @@ The optional [admin web UI](admin-ui.md) (`ui.bind`) accepts the **vault master 
 
 ---
 
+### 17. A Minimal, Read-Only Container
+
+The Ferrowarden image is a static binary on `scratch`, run as UID 999 with a read-only root filesystem, no capabilities and `no-new-privileges`; `bw serve` runs with the same restrictions ([Deployment Profiles](deployment-profiles.md)). There is no shell, package manager or `curl` to use, and nothing in the image can be modified at run time.
+
+**Why this matters:** most of what an attacker does after getting code execution depends on tools that are already there. Removing them, and the ability to write new ones, shrinks a code-execution bug. The binary checks its own health (`ferrowarden healthcheck`, which verifies the server's own TLS certificate), which is why the image needs no `curl`.
+
+**Limits:** this is attack-surface reduction, not isolation. A container shares the host kernel, so a kernel or runtime escape is outside what it can stop; the *Hardened* profile (a dedicated VM, optionally gVisor, outbound firewall rules) addresses that. A compromised Ferrowarden process can still use the vault and the destinations it is allowed to reach. The `bw-serve` and Vaultwarden images are third-party images with a normal userland: restricted, not minimal.
+
+---
+
 ## Security Event Log
 
 Every security-relevant action produces one structured event with a stable schema (see [events.md](events.md)):
@@ -279,7 +291,8 @@ Before going to production:
 - [ ] TLS is configured — either Ferrowarden's built-in TLS or a TLS-terminating proxy (Pangolin, Caddy, Nginx). See [docs/tls.md](tls.md) for both options. If TLS is disabled, Ferrowarden and the agent must run on the same host with no network hop.
 - [ ] `tls_cert_file` and `tls_key_file` point to valid, non-expired certificates
 - [ ] All secret files are `chmod 600` and owned by the deployment user
-- [ ] `FERROWARDEN_ADMIN_KEY` is at least 32 random characters
+- [ ] The admin key (`secrets/ferrowarden_admin_key`) is at least 32 random characters
+- [ ] The `ferrowarden` and `bw-serve` services keep the shipped hardening (`read_only`, `cap_drop: [ALL]`, `no-new-privileges`); you chose a [deployment profile](deployment-profiles.md) that matches what the vault protects
 - [ ] `ferrowarden.toml` (if used) is in `.gitignore` and not committed
 - [ ] Agent keys are created with meaningful names so the audit log is interpretable
 - [ ] Structured log output is being shipped to a persistent sink

@@ -54,14 +54,14 @@ pub async fn unlock_vault(base_url: &str, password: Zeroizing<String>) -> FerroR
 /// The file must contain only the password on the first line (no trailing newline required).
 /// Caller is responsible for passing the result directly to unlock_vault.
 pub fn read_password_file(path: &std::path::Path) -> FerroResult<Zeroizing<String>> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| FerroError::Config(format!("Cannot read unlock file: {}", e)))?;
+    let raw = Zeroizing::new(
+        std::fs::read_to_string(path)
+            .map_err(|e| FerroError::Config(format!("Cannot read unlock file: {}", e)))?,
+    );
 
-    // Trim trailing newline only — preserve any intentional whitespace in the password
-    let password = raw
-        .trim_end_matches('\n')
-        .trim_end_matches('\r')
-        .to_string();
+    // Trim trailing newlines only — preserve any intentional whitespace in the
+    // password. The same rule as every other secret file (config::secrets).
+    let password = crate::config::secrets::strip_line_end(&raw).to_string();
 
     if password.is_empty() {
         return Err(FerroError::Config("Unlock file is empty".to_string()));
