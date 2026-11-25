@@ -62,6 +62,20 @@ See [`.github/workflows/test.yml`](../.github/workflows/test.yml).
 
 ---
 
+## Release Workflow
+
+`.github/workflows/release.yml` builds the release binaries. It is separate from the test workflow and never publishes anything.
+
+- **Trigger.** A push of a tag `v*` (the tag must equal `v` plus the `Cargo.toml` version), or a manual run. A manual run is a dry run: it builds, packages and keeps the archives as workflow artifacts for 14 days, and cannot upload, because the upload jobs run only for a tag push.
+- **Build.** `cargo build --release --locked` for `ferrowarden` and `ferrowarden-mcp` on GitHub-hosted runners: `x86_64-unknown-linux-gnu` (ubuntu-latest), `aarch64-unknown-linux-gnu` (ubuntu-24.04-arm), `aarch64-apple-darwin` (macos-latest) and `x86_64-pc-windows-msvc` (windows-latest). Each binary is started once with `--version` as a smoke test. No build cache is used.
+- **Packages.** `ferrowarden-<version>-<target>.tar.gz` (`.zip` on Windows) with both binaries, `LICENSE` and `README.md`, plus one `SHA256SUMS`.
+- **Upload.** On a tag push, the `release` job attaches the archives and `SHA256SUMS` to the GitHub release for the tag with `gh release upload`. If the release does not exist it is created as a **draft**; if it exists and is already published, the job fails. Publishing is a manual step after you have checked the draft and written the notes.
+- **Provenance.** The `attest` job signs a build provenance attestation for each archive (`gh attestation verify <file> --repo mallard1983/ferrowarden`).
+- **Permissions.** The workflow default is `contents: read`. Only `release` has `contents: write` (it checks out no code), and only `attest` has `id-token: write` and `attestations: write`. Every action is pinned to a commit SHA, with the version in a comment; Dependabot keeps them current.
+- **Docker.** The Docker image holds `ferrowarden` only and is built with `--bin ferrowarden`. `ferrowarden-mcp` runs on the agent's side ([docs/mcp.md](mcp.md)).
+
+To cut a release: update the version in `Cargo.toml` and the changelog, merge, tag `vX.Y.Z` on the merge commit, push the tag, wait for the workflow, check the draft release and publish it.
+
 ## Secret Gate
 
 After the integration tests, the GitHub workflow runs `scripts/check-no-secrets.sh` while the stack is still up. It collects every secret the test stack knows about (passwords, notes, custom field values and TOTP seeds from `tests/seed/credentials.json`, the agent and admin keys from `.env.test`, the vault master password, and any agent token the integration tests created through the UI, which they write to `target/integration-secrets.txt`), then greps the `ferrowarden` container logs and the security event file for each of them (fixed-string) and fails if any appears. The test stack enables the file sink at `/tmp/ferrowarden-events/events.jsonl` inside the container; the script copies it out with `docker compose cp`, so no host directory is mounted and host UIDs do not matter. Secret values are never printed, only the name of the leaked item. It needs `python3` (preinstalled on `ubuntu-latest`). To see it fail, pass an extra file containing a seeded password: `bash scripts/check-no-secrets.sh some-file`.

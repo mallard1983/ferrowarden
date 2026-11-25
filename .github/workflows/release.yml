@@ -1,0 +1,253 @@
+# .github/workflows/release.yml
+#
+# Builds the release binaries (ferrowarden and ferrowarden-mcp) for four
+# targets and, for a version tag, attaches them to a DRAFT GitHub release.
+# See docs/cicd.md and docs/mcp.md.
+#
+#   push of a tag v*     build, checksums, provenance attestation, then upload
+#                        to a draft release for that tag. The release is never
+#                        published by this workflow: a maintainer reviews the
+#                        draft and publishes it by hand.
+#   workflow_dispatch    dry run. Builds and packages and keeps the archives as
+#                        workflow artifacts. It cannot upload to a release: the
+#                        jobs that hold write permissions only run for a tag push.
+#
+# Least privilege: the workflow default is read-only. Only `release` gets
+# contents: write (and checks out no code); only `attest` gets id-token and
+# attestations write. Actions are pinned to commit SHAs (version in the
+# comment); Dependabot keeps them current. No build cache is used, so a cache
+# entry written by another workflow cannot end up in a release binary.
+
+name: Release
+
+permissions:
+  contents: read
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ── Build and package, one job per target ────────────────────────────────────
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            exe: ""
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            exe: ""
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            exe: ""
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            exe: ".exe"
+            archive: zip
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      # The version comes from Cargo.toml. For a tag push the tag must match
+      # it, so a mistyped tag cannot produce a release of the wrong version.
+      - name: Work out the version
+        id: version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ -z "$version" ]; then
+            echo "::error::could not read the version from Cargo.toml"
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" != "v${version}" ]; then
+            echo "::error::tag ${REF_NAME} does not match the Cargo.toml version v${version}"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build (release, locked)
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --target "$TARGET" --bin ferrowarden --bin ferrowarden-mcp
+
+      # Both binaries must at least start on the machine that built them.
+      - name: Smoke test
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          EXE: ${{ matrix.exe }}
+        run: |
+          set -euo pipefail
+          "target/${TARGET}/release/ferrowarden${EXE}" --version
+          "target/${TARGET}/release/ferrowarden-mcp${EXE}" --version
+
+      - name: Stage files
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.version.outputs.version }}
+          EXE: ${{ matrix.exe }}
+        run: |
+          set -euo pipefail
+          name="ferrowarden-${VERSION}-${TARGET}"
+          mkdir -p "dist/${name}"
+          for bin in ferrowarden ferrowarden-mcp; do
+            cp "target/${TARGET}/release/${bin}${EXE}" "dist/${name}/"
+          done
+          cp LICENSE README.md "dist/${name}/"
+          echo "ARCHIVE_NAME=${name}" >> "$GITHUB_ENV"
+
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          tar -czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+          rm -r "${ARCHIVE_NAME}"
+          ls -l
+
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          Set-Location dist
+          Compress-Archive -Path $env:ARCHIVE_NAME -DestinationPath "$env:ARCHIVE_NAME.zip"
+          Remove-Item -Recurse $env:ARCHIVE_NAME
+          Get-ChildItem
+
+      - name: Keep the archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ferrowarden-${{ matrix.target }}
+          path: dist/ferrowarden-*
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── SHA256SUMS over every archive ────────────────────────────────────────────
+  # Runs on a dry run too, so the whole packaging path is exercised.
+  checksums:
+    name: Checksums
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download the archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ferrowarden-*
+          merge-multiple: true
+          path: dist
+
+      - name: Write SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ferrowarden-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Keep SHA256SUMS
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: SHA256SUMS
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── Build provenance (tag pushes only) ───────────────────────────────────────
+  # Signs a SLSA provenance statement for each archive. Needs the OIDC token,
+  # so it is the only job besides `release` with extra permissions, and it
+  # cannot write to the repository or to releases.
+  attest:
+    name: Attest provenance
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build, checksums]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download the archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ferrowarden-*
+          merge-multiple: true
+          path: dist
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/ferrowarden-*
+
+  # ── Upload to a draft release (tag pushes only) ──────────────────────────────
+  # The only job with contents: write. It checks out no code and runs no code
+  # from the repository: it downloads the build artifacts and calls `gh`.
+  # The release is created as a draft if it does not exist and is never
+  # published here. An existing release that is already published is refused,
+  # so published assets are not changed after the fact.
+  release:
+    name: Upload to draft release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build, checksums, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Download the archives and SHA256SUMS
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Create the draft release if needed
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            draft="$(gh release view "$TAG" --json isDraft --jq .isDraft)"
+            if [ "$draft" != "true" ]; then
+              echo "::error::release $TAG is already published; this workflow only adds files to drafts"
+              exit 1
+            fi
+          else
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" \
+              --notes "Draft created by the release workflow. Add the notes from CHANGELOG.md, check the files and publish it by hand."
+          fi
+
+      - name: Attach the files
+        run: |
+          set -euo pipefail
+          ls -l dist
+          gh release upload "$TAG" dist/ferrowarden-* dist/SHA256SUMS

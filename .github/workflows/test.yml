@@ -103,6 +103,13 @@ jobs:
           set -a; source .env.test; set +a
           cargo test --test integration -- --nocapture --test-threads=1
 
+      # ferrowarden-mcp (docs/mcp.md): the real binary over stdio against the
+      # same stack.
+      - name: Run MCP integration tests
+        run: |
+          set -a; source .env.test; set +a
+          cargo test --test mcp -- --nocapture --test-threads=1
+
       # Secret gate: no seeded secret value, agent key, admin key or master
       # password may appear in the container logs or the security event file.
       - name: Check logs and events for secret values

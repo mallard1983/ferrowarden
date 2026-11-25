@@ -5,6 +5,8 @@ You are connected to a **Ferrowarden** credential proxy. Ferrowarden lets you ma
 **Base URL:** `https://<ferrowarden-host>:3000` — or the URL the operator gave you, which may include a path prefix (e.g. `https://ferro.example.com/k7f3q9`). All paths below are relative to it.  
 **Authentication:** Every request requires the header `X-Agent-Key: <your-token>`
 
+> **If your harness gives you the tools `list_credentials` and `http_request`**, they are this API as MCP tools ([`ferrowarden-mcp`](mcp.md)). Use them instead of raw HTTP: the bridge holds the agent key, and every rule below still applies. `list_credentials` is `GET /v1/credentials?detail=true`, `http_request` takes the `request` object of Step 2, and an error from Ferrowarden comes back as a tool error with the status, the message and what to do about it.
+
 ---
 
 ## Step 1 — List Available Credentials

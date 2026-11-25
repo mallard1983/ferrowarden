@@ -27,6 +27,10 @@ Content-Type: application/json
 
 Response: `{ "status": 200, "headers": {...}, "body": "..." }`
 
+## If you have MCP tools
+
+If your harness lists the tools `list_credentials` and `http_request` (from `ferrowarden-mcp`), use them instead of raw HTTP. `list_credentials` returns the same data as `GET /v1/credentials?detail=true`. `http_request` takes `method`, `url`, `headers` and `body` as in the `request` object below, and the bridge holds the agent key. The workflow and the rules are the same: copy placeholders from `list_credentials`; on `403` do not retry with other credentials, hosts or methods, and tell the user; on `422` copy a placeholder from the listing. A refusal from Ferrowarden itself is a tool error (`isError`) with the status and guidance; a `404` or `500` from the target is a normal result with that status.
+
 ## Why
 
 Credential values stay outside the agent context by design. Ferrowarden substitutes `{{vault:name}}` after authentication and zeroes the values from memory after the outbound request completes. The response body is scrubbed before being returned.
