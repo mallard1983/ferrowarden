@@ -140,6 +140,7 @@ Behind a TLS reverse proxy such as Pangolin, see [docs/tls.md](docs/tls.md#pango
 | [Architecture](docs/architecture.md) | System design, data flow, component decisions |
 | [Security Model](docs/security.md) | Threat model, security properties, limits, design rationale |
 | [Setup Guide](docs/setup.md) | Installation, Vaultwarden setup, first run |
+| [Deployment Profiles](docs/deployment-profiles.md) | The hardened container (scratch image, read-only, no capabilities) and the dedicated-VM profile with gVisor and outbound firewall rules, with what each does and does not protect against |
 | [API Reference](docs/api-reference.md) | All endpoints, request/response shapes, error codes |
 | [OpenAPI spec](docs/openapi.yaml) | OpenAPI 3.1 description of the agent and admin API; served at `GET /v1/openapi.json` to holders of a key |
 | [Operations](docs/operations.md) | Unlock modes, key rotation, monitoring, troubleshooting |

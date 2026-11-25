@@ -15,7 +15,7 @@
 #   - `docker compose -f docker-compose.test.yml logs ferrowarden`
 #   - the event file(s) copied out of the container with `docker compose cp`
 #     (docker-compose.test.yml enables the file sink at
-#     /tmp/ferrowarden-events/events.jsonl)
+#     /data/events/events.jsonl)
 #   - any extra files given as arguments
 # and exits non-zero if any value appears. Secret values are never printed:
 # a hit is reported by its label (e.g. "test_api_token: value") only.
@@ -37,7 +37,7 @@ COMPOSE_FILE="docker-compose.test.yml"
 SEED_FILE="tests/seed/credentials.json"
 ENV_FILE=".env.test"
 MASTER_PW_FILE="secrets/bw_master_password"
-CONTAINER_EVENTS_DIR="/tmp/ferrowarden-events"
+CONTAINER_EVENTS_DIR="/data/events"
 
 work="$(mktemp -d)"
 chmod 700 "$work"

@@ -1,13 +1,23 @@
 # Dockerfile for Ferrowarden
 #
-# Multi-stage build: compile in a full Rust image, run in a minimal Debian
-# slim image. This keeps the final image small and reduces attack surface —
-# the compiler, cargo, and all build tooling are absent at runtime.
+# Multi-stage build: compile a statically linked musl binary in a Rust image,
+# then ship it on `scratch`. The runtime image holds the binary, a two-line
+# /etc/passwd and /etc/group for the fixed UID/GID 999, and an empty /data
+# owned by that user. There is no shell, no package manager, no curl and no
+# libc: a shell that is not there cannot be used. docs/deployment-profiles.md
+# explains what that does and does not protect against.
+#
+# The base image is pinned by digest (the multi-arch index, so amd64 and arm64
+# builds both work). Dependabot's docker ecosystem proposes updates.
 
 # ── Build stage ──────────────────────────────────────────────────────────────
-# Builder and runtime are pinned to the same Debian release (trixie) so the
-# binary is never linked against a newer glibc than the runtime provides.
-FROM rust:1.100-slim-trixie AS builder
+# rust:alpine's host target is x86_64/aarch64-unknown-linux-musl, which links
+# statically by default. Everything in the crypto stack is ring-based, so the
+# only native code is C compiled with the Alpine toolchain below.
+FROM rust:1.100-alpine@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 AS builder
+
+# A C compiler and the musl headers: ring compiles C and assembly.
+RUN apk add --no-cache gcc musl-dev
 
 WORKDIR /build
 
@@ -32,47 +42,42 @@ COPY docs/openapi.yaml ./docs/openapi.yaml
 RUN touch src/main.rs
 RUN cargo build --release --bin ferrowarden
 
+# The few files the runtime image needs besides the binary. UID/GID are pinned
+# to 999 (what --system assigned in earlier images, so existing volumes stay
+# writable). The user has no home and no login shell.
+RUN mkdir -p /rootfs/etc /rootfs/data \
+    && echo 'ferrowarden:x:999:999:ferrowarden:/nonexistent:/sbin/nologin' > /rootfs/etc/passwd \
+    && echo 'ferrowarden:x:999:' > /rootfs/etc/group
+
 
 # ── Runtime stage ────────────────────────────────────────────────────────────
-FROM debian:trixie-slim
+FROM scratch
 
-# Install only what is needed at runtime:
-# - ca-certificates: TLS when ferrowarden makes outbound HTTPS calls
-# - curl: Docker health check (GET /health)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /rootfs/etc /etc
 
-# Run as a non-root user. The process has no need for elevated privileges.
-# Create /data for the agent key file and own it before switching users —
 # Docker named volumes copy the image directory's ownership on first creation,
-# so this ensures the ferrowarden user can write to the volume mount.
-#
-# UID/GID are pinned to 999 (what --system assigned in earlier images, so
-# existing volumes stay writable). On a Linux host, the files Compose mounts
+# so this empty, user-owned /data is what lets the ferrowarden user write the
+# agent key file (and the optional event file) on the volume mounted there.
+# It is the only directory in the image that is not root's.
+COPY --from=builder --chown=999:999 /rootfs/data /data
+
+# Static binary: no dynamic loader, no libc, no CA bundle (rustls embeds the
+# webpki roots; an operator CA is mounted and named in the settings).
+COPY --from=builder /build/target/release/ferrowarden /app/ferrowarden
+
+# Everything else is configuration. On a Linux host, the files Compose mounts
 # into this container (secrets/ferrowarden_admin_key,
 # secrets/bw_master_password, certs/server.key) keep their host owner and
 # mode, so they must be readable by UID 999 — see docs/setup.md.
-RUN groupadd --system --gid 999 ferrowarden \
-    && useradd --system --uid 999 --gid 999 --no-create-home --shell /bin/false ferrowarden \
-    && mkdir /data \
-    && chown ferrowarden:ferrowarden /data
-USER ferrowarden
-
-WORKDIR /app
-
-COPY --from=builder /build/target/release/ferrowarden ./ferrowarden
-
-# Docker secrets are mounted at /run/secrets/<name> by the runtime.
-# The FERROWARDEN_ADMIN_KEY_FILE env var tells ferrowarden where to read
-# the admin key — set it in docker-compose.yml or override here.
 #
-# We use a minimal entrypoint script to read Docker secrets into environment
-# variables before exec-ing the binary, keeping secret values out of the
-# process environment table where possible.
-COPY docker/ferrowarden-entrypoint.sh /entrypoint.sh
+# Secrets are read by the binary itself from the files that
+# FERROWARDEN_ADMIN_KEY_FILE and the *_TOKEN_FILE variables name. They are
+# never put in the process environment.
+USER 999:999
+WORKDIR /app
 
 EXPOSE 3000
 
-ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]
+# `ferrowarden healthcheck` is the container health check (see the compose
+# files): there is no curl here.
+ENTRYPOINT ["/app/ferrowarden"]

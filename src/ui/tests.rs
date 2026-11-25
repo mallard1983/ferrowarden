@@ -305,7 +305,7 @@ async fn harness(opts: Opts) -> Harness {
         bw_serve_url: base.clone(),
         unlock_mode: UnlockMode::Manual,
         unlock_file: None,
-        admin_key: "a".repeat(32),
+        admin_key: "a".repeat(32).into(),
         keys_file: keys_path.clone(),
         tls_enabled: opts.tls,
         tls_cert_file: None,

@@ -4061,3 +4061,71 @@ async fn test_notify_hosts_are_denied_to_agents_while_the_mock_api_stays_reachab
     let captured = env.last_captured_request().await;
     assert_eq!(captured["path"], "/mock-api/api/check");
 }
+
+// ── Container hardening ───────────────────────────────────────────────────────
+
+/// Run `docker` with `args` and return its trimmed stdout, or `None` when
+/// docker is unavailable or the command fails (the test then skips).
+fn docker(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("docker")
+        .args(args)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// The ferrowarden container of the test stack reports `healthy` through its
+/// own `ferrowarden healthcheck` (the image has no curl), and runs hardened:
+/// read-only root filesystem, no capabilities, no privilege escalation. The
+/// admin key is read from its secret file and is not part of the container's
+/// configuration (its `docker inspect` environment holds only the file path).
+///
+/// Skips when docker, or the compose test stack's container, is not available
+/// to the test (for example a stack running on another machine).
+#[tokio::test]
+async fn test_container_is_healthy_and_hardened() {
+    let Some(env) = TestEnv::load() else {
+        eprintln!("SKIP: set FERROWARDEN_INTEGRATION=1");
+        return;
+    };
+    let Some(id) = docker(&[
+        "compose",
+        "-f",
+        "docker-compose.test.yml",
+        "ps",
+        "-q",
+        "ferrowarden",
+    ])
+    .filter(|id| !id.is_empty()) else {
+        eprintln!("SKIP: docker or the compose test stack is not available to this test");
+        return;
+    };
+
+    let health = docker(&["inspect", "-f", "{{.State.Health.Status}}", &id]).unwrap();
+    assert_eq!(health, "healthy", "the container health check");
+
+    let host = docker(&[
+        "inspect",
+        "-f",
+        "{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}}",
+        &id,
+    ])
+    .unwrap();
+    assert_eq!(
+        host, "true [ALL] [no-new-privileges:true]",
+        "hardening flags"
+    );
+
+    // Never print the environment: it is compared, not displayed.
+    let config_env = docker(&["inspect", "-f", "{{json .Config.Env}}", &id]).unwrap();
+    assert!(
+        !config_env.contains(&env.admin_key),
+        "the admin key value is in the container configuration"
+    );
+    assert!(
+        config_env.contains("FERROWARDEN_ADMIN_KEY_FILE="),
+        "the admin key should come from a secret file"
+    );
+}

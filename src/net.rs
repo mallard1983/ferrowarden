@@ -422,7 +422,7 @@ mod tests {
             bw_serve_url: "http://127.0.0.1:8087".to_string(),
             unlock_mode: UnlockMode::Manual,
             unlock_file: None,
-            admin_key: "a".repeat(32),
+            admin_key: "a".repeat(32).into(),
             keys_file: None,
             tls_enabled: false,
             tls_cert_file: None,

@@ -1,0 +1,11 @@
+# Build context for the Ferrowarden image (the root Dockerfile).
+#
+# Allow-list: send the Docker daemon only what the Dockerfile copies. Above
+# all this keeps secrets/, .env*, certs/ and the git history out of the build
+# context, so they can never reach a build cache or an image layer by mistake.
+*
+!Cargo.toml
+!Cargo.lock
+!src
+!templates
+!docs/openapi.yaml
