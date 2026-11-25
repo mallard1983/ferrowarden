@@ -110,3 +110,14 @@ Limits are per source IP. `Retry-After` header on 429 gives seconds until the ne
 - `X-Agent-Key` and `X-Admin-Key` on the outer request are never forwarded to the target.
 - Headers beginning with `x-fw-` inside `request.headers` are stripped before forwarding.
 - Response body and header values are scrubbed for every credential value used in the request (raw, JSON-escaped, URL-encoded, base64), plus: Bearer tokens, API key/secret/password JSON fields, PEM private key blocks, Basic auth credentials in URLs, and Proxmox PVEAPIToken values. The scrubber may over-redact; treat the body as the target's intent, not a verbatim copy.
+
+## MCP tools (`ferrowarden-mcp`)
+
+When the harness runs `ferrowarden-mcp`, the same API is available as two tools. The bridge holds the agent key and the base URL; the agent never handles either.
+
+| Tool | Does | Arguments |
+|---|---|---|
+| `list_credentials` | `GET /v1/credentials?detail=true` | none |
+| `http_request` | `POST /v1/forward` | `method`, `url`, `headers` (optional), `body` (optional) |
+
+Results have structured content (as the API returns it; the credential list is under `credentials`) and a text rendering. A non-success answer from Ferrowarden itself is a tool error carrying the HTTP status, Ferrowarden's message, the request id and one line of guidance (`403`: do not retry with other credentials, hosts or methods, tell the user; `422`: copy a placeholder from `list_credentials`; `429`: wait `Retry-After` seconds; `503`: the vault is locked, tell the user). A `404` or `500` from the target is a normal result with that status.

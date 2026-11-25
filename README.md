@@ -148,6 +148,7 @@ Behind a TLS reverse proxy such as Pangolin, see [docs/tls.md](docs/tls.md#pango
 | [Logging](docs/logging.md) | Log levels, Loki, Wazuh, retention |
 | [TLS](docs/tls.md) | Pangolin reverse proxy and self-signed CA setup |
 | [Agent Skill](docs/agent-skill.md) | Reference doc for agents using the proxy (non-skill format) |
+| [MCP server](docs/mcp.md) | `ferrowarden-mcp`: MCP tools for agent harnesses, with install and configuration for Claude Code and Claude Desktop |
 | [Roadmap](ROADMAP.md) | Planned work: approvals, MCP, OpenAPI, session tokens, agent SSH client |
 | [Changelog](CHANGELOG.md) | Release notes and upgrade steps |
 | [Security Policy](SECURITY.md) | How to report a vulnerability privately |

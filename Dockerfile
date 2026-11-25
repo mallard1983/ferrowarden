@@ -15,9 +15,11 @@ WORKDIR /build
 # Cargo fetches and compiles dependencies on the first build; subsequent
 # builds with only source changes skip this layer.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release
-RUN rm src/main.rs
+# The manifest also declares the ferrowarden-mcp binary (docs/mcp.md), so a
+# stub for it must exist; only the proxy binary is built and shipped here.
+RUN mkdir -p src/bin && echo "fn main() {}" > src/main.rs && echo "fn main() {}" > src/bin/ferrowarden-mcp.rs
+RUN cargo build --release --bin ferrowarden
+RUN rm -r src
 
 # Build the actual application
 COPY src ./src
@@ -28,7 +30,7 @@ COPY templates ./templates
 COPY docs/openapi.yaml ./docs/openapi.yaml
 # Touch main.rs so cargo knows to recompile (the dummy above changed mtime)
 RUN touch src/main.rs
-RUN cargo build --release
+RUN cargo build --release --bin ferrowarden
 
 
 # ── Runtime stage ────────────────────────────────────────────────────────────
