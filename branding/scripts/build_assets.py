@@ -119,7 +119,7 @@ def banner_inner(w,h,style='dark',tagline=True,label=None,hero=False):
     if label:
         ins+=txt(w-55,h-37,label.upper(),23,650,C['copper'] if dark else C['steel'],letter_spacing='1.8',anchor='end')
     if hero:
-        ins+=txt(textx,h-35,'OPEN SOURCE  /  CREDENTIAL PROXY  /  AGENT ACCESS',22,620,subt,letter_spacing='1.5')
+        ins+=txt(textx,h-35,'SOURCE AVAILABLE  /  CREDENTIAL PROXY  /  AGENT ACCESS',22,620,subt,letter_spacing='1.5')
     return ins
 
 # 1. Vector icon masters

@@ -90,8 +90,8 @@
     },
     {
       "path": "assets/png/banners/ferrowarden-site-hero.png",
-      "size_bytes": 42520,
-      "sha256": "3c4cd718747be73f6c48ec44f025af3f603fb59a2ce787bf2d72329aea4689c8"
+      "size_bytes": 44614,
+      "sha256": "7445d9f8c14ba0d87aaa315a86ce92bea73a12e3fc25f72b5b03463070305822"
     },
     {
       "path": "assets/png/banners/ferrowarden-social-og.png",
@@ -435,8 +435,8 @@
     },
     {
       "path": "assets/svg/banners/ferrowarden-site-hero.svg",
-      "size_bytes": 1586,
-      "sha256": "e5f72e60797d3e601f3ad152d1a24fe479b54fd26d3f4682cbe77066a1827f5b"
+      "size_bytes": 1591,
+      "sha256": "f126899419cda64809ecf0e224a9b061f586fe3e5830e5252b4a85030d683ec7"
     },
     {
       "path": "assets/svg/banners/ferrowarden-social-og.svg",
@@ -470,8 +470,8 @@
     },
     {
       "path": "assets/svg/banners-outlined/ferrowarden-site-hero.svg",
-      "size_bytes": 21497,
-      "sha256": "a6067aa2f738fd65d6d13f1e6efa60b3d6f975acff98e8f65afdcbc43fbd76ad"
+      "size_bytes": 34953,
+      "sha256": "697cd9c3012ca756effd102e5b91592983fd256b4585c86ac0a98451fbfd507a"
     },
     {
       "path": "assets/svg/banners-outlined/ferrowarden-social-og.svg",
