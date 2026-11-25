@@ -497,10 +497,13 @@ Current operational status.
 ```json
 {
   "locked": false,
+  "vault_backend": "bw-serve",
   "credential_count": 12,
   "agent_key_count": 2
 }
 ```
+
+`vault_backend` is `bw-serve` or `native` (`vault.backend`, [native-vault.md](native-vault.md)).
 
 ---
 

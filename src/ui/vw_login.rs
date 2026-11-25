@@ -291,11 +291,11 @@ impl VwClient {
             .no_proxy();
         if !cfg.vaultwarden_ca_file.trim().is_empty() {
             let pem = std::fs::read(cfg.vaultwarden_ca_file.trim())
-                .map_err(|e| format!("cannot read ui.vaultwarden_ca_file: {e}"))?;
+                .map_err(|e| format!("cannot read vault.ca_file: {e}"))?;
             let certs = reqwest::Certificate::from_pem_bundle(&pem)
-                .map_err(|e| format!("ui.vaultwarden_ca_file is not a PEM certificate: {e}"))?;
+                .map_err(|e| format!("vault.ca_file is not a PEM certificate: {e}"))?;
             if certs.is_empty() {
-                return Err("ui.vaultwarden_ca_file contains no certificate".to_string());
+                return Err("vault.ca_file contains no certificate".to_string());
             }
             for cert in certs {
                 builder = builder.add_root_certificate(cert);

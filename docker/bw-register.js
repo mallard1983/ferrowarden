@@ -146,8 +146,12 @@ async function register() {
     return 1;
   }
 
-  // The response body is the JWT token (plain text, not JSON)
-  const verificationToken = step1.body.trim();
+  // The response body is the JWT token: plain text in Vaultwarden 1.37, a JSON
+  // string (in double quotes) in 1.36 and earlier.
+  let verificationToken = step1.body.trim();
+  if (verificationToken.startsWith('"')) {
+    try { verificationToken = JSON.parse(verificationToken); } catch (_) { /* use as is */ }
+  }
   if (!verificationToken) {
     console.error('[register] send-verification-email returned empty body');
     return 1;

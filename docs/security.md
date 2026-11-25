@@ -232,7 +232,7 @@ The optional [admin web UI](admin-ui.md) (`ui.bind`) accepts the **vault master 
 | An agent reaching the sign-in page | The UI is a **separate listener**; the API router is not mounted on it and the UI is not mounted on the API port. An agent on `:3000` cannot reach `:3001`, and the UI port should not be exposed to agent networks |
 | The password being stored or replayed | Ferrowarden never stores it. It derives the Bitwarden login hash in a blocking thread (all intermediates `Zeroizing`), wipes the password, and lets **Vaultwarden itself verify** the hash. On success Vaultwarden's response (tokens, encrypted vault keys) is **dropped unread**: no Vaultwarden credential is ever kept. A session only proves that a login succeeded |
 | A hostile Vaultwarden burning CPU/RAM | KDF parameters from the server are **bounded** before use (PBKDF2 5 000 to 2 000 000; Argon2id 16 to 1024 MiB, 2 to 10 iterations, 1 to 16 lanes) |
-| A fake Vaultwarden capturing the password | Verified HTTPS to `ui.vaultwarden_url`, trusting the stack's CA via a **public-only** copy (`internal-ca-public`). The **CA private key is never mounted into the Ferrowarden container**: with it an attacker could mint a certificate for `vaultwarden`. Certificate verification is never disabled |
+| A fake Vaultwarden capturing the password | Verified HTTPS to `vault.url`, trusting the stack's CA via a **public-only** copy (`internal-ca-public`). The **CA private key is never mounted into the Ferrowarden container**: with it an attacker could mint a certificate for `vaultwarden`. Certificate verification is never disabled |
 | Password guessing, and exhausting Vaultwarden's login budget (every attempt comes from one IP) | Per-IP (5 per 15 min) and global (10 per 15 min) lockouts, checked **before** any key derivation or upstream call. The error text is generic |
 | CSRF | Every POST needs a CSRF token (constant-time compare) **and** a same-origin proof (`Sec-Fetch-Site`, else `Origin`; neither is refused). Cookies are `__Host-` `HttpOnly` `Secure` `SameSite=Strict` |
 | Session theft | 32-byte random ids; only the SHA-256 is stored; idle (15 min) and absolute (8 h) limits; at most 8 sessions; rotation on every sign-in; server-side logout |
@@ -251,6 +251,38 @@ The Ferrowarden image is a static binary on `scratch`, run as UID 999 with a rea
 **Why this matters:** most of what an attacker does after getting code execution depends on tools that are already there. Removing them, and the ability to write new ones, shrinks a code-execution bug. The binary checks its own health (`ferrowarden healthcheck`, which verifies the server's own TLS certificate), which is why the image needs no `curl`.
 
 **Limits:** this is attack-surface reduction, not isolation. A container shares the host kernel, so a kernel or runtime escape is outside what it can stop; the *Hardened* profile (a dedicated VM, optionally gVisor, outbound firewall rules) addresses that. A compromised Ferrowarden process can still use the vault and the destinations it is allowed to reach. The `bw-serve` and Vaultwarden images are third-party images with a normal userland: restricted, not minimal.
+
+---
+
+### 18. The Native Vault Backend
+
+`vault.backend = "native"` ([native-vault.md](native-vault.md)) replaces `bw serve` with Ferrowarden's own implementation of the Bitwarden client protocol. What it changes:
+
+| | `bw-serve` | `native` |
+|---|---|---|
+| Decrypted vault | in `bw serve`'s memory, for the whole session | never: only metadata is decrypted at sync; **a secret is decrypted for one request** |
+| A secret on the wire | `bw serve` to Ferrowarden, over local HTTP | never leaves the process until it is substituted into the outbound request |
+| Whole-item fetch | yes (a custom field needs the item; the rest is wiped) | no |
+| Extra attack surface | the `bw` CLI, Node.js and npm dependencies in a container | none; one more Rust module (about 1,600 lines of production code, with its own unit tests) |
+
+**The trade-off.** In **file unlock mode** one process now holds both the Vaultwarden API key and the master password (with `bw serve`, the second container holds the API key and the vault session, and Ferrowarden holds the password file's value only while unlocking). A memory-disclosure bug in Ferrowarden would expose both. The mitigations are the same ones the rest of Ferrowarden uses, plus process hardening described below. **Manual unlock mode is the hardened option**: the master password is typed once per boot, held only for the key derivation, and not on disk; if you can accept typing it after each restart, prefer it.
+
+**Cryptographic rules, as implemented:**
+
+- **EncString allow-list.** Only type 2 (AES-256-CBC with HMAC-SHA256) for symmetric keys and types 3 and 4 (RSA-OAEP, SHA-256 and SHA-1) for RSA keys are accepted. Type 0 (no MAC), 1, 5, 6, 7 and every unknown number are refused *before* the payload is read. There is no code path that decrypts without a MAC, and nothing is guessed from the data's shape.
+- **MAC first.** The HMAC-SHA256 over `iv || ciphertext` is verified in constant time before the cipher sees any ciphertext. A test proves that a ciphertext with valid structure and a wrong MAC is rejected with a MAC failure, where the same ciphertext with a correct MAC fails later in the padding check.
+- **Exact lengths.** Symmetric keys (user key, organisation keys, per-item keys) must be exactly 64 bytes; IV 16 bytes, MAC 32 bytes, ciphertext a multiple of 16; RSA keys PKCS#8 of 2048 to 4096 bits. Base64 must be canonical.
+- **KDF bounds.** The account's KDF parameters come from the server, so they are bounded (the admin UI's rules) before any work is done.
+- **Fail closed, per item.** An item whose name, URIs, field names, per-item key or organisation key cannot be read is excluded and counted by reason in the `vault_sync` event (item ids, never names or values). A user key whose MAC fails is an unlock failure.
+- **Memory.** Keys are `Zeroizing` buffers (and the AES key schedule is wiped on drop); decrypted values are `Zeroizing<String>`; no key, ciphertext or value appears in `Debug` output, logs or events. Stored items are ciphertext. The exceptions that cannot be wiped from Rust: buffers inside the HTTP stack (the login form with the API key secret, the bearer token header) and serde's scratch space while parsing the token response.
+- **Process hardening (Linux).** `PR_SET_DUMPABLE = 0` and `RLIMIT_CORE = 0` at startup: no core dump, no `ptrace` by other unprivileged processes. Failures are logged. `mlock` is not used (keys live in many small heap allocations; a locked arena would need an extra crate and discipline for little gain): disable swap for the container instead (`memswap_limit` equal to `mem_limit`).
+- **Lock.** A changed user key or security stamp locks the vault and drops the keys and the credential map.
+- **RSA.** `rsa` 0.10 or later only (earlier releases are affected by RUSTSEC-2023-0071). Only the account's own organisation-key ciphertexts are decrypted, at unlock and sync; no attacker-driven decryption oracle is exposed.
+- **No Bitwarden SDK.** The code is written from the wire format and published algorithms; see [native-vault.md](native-vault.md).
+
+**Format drift.** New Bitwarden clients may write formats not listed here (V2 accounts use COSE EncStrings, type 7). They are refused, the affected items are excluded and counted, and everything else keeps working; the `bw-serve` backend remains the fallback. Treat a non-zero `excluded` count in a `vault_sync` event as something to look into.
+
+**Not covered:** collection permissions (`viewPassword = false`) of organisation items are not evaluated; Argon2id accounts and V2 (COSE) accounts have not been exercised end to end against a live vault.
 
 ---
 

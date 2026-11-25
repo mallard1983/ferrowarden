@@ -218,6 +218,16 @@ services:
       FERROWARDEN_UNLOCK_MODE: "file"
       FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
       FERROWARDEN_BW_SERVE_URL: "http://bw-serve:8087"
+      # The native vault backend (docs/native-vault.md) reads the vault itself:
+      # no bw-serve container, no Bitwarden CLI. To switch, uncomment these,
+      # add bw_client_id and bw_client_secret to this service's `secrets:`
+      # list, and remove the bw-serve service and its depends_on. Everything
+      # else (unlock mode, placeholders, policy) works as it does today.
+      # In file unlock mode one process then holds both the API key and the
+      # master password: read the trade-off in docs/security.md first.
+      # FERROWARDEN_VAULT__BACKEND: "native"
+      # FERROWARDEN_VAULT_CLIENT_ID_FILE: "/run/secrets/bw_client_id"
+      # FERROWARDEN_VAULT_CLIENT_SECRET_FILE: "/run/secrets/bw_client_secret"
       FERROWARDEN_BIND_ADDR: "0.0.0.0:3000"
       # The admin key is read from this Docker secret file by ferrowarden
       # itself; it is never placed in the process environment.
@@ -279,10 +289,11 @@ services:
       # It accepts the vault master password, so it only serves its sign-in form
       # over HTTPS: put a TLS reverse proxy in front and list it in
       # FERROWARDEN_TRUSTED_PROXIES, or enable ferrowarden's own TLS.
-      # The CA file is how it trusts Vaultwarden's internal certificate.
-      FERROWARDEN_UI__VAULTWARDEN_CA_FILE: "/ca-public/ca.crt"
+      # The CA file is how Ferrowarden trusts Vaultwarden's internal certificate
+      # (the admin UI sign-in and, in native mode, the vault connection).
+      FERROWARDEN_VAULT__CA_FILE: "/ca-public/ca.crt"
+      # FERROWARDEN_VAULT__URL: "https://vaultwarden"
       # FERROWARDEN_UI__BIND: "0.0.0.0:3001"
-      # FERROWARDEN_UI__VAULTWARDEN_URL: "https://vaultwarden"
       # FERROWARDEN_UI__SESSION_IDLE_MINUTES: "15"
       # FERROWARDEN_UI__SESSION_MAX_HOURS: "8"
       # Local testing only (plain-HTTP sign-in form):

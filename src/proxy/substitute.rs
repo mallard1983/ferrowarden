@@ -5,8 +5,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{FerroError, FerroResult};
 use crate::proxy::placeholder::{scan, Placeholder, Selector};
-use crate::vault::client::{CredentialEntry, FieldKind, FieldLookup, ItemKind};
-use crate::vault::{CredentialMap, VaultClient};
+use crate::vault::model::{CredentialEntry, FieldKind, FieldLookup, ItemKind};
+use crate::vault::{Builtin, CredentialMap, Vault};
 
 /// A resolved placeholder value. `scrub` says whether exact-value scrubbing
 /// applies: false for usernames, TOTP codes and boolean fields, which are
@@ -82,7 +82,7 @@ fn normalize_host(h: &str) -> String {
 /// What to fetch for a validated placeholder, and whether to scrub it.
 #[derive(Debug)]
 enum Fetch {
-    Builtin(&'static str),
+    Builtin(Builtin),
     Field(String),
 }
 
@@ -91,12 +91,14 @@ fn plan(p: &Placeholder, entry: &CredentialEntry) -> FerroResult<(Fetch, bool)> 
     let unknown = || FerroError::UnknownPlaceholder(p.label());
     let login = entry.kind == ItemKind::Login;
     match &p.selector {
-        Selector::Password if login && entry.has_password => Ok((Fetch::Builtin("password"), true)),
-        Selector::Username if login && entry.has_username => {
-            Ok((Fetch::Builtin("username"), false))
+        Selector::Password if login && entry.has_password => {
+            Ok((Fetch::Builtin(Builtin::Password), true))
         }
-        Selector::Totp if login && entry.has_totp => Ok((Fetch::Builtin("totp"), false)),
-        Selector::Notes if entry.has_notes => Ok((Fetch::Builtin("notes"), true)),
+        Selector::Username if login && entry.has_username => {
+            Ok((Fetch::Builtin(Builtin::Username), false))
+        }
+        Selector::Totp if login && entry.has_totp => Ok((Fetch::Builtin(Builtin::Totp), false)),
+        Selector::Notes if entry.has_notes => Ok((Fetch::Builtin(Builtin::Notes), true)),
         Selector::Field(name) => match entry.field(name) {
             FieldLookup::Missing => Err(unknown()),
             FieldLookup::Duplicate => Err(FerroError::AmbiguousField {
@@ -185,15 +187,15 @@ pub fn check_credentials(
 }
 
 /// Fetch phase: get the values a validated plan calls for from the vault.
-pub async fn fetch_credentials(
+pub async fn fetch_credentials<V: Vault + ?Sized>(
     plan: &CredentialPlan,
-    vault: &VaultClient,
+    vault: &V,
 ) -> FerroResult<ResolvedValues> {
     let mut values = ResolvedValues::new();
     for item in &plan.items {
         let label = item.placeholder.label();
         let value = match &item.fetch {
-            Fetch::Builtin(object) => vault.get_value(object, &item.id, &label).await?,
+            Fetch::Builtin(which) => vault.get_value(*which, &item.id, &label).await?,
             Fetch::Field(name) => vault.get_field(&item.id, name, &label).await?,
         };
         values.insert(
@@ -209,12 +211,12 @@ pub async fn fetch_credentials(
 
 /// Check then fetch. Fails before fetching any value if any check fails.
 #[cfg(test)]
-pub async fn resolve_credentials(
+pub async fn resolve_credentials<V: Vault + ?Sized>(
     placeholders: &BTreeSet<Placeholder>,
     credentials: &CredentialMap,
     target: &Url,
     enforce_hosts: bool,
-    vault: &VaultClient,
+    vault: &V,
 ) -> FerroResult<ResolvedValues> {
     let plan = check_credentials(placeholders, credentials, target, enforce_hosts)?;
     fetch_credentials(&plan, vault).await
@@ -280,7 +282,7 @@ pub fn zeroize_json(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::client::FieldInfo;
+    use crate::vault::model::FieldInfo;
     use serde_json::json;
 
     fn ph(item: &str, selector: Selector) -> Placeholder {
@@ -463,7 +465,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_rejects_before_fetching() {
         // Unreachable vault: any fetch attempt would return VaultUnavailable.
-        let vault = VaultClient::new("http://127.0.0.1:1".to_string());
+        let vault = crate::vault::BwServe::new("http://127.0.0.1:1".to_string());
         let mut creds = CredentialMap::new();
         creds.insert(
             "dup".into(),

@@ -4,13 +4,13 @@ use serde::Deserialize;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
+use super::model::{
+    match_type_is_binding, split_uris, Builtin, CredentialEntry, CredentialMap, FieldInfo,
+    FieldKind, ItemKind, Listing, VaultStatus, BINDINGS_FIELD,
+};
+use super::Vault;
 use crate::error::{FerroError, FerroResult};
 use crate::proxy::substitute::zeroize_json;
-
-/// Name of the reserved custom field that lists a credential's host bindings
-/// (comma- or newline-separated URIs). It provides bindings for secure notes
-/// and overrides a login's URIs when present. Not offered as a selectable field.
-pub const BINDINGS_FIELD: &str = "ferrowarden_uris";
 
 /// Minimal response shapes from bw serve. We only deserialize what we need.
 #[derive(Debug, Deserialize)]
@@ -102,124 +102,8 @@ struct BwStatusTemplate {
     last_sync: Option<String>,
 }
 
-/// What `GET /status` of bw serve reports: no secrets, just the session.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BwStatus {
-    /// `unauthenticated`, `locked` or `unlocked`.
-    pub status: String,
-    /// Email of the logged-in account (absent when unauthenticated).
-    pub user_email: Option<String>,
-    /// Timestamp of the last sync with the server, as bw serve reports it.
-    pub last_sync: Option<String>,
-}
-
-/// Kind of vault item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ItemKind {
-    Login,
-    SecureNote,
-}
-
-impl ItemKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ItemKind::Login => "login",
-            ItemKind::SecureNote => "secure_note",
-        }
-    }
-}
-
-/// Kind of custom field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FieldKind {
-    Text,
-    Hidden,
-    Boolean,
-    /// Linked to the login's username.
-    LinkedUsername,
-    /// Linked to the login's password.
-    LinkedPassword,
-    /// Linked to something not supported (e.g. card/identity properties).
-    LinkedOther,
-}
-
-/// A custom field's metadata — never its value.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FieldInfo {
-    pub name: String,
-    pub kind: FieldKind,
-}
-
-/// Result of looking a custom field up by name.
-pub enum FieldLookup<'a> {
-    Missing,
-    Unique(&'a FieldInfo),
-    Duplicate,
-}
-
-/// One vault item as seen by ferrowarden: never a value, only the id used to
-/// fetch values, which values exist, and the URIs that bind it to hosts.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CredentialEntry {
-    pub id: String,
-    pub kind: ItemKind,
-    /// Host bindings: `ferrowarden_uris` if present, otherwise the login's
-    /// URIs excluding those with match type "regex" or "never".
-    pub uris: Vec<String>,
-    pub has_username: bool,
-    pub has_password: bool,
-    pub has_totp: bool,
-    pub has_notes: bool,
-    /// Custom fields, excluding the reserved bindings field.
-    pub fields: Vec<FieldInfo>,
-    /// Master password re-prompt is enabled on the item.
-    pub reprompt: bool,
-}
-
-impl CredentialEntry {
-    /// A login item with just a password and URIs (used by tests).
-    #[cfg(test)]
-    pub fn login(id: &str, uris: &[&str]) -> Self {
-        Self {
-            id: id.to_string(),
-            kind: ItemKind::Login,
-            uris: uris.iter().map(|u| u.to_string()).collect(),
-            has_username: false,
-            has_password: true,
-            has_totp: false,
-            has_notes: false,
-            fields: Vec::new(),
-            reprompt: false,
-        }
-    }
-
-    pub fn field(&self, name: &str) -> FieldLookup<'_> {
-        let mut found = self.fields.iter().filter(|f| f.name == name);
-        match (found.next(), found.next()) {
-            (None, _) => FieldLookup::Missing,
-            (Some(f), None) => FieldLookup::Unique(f),
-            (Some(_), Some(_)) => FieldLookup::Duplicate,
-        }
-    }
-}
-
-/// Credential cache: item name -> all supported items with that name. More
-/// than one entry means the name is ambiguous and cannot be used.
-pub type CredentialMap = std::collections::BTreeMap<String, Vec<CredentialEntry>>;
-
-fn split_uris(raw: &str) -> Vec<String> {
-    raw.split([',', '\n', '\r'])
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 fn entry_from_item(item: BwItem) -> Option<(String, CredentialEntry)> {
-    let kind = match item.item_type {
-        1 => ItemKind::Login,
-        2 => ItemKind::SecureNote,
-        _ => return None,
-    };
+    let kind = ItemKind::from_type(item.item_type)?;
 
     let mut bindings_override = None;
     let mut fields = Vec::new();
@@ -231,14 +115,8 @@ fn entry_from_item(item: BwItem) -> Option<(String, CredentialEntry)> {
             }
             continue;
         }
-        let kind = match (f.field_type, f.linked_id) {
-            (0, _) => FieldKind::Text,
-            (1, _) => FieldKind::Hidden,
-            (2, _) => FieldKind::Boolean,
-            (3, Some(100)) => FieldKind::LinkedUsername,
-            (3, Some(101)) => FieldKind::LinkedPassword,
-            (3, _) => FieldKind::LinkedOther,
-            _ => continue,
+        let Some(kind) = FieldKind::from_wire(f.field_type, f.linked_id) else {
+            continue;
         };
         fields.push(FieldInfo { name, kind });
     }
@@ -250,7 +128,7 @@ fn entry_from_item(item: BwItem) -> Option<(String, CredentialEntry)> {
         .map(|uris| {
             uris.iter()
                 // regex and "never" URIs are not host bindings
-                .filter(|u| !matches!(u.match_type, Some(4) | Some(5)))
+                .filter(|u| match_type_is_binding(u.match_type))
                 .filter_map(|u| u.uri.clone())
                 .filter(|u| !u.trim().is_empty())
                 .collect()
@@ -271,15 +149,15 @@ fn entry_from_item(item: BwItem) -> Option<(String, CredentialEntry)> {
     Some((item.name, entry))
 }
 
-/// Client for the bw serve local REST API.
+/// The `bw serve` backend: a client for its local REST API.
 /// All methods assume bw serve is running and unlocked — callers must check
 /// lock state before calling. The bw_serve_url must be localhost-only.
-pub struct VaultClient {
+pub struct BwServe {
     client: Client,
     base_url: String,
 }
 
-impl VaultClient {
+impl BwServe {
     pub fn new(base_url: String) -> Self {
         Self {
             // Short timeouts — bw serve is local, slow responses indicate a problem.
@@ -296,7 +174,7 @@ impl VaultClient {
     /// `GET /status`: login state, account email and last sync of bw serve.
     /// Used by the admin UI to learn which account to sign in as. Bounded by
     /// a short timeout so a slow bw serve cannot hang a page.
-    pub async fn status(&self) -> FerroResult<BwStatus> {
+    pub async fn status(&self) -> FerroResult<VaultStatus> {
         let url = format!("{}/status", self.base_url);
         let resp = self
             .client
@@ -316,7 +194,7 @@ impl VaultClient {
             (true, Some(data)) => data.template,
             _ => return Err(FerroError::VaultUnavailable),
         };
-        Ok(BwStatus {
+        Ok(VaultStatus {
             status: template.status,
             user_email: template.user_email.filter(|e| !e.trim().is_empty()),
             last_sync: template.last_sync,
@@ -463,6 +341,56 @@ impl VaultClient {
     }
 }
 
+impl Vault for BwServe {
+    fn name(&self) -> &'static str {
+        "bw-serve"
+    }
+
+    fn lock_cause(&self) -> &'static str {
+        "bw_serve_locked"
+    }
+
+    async fn status(&self) -> FerroResult<VaultStatus> {
+        BwServe::status(self).await
+    }
+
+    async fn unlock(&self, password: Zeroizing<String>) -> FerroResult<()> {
+        super::unlock::unlock_vault(&self.base_url, password).await
+    }
+
+    /// Ferrowarden never locks bw serve itself; it only follows its state.
+    async fn lock(&self) {}
+
+    async fn sync(&self) -> FerroResult<()> {
+        BwServe::sync(self).await
+    }
+
+    async fn list_credentials(&self) -> FerroResult<Listing> {
+        Ok(Listing {
+            map: BwServe::list_credentials(self).await?,
+            excluded: None,
+        })
+    }
+
+    async fn get_value(
+        &self,
+        value: Builtin,
+        id: &str,
+        label: &str,
+    ) -> FerroResult<Zeroizing<String>> {
+        BwServe::get_value(self, value.as_str(), id, label).await
+    }
+
+    async fn get_field(
+        &self,
+        id: &str,
+        field: &str,
+        label: &str,
+    ) -> FerroResult<Zeroizing<String>> {
+        BwServe::get_field(self, id, field, label).await
+    }
+}
+
 /// Map a bw serve failure message to an error.
 fn map_failure(message: Option<String>, label: &str) -> FerroError {
     let msg = message
@@ -532,6 +460,7 @@ fn extract_field(doc: &Value, field: &str, label: &str) -> FerroResult<Zeroizing
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vault::model::FieldLookup;
 
     fn parse(items: &str) -> CredentialMap {
         let raw = format!(r#"{{"success":true,"data":{{"object":"list","data":[{items}]}}}}"#);

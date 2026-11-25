@@ -266,6 +266,7 @@ mod tests {
             events: Default::default(),
             ui: Default::default(),
             notify: Default::default(),
+            vault: Default::default(),
         }))
     }
 

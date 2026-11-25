@@ -12,9 +12,13 @@
 #      bw_client_id + bw_client_secret to secrets\
 #   4. Disables Vaultwarden signups
 #   5. Runs vault-seeder: populates the vault with test credentials
-#   6. Starts the full test stack (bw-serve + ferrowarden + mock-api)
-#   7. Creates a test agent key and writes it to secrets\test_agent_key
-#   8. Writes a .env.test file with ready-to-use environment variables
+#   6. Starts the full test stack: bw-serve, mock-api and two Ferrowarden
+#      instances against the same vault, one per vault backend
+#      (docs/native-vault.md): ferrowarden (bw serve, port 3000) and
+#      ferrowarden-native (port 3003)
+#   7. Creates a test agent key on each, in secrets\
+#   8. Writes .env.test (bw serve instance) and .env.test.native (native
+#      instance) files with ready-to-use environment variables
 #
 # Usage:
 #   .\scripts\dev-setup.ps1
@@ -37,6 +41,8 @@ Set-Location $repoRoot
 
 $secretsDir = Join-Path $repoRoot 'secrets'
 $ferroUrl   = if ($env:FERROWARDEN_URL) { $env:FERROWARDEN_URL } else { 'http://localhost:3000' }
+$nativeUrl   = if ($env:FERROWARDEN_NATIVE_URL) { $env:FERROWARDEN_NATIVE_URL } else { 'http://localhost:3003' }
+$nativeUiUrl = if ($env:FERROWARDEN_NATIVE_UI_URL) { $env:FERROWARDEN_NATIVE_UI_URL } else { 'http://localhost:3004' }
 
 function Write-Step([string]$msg) { Write-Host ""; Write-Host $msg }
 function Write-Sub([string]$msg)  { Write-Host "  $msg" }
@@ -167,6 +173,18 @@ Invoke-Compose run --rm `
 
 Write-Sub 'API credentials written to secrets\'
 
+# Docker Desktop keeps the owner and mode a container gave a bind-mounted file:
+# vault-setup wrote these two as UID 1000 with mode 600, which the ferrowarden
+# containers (UID 999) cannot read. Rewrite them from Windows (same bytes), which
+# makes them world-readable like the other test secrets.
+foreach ($name in 'bw_client_id', 'bw_client_secret') {
+    $path = Join-Path $secretsDir $name
+    $bytes = [System.IO.File]::ReadAllBytes($path)
+    $tmp = "$path.tmp"
+    [System.IO.File]::WriteAllBytes($tmp, $bytes)
+    Move-Item -Force $tmp $path
+}
+
 # ── Disable Vaultwarden signups ───────────────────────────────────────────────
 
 Write-Step '[4/7] Disabling Vaultwarden signups...'
@@ -184,7 +202,7 @@ Invoke-Compose run --rm vault-seeder
 
 # ── Start the full test stack ────────────────────────────────────────────────
 
-Write-Step '[6/7] Starting full test stack (bw-serve, ferrowarden, mock-api)...'
+Write-Step '[6/7] Starting full test stack (bw-serve, ferrowarden, ferrowarden-native, mock-api)...'
 Invoke-Compose up -d bw-serve mock-api
 
 # bw-serve runs on the internal Docker network only — not reachable from the
@@ -192,50 +210,56 @@ Invoke-Compose up -d bw-serve mock-api
 Write-Sub 'Waiting for bw-serve to initialize (~15s)...'
 Start-Sleep 15
 
-Invoke-Compose up -d ferrowarden
+Invoke-Compose up -d ferrowarden ferrowarden-native
 
-Write-Sub 'Waiting for ferrowarden to unlock and start accepting requests...'
 $adminKey = [System.IO.File]::ReadAllText([System.IO.Path]::GetFullPath($adminKeyFile))
-$elapsed  = 0
-$ready    = $false
-while (-not $ready -and $elapsed -lt 60) {
-    try {
-        $null = Invoke-RestMethod "$ferroUrl/v1/admin/status" `
-            -Headers @{ 'X-Admin-Key' = $adminKey } `
-            -ErrorAction Stop
-        $ready = $true
-    } catch {
-        Start-Sleep 3
-        $elapsed += 3
+foreach ($instance in @(@{ Url = $ferroUrl; Service = 'ferrowarden' }, @{ Url = $nativeUrl; Service = 'ferrowarden-native' })) {
+    Write-Sub "Waiting for $($instance.Service) to unlock and start accepting requests..."
+    $elapsed = 0
+    $ready   = $false
+    while (-not $ready -and $elapsed -lt 90) {
+        try {
+            $null = Invoke-RestMethod "$($instance.Url)/v1/admin/status" `
+                -Headers @{ 'X-Admin-Key' = $adminKey } `
+                -ErrorAction Stop
+            $ready = $true
+        } catch {
+            Start-Sleep 3
+            $elapsed += 3
+        }
     }
-}
-if (-not $ready) {
-    Write-Host ''
-    Write-Error 'ferrowarden did not become ready within 60s'
-    Invoke-Compose logs ferrowarden
-    exit 1
+    if (-not $ready) {
+        Write-Host ''
+        Write-Error "$($instance.Service) did not become ready within 90s"
+        Invoke-Compose logs $instance.Service
+        exit 1
+    }
 }
 Write-Sub 'Stack is healthy.'
 
 # ── Create test agent key ─────────────────────────────────────────────────────
 
-Write-Step '[7/7] Creating test agent key...'
+Write-Step '[7/7] Creating test agent keys...'
 
-$agentKeyFile = "$secretsDir\test_agent_key"
-$agentKeyVal  = ''
-try {
-    $resp = Invoke-RestMethod "$ferroUrl/v1/admin/keys" `
-        -Method POST `
-        -Headers @{ 'X-Admin-Key' = $adminKey; 'Content-Type' = 'application/json' } `
-        -Body '{"name":"integration-test-agent","credentials":["*"],"methods":["*"]}' `
-        -ErrorAction Stop
-    $agentKeyVal = $resp.token
-    Write-Secret $agentKeyFile $agentKeyVal
-    Write-Sub 'Agent key written to secrets\test_agent_key'
-} catch {
-    Write-Warning "Failed to create agent key: $_"
-    Write-Warning 'Check logs: docker compose -f docker-compose.test.yml logs ferrowarden'
+# One key per instance (each has its own key store).
+function New-AgentKey([string]$url, [string]$file) {
+    try {
+        $resp = Invoke-RestMethod "$url/v1/admin/keys" `
+            -Method POST `
+            -Headers @{ 'X-Admin-Key' = $adminKey; 'Content-Type' = 'application/json' } `
+            -Body '{"name":"integration-test-agent","credentials":["*"],"methods":["*"]}' `
+            -ErrorAction Stop
+        Write-Secret $file $resp.token
+        Write-Sub "Agent key written to $file"
+        return $resp.token
+    } catch {
+        Write-Warning "Failed to create the agent key at ${url}: $_"
+        Write-Warning 'Check logs: docker compose -f docker-compose.test.yml logs ferrowarden ferrowarden-native'
+        return ''
+    }
 }
+$agentKeyVal       = New-AgentKey $ferroUrl "$secretsDir\test_agent_key"
+$nativeAgentKeyVal = New-AgentKey $nativeUrl "$secretsDir\test_agent_key_native"
 
 # ── Write .env.test ───────────────────────────────────────────────────────────
 
@@ -263,6 +287,28 @@ MOCK_API_URL=http://localhost:7777
     [System.Text.UTF8Encoding]::new($false)
 )
 
+# The same for the native instance: run the whole suite against it by loading
+# this file instead (scripts\load-env.ps1 .env.test.native).
+$nativeEnvContent = @"
+# Auto-generated by scripts\dev-setup.ps1: the integration tests against the
+# ferrowarden-native instance (vault.backend = native). Test environment only.
+
+FERROWARDEN_INTEGRATION=1
+FERROWARDEN_TEST_URL=$nativeUrl
+FERROWARDEN_TEST_UI_URL=$nativeUiUrl
+FERROWARDEN_TEST_ADMIN_KEY=$($adminKey.Trim())
+FERROWARDEN_TEST_AGENT_KEY=$($nativeAgentKeyVal.Trim())
+FERROWARDEN_TEST_NOTIFY_TOKEN=$((Get-Content -Raw $notifyTokenFile).Trim())
+MOCK_API_URL=http://localhost:7777
+FERROWARDEN_NATIVE_URL=$nativeUrl
+"@
+
+[System.IO.File]::WriteAllText(
+    [System.IO.Path]::GetFullPath('.env.test.native'),
+    $nativeEnvContent,
+    [System.Text.UTF8Encoding]::new($false)
+)
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 
 Write-Host ''
@@ -273,8 +319,12 @@ Write-Host ''
 Write-Host 'Services running:'
 Invoke-Compose ps
 Write-Host ''
-Write-Host 'To run integration tests:'
+Write-Host 'To run integration tests (bw serve instance), then the equivalence suite and the'
+Write-Host 'same suite against the native instance:'
 Write-Host '  scripts\load-env.ps1'
+Write-Host '  cargo +stable-x86_64-pc-windows-msvc test --test integration -- --test-threads=1'
+Write-Host '  cargo +stable-x86_64-pc-windows-msvc test --test equivalence -- --nocapture --test-threads=1'
+Write-Host '  scripts\load-env.ps1 .env.test.native'
 Write-Host '  cargo +stable-x86_64-pc-windows-msvc test --test integration -- --test-threads=1'
 Write-Host ''
 Write-Host 'To stop the stack:'

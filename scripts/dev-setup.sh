@@ -13,9 +13,12 @@
 #      bw_client_id + bw_client_secret to secrets/
 #   4. Disables Vaultwarden signups
 #   5. Runs vault-seeder: populates the vault with test credentials
-#   6. Starts the full test stack (bw-serve + ferrowarden + mock-api)
-#   7. Creates a test agent key and writes it to secrets/test_agent_key
-#   8. Writes a .env.test file with ready-to-use environment variable exports
+#   6. Starts the full test stack: bw-serve, mock-api and two Ferrowarden
+#      instances against the same vault, one per vault backend (docs/native-vault.md):
+#      `ferrowarden` (bw serve, port 3000) and `ferrowarden-native` (port 3003)
+#   7. Creates a test agent key on each and writes them to secrets/
+#   8. Writes .env.test (bw serve instance) and .env.test.native (native
+#      instance) files with ready-to-use environment variable exports
 #
 # Usage:
 #   ./scripts/dev-setup.sh
@@ -39,6 +42,8 @@ HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 export HOST_UID HOST_GID
 FERROWARDEN_URL="${FERROWARDEN_URL:-http://localhost:3000}"
+FERROWARDEN_NATIVE_URL="${FERROWARDEN_NATIVE_URL:-http://localhost:3003}"
+FERROWARDEN_NATIVE_UI_URL="${FERROWARDEN_NATIVE_UI_URL:-http://localhost:3004}"
 
 echo "=================================================="
 echo " Ferrowarden Dev Environment Setup"
@@ -196,7 +201,7 @@ $COMPOSE run --rm vault-seeder
 # ── Start the full test stack ─────────────────────────────────────────────────
 
 echo ""
-echo "[6/7] Starting full test stack (bw-serve, ferrowarden, mock-api)..."
+echo "[6/7] Starting full test stack (bw-serve, ferrowarden, ferrowarden-native, mock-api)..."
 $COMPOSE up -d bw-serve mock-api
 
 echo "  Waiting for bw-serve to initialize (this takes ~15s)..."
@@ -206,49 +211,57 @@ until curl -sf "http://localhost:8087/status" > /dev/null 2>&1 || [ "$elapsed" -
     elapsed=$((elapsed + 3))
 done
 
-$COMPOSE up -d ferrowarden
+$COMPOSE up -d ferrowarden ferrowarden-native
 
-echo "  Waiting for ferrowarden to unlock and start accepting requests..."
-elapsed=0
-until curl -sf "$FERROWARDEN_URL/v1/admin/status" \
-        -H "X-Admin-Key: $(cat "$SECRETS_DIR/ferrowarden_admin_key")" > /dev/null 2>&1; do
-    if [ "$elapsed" -ge 60 ]; then
-        echo "  ERROR: ferrowarden did not become ready within 60s" >&2
-        $COMPOSE logs ferrowarden >&2
-        exit 1
-    fi
-    sleep 3
-    elapsed=$((elapsed + 3))
-done
+# Both instances: the bw serve one on 3000, the native one on 3003.
+wait_for_ferrowarden() {
+    url="$1"; service="$2"
+    echo "  Waiting for $service to unlock and start accepting requests..."
+    elapsed=0
+    until curl -sf "$url/v1/admin/status" \
+            -H "X-Admin-Key: $(cat "$SECRETS_DIR/ferrowarden_admin_key")" > /dev/null 2>&1; do
+        if [ "$elapsed" -ge 90 ]; then
+            echo "  ERROR: $service did not become ready within 90s" >&2
+            $COMPOSE logs "$service" >&2
+            exit 1
+        fi
+        sleep 3
+        elapsed=$((elapsed + 3))
+    done
+}
+wait_for_ferrowarden "$FERROWARDEN_URL" ferrowarden
+wait_for_ferrowarden "$FERROWARDEN_NATIVE_URL" ferrowarden-native
 
 echo "  Stack is healthy."
 
 # ── Create test agent key ─────────────────────────────────────────────────────
 
 echo ""
-echo "[7/7] Creating test agent key..."
+echo "[7/7] Creating test agent keys..."
 
 ADMIN_KEY="$(cat "$SECRETS_DIR/ferrowarden_admin_key")"
 
-AGENT_RESPONSE=$(curl -sf -X POST "$FERROWARDEN_URL/v1/admin/keys" \
-    -H "X-Admin-Key: $ADMIN_KEY" \
-    -H "Content-Type: application/json" \
-    -d '{"name": "integration-test-agent", "credentials": ["*"], "methods": ["*"]}')
-
-AGENT_TOKEN=$(python3 -c "
+# One key per instance (each has its own key store).
+create_agent_key() {
+    url="$1"; out="$2"
+    response=$(curl -sf -X POST "$url/v1/admin/keys" \
+        -H "X-Admin-Key: $ADMIN_KEY" \
+        -H "Content-Type: application/json" \
+        -d '{"name": "integration-test-agent", "credentials": ["*"], "methods": ["*"]}')
+    token=$(printf '%s' "$response" | python3 -c "
 import sys, json
-data = json.loads('$AGENT_RESPONSE')
-print(data.get('token', ''))
+print(json.load(sys.stdin).get('token', ''), end='')
 " 2>/dev/null)
-
-if [ -z "$AGENT_TOKEN" ]; then
-    echo "  WARNING: failed to create agent key — check ferrowarden logs" >&2
-    echo "  Response: $AGENT_RESPONSE" >&2
-else
-    printf '%s' "$AGENT_TOKEN" > "$SECRETS_DIR/test_agent_key"
-    chmod 600 "$SECRETS_DIR/test_agent_key"
-    echo "  Agent key written to secrets/test_agent_key"
-fi
+    if [ -z "$token" ]; then
+        echo "  WARNING: failed to create the agent key at $url — check the ferrowarden logs" >&2
+    else
+        printf '%s' "$token" > "$out"
+        chmod 600 "$out"
+        echo "  Agent key written to $out"
+    fi
+}
+create_agent_key "$FERROWARDEN_URL" "$SECRETS_DIR/test_agent_key"
+create_agent_key "$FERROWARDEN_NATIVE_URL" "$SECRETS_DIR/test_agent_key_native"
 
 # ── Write .env.test ───────────────────────────────────────────────────────────
 
@@ -267,6 +280,22 @@ FERROWARDEN_TEST_NOTIFY_TOKEN=$(cat "$SECRETS_DIR/notify_webhook_token")
 MOCK_API_URL=http://localhost:7777
 EOF
 
+# The same for the native instance: run the whole suite against it with
+#   set -a; . ./.env.test.native; set +a; cargo test --test integration -- --test-threads=1
+cat > .env.test.native <<EOF
+# Auto-generated by scripts/dev-setup.sh: the integration tests against the
+# ferrowarden-native instance (vault.backend = native). Test environment only.
+
+FERROWARDEN_INTEGRATION=1
+FERROWARDEN_TEST_URL=$FERROWARDEN_NATIVE_URL
+FERROWARDEN_TEST_UI_URL=$FERROWARDEN_NATIVE_UI_URL
+FERROWARDEN_TEST_ADMIN_KEY=$(cat "$SECRETS_DIR/ferrowarden_admin_key")
+FERROWARDEN_TEST_AGENT_KEY=$(cat "$SECRETS_DIR/test_agent_key_native" 2>/dev/null || echo "")
+FERROWARDEN_TEST_NOTIFY_TOKEN=$(cat "$SECRETS_DIR/notify_webhook_token")
+MOCK_API_URL=http://localhost:7777
+FERROWARDEN_NATIVE_URL=$FERROWARDEN_NATIVE_URL
+EOF
+
 echo ""
 echo "=================================================="
 echo " Setup complete."
@@ -275,8 +304,11 @@ echo ""
 echo "Services running:"
 $COMPOSE ps
 echo ""
-echo "To run integration tests:"
-echo "  source .env.test && cargo test --test integration"
+echo "To run integration tests (bw serve instance), then the same suite and the"
+echo "equivalence suite against the native instance:"
+echo "  set -a; . ./.env.test; set +a; cargo test --test integration -- --test-threads=1"
+echo "  cargo test --test equivalence -- --nocapture --test-threads=1"
+echo "  set -a; . ./.env.test.native; set +a; cargo test --test integration -- --test-threads=1"
 echo ""
 echo "To stop the stack:"
 echo "  docker compose -f docker-compose.test.yml down"

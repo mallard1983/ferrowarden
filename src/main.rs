@@ -33,6 +33,7 @@ fn startup_event(
     SecurityEvent::new(Action::Startup)
         .detail("version", env!("CARGO_PKG_VERSION"))
         .detail("tls_enabled", config.tls_enabled)
+        .detail("vault_backend", config.vault.backend.as_str())
         .detail(
             "unlock_mode",
             match config.unlock_mode {
@@ -183,7 +184,18 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let state = Arc::new(AppState::new(config.clone(), events.clone()).with_notify(notify));
+    if config.vault.backend == config::VaultBackend::Native {
+        // The native backend keeps the vault's keys in this process: no core
+        // dumps, no ptrace by other unprivileged processes (Linux; best effort).
+        let failed = vault::native::hardening::apply();
+        if failed.is_empty() {
+            tracing::info!("Process hardened: core dumps disabled");
+        } else {
+            tracing::warn!(failed = ?failed, "Process hardening was only partly applied");
+        }
+    }
+
+    let state = Arc::new(AppState::try_new(config.clone(), events.clone())?.with_notify(notify));
 
     // Load persisted agent keys if a key file is configured. Keys written by
     // 0.1.0 carry no policy and load as deny-all; they are counted so the

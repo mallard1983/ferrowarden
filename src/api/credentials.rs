@@ -14,7 +14,7 @@ use crate::middleware::request_context::RequestContext;
 use crate::policy::KeyPolicy;
 use crate::proxy::placeholder::{Placeholder, Selector};
 use crate::state::AppState;
-use crate::vault::client::{CredentialEntry, FieldKind, FieldLookup, ItemKind};
+use crate::vault::model::{CredentialEntry, FieldKind, FieldLookup, ItemKind};
 use crate::vault::CredentialMap;
 
 /// One credential in the detailed listing: ready-made placeholders for every
@@ -270,7 +270,7 @@ pub async fn authenticate_agent(
 mod tests {
     use super::*;
     use crate::proxy::placeholder::scan;
-    use crate::vault::client::FieldInfo;
+    use crate::vault::model::FieldInfo;
 
     fn field(name: &str, kind: FieldKind) -> FieldInfo {
         FieldInfo {

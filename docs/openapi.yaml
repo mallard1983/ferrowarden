@@ -665,6 +665,7 @@ paths:
                 unlocked:
                   value:
                     locked: false
+                    vault_backend: bw-serve
                     credential_count: 12
                     agent_key_count: 2
         "401":
@@ -1178,12 +1179,16 @@ components:
           description: The id of the revoked key.
     Status:
       type: object
-      required: [locked, credential_count, agent_key_count]
+      required: [locked, vault_backend, credential_count, agent_key_count]
       description: Operational status.
       properties:
         locked:
           type: boolean
           description: Whether the vault is locked.
+        vault_backend:
+          type: string
+          enum: [bw-serve, native]
+          description: The vault backend in use (`vault.backend`).
         credential_count:
           type: integer
           minimum: 0

@@ -48,7 +48,7 @@ use crate::events::{Action, Outcome, Reason, SecurityEvent};
 use crate::middleware::request_context::{request_context, RequestContext, TrustedProxies};
 use crate::net::Cidr;
 use crate::state::AppState;
-use crate::vault::VaultClient;
+use crate::vault::Vault;
 use drafts::DraftStore;
 use lockout::Lockouts;
 use session::{PendingSlot, SessionStore};
@@ -78,7 +78,6 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct UiState {
     pub(crate) app: Arc<AppState>,
     pub(crate) vw: VwClient,
-    pub(crate) vault: VaultClient,
     pub(crate) sessions: Mutex<SessionStore>,
     pub(crate) pending: Mutex<PendingSlot>,
     pub(crate) lockouts: Mutex<Lockouts>,
@@ -122,7 +121,6 @@ impl UiState {
         let digest = Sha256::digest(CSS.as_bytes());
         let hash: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
         Ok(Arc::new(Self {
-            vault: VaultClient::new(app.config.bw_serve_url.clone()),
             sessions: Mutex::new(SessionStore::new(
                 Duration::from_secs(ui.session_idle_minutes * 60),
                 Duration::from_secs(ui.session_max_hours * 3600),
@@ -161,13 +159,13 @@ impl UiState {
         *lock(&self.skew) += by;
     }
 
-    /// The vault account to sign in as: what `bw serve` reports. Cached after
-    /// the first success; `None` if bw serve is unreachable or not logged in.
+    /// The vault account to sign in as: what the vault backend reports. Cached after
+    /// the first success; `None` if the vault backend is unreachable or not logged in.
     pub(crate) async fn account_email(&self) -> Option<String> {
         if let Some(email) = lock(&self.email).clone() {
             return Some(email);
         }
-        let status = self.vault.status().await.ok()?;
+        let status = self.app.vault.status().await.ok()?;
         if status.status == "unauthenticated" {
             return None;
         }

@@ -157,6 +157,12 @@ pub struct Config {
     /// (or `_FILE`). Disabled unless a sender URL is set (docs/notifications.md).
     #[serde(default)]
     pub notify: NotifyConfig,
+
+    /// Which vault backend Ferrowarden reads credentials from, and how it
+    /// reaches Vaultwarden. `[vault]` in the TOML file, `FERROWARDEN_VAULT__*`
+    /// in the environment (docs/native-vault.md).
+    #[serde(default)]
+    pub vault: VaultConfig,
 }
 
 /// Settings of the admin web UI.
@@ -230,33 +236,7 @@ impl UiConfig {
                     .to_string(),
             ));
         }
-        let url = reqwest::Url::parse(&self.vaultwarden_url).map_err(|e| {
-            FerroError::Config(format!(
-                "ui.vaultwarden_url {:?} is not a URL ({e})",
-                self.vaultwarden_url
-            ))
-        })?;
-        let loopback = url.host_str().is_some_and(|h| {
-            h == "localhost"
-                || h.trim_matches(['[', ']'])
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-        });
-        match url.scheme() {
-            "https" => {}
-            "http" if loopback => {}
-            _ => {
-                return Err(FerroError::Config(
-                    "ui.vaultwarden_url must be an https:// URL (http:// only for localhost)"
-                        .to_string(),
-                ))
-            }
-        }
-        if url.host_str().is_none() || url.query().is_some() || url.fragment().is_some() {
-            return Err(FerroError::Config(
-                "ui.vaultwarden_url must be a plain base URL (no query or fragment)".to_string(),
-            ));
-        }
+        validate_vaultwarden_url("ui.vaultwarden_url", &self.vaultwarden_url)?;
         Ok(())
     }
 }
@@ -343,6 +323,220 @@ impl EventsConfig {
             ));
         }
         Ok(())
+    }
+}
+
+// ── Vault backend ─────────────────────────────────────────────────────────────
+
+/// The vault backend, chosen once at startup.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum VaultBackend {
+    /// The Bitwarden CLI's `bw serve` REST API (`bw_serve_url`). The default.
+    #[default]
+    BwServe,
+    /// The Bitwarden client protocol implemented in Rust directly against
+    /// Vaultwarden: no `bw`, no Node. Needs `vault.url` and an API key.
+    Native,
+}
+
+impl VaultBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VaultBackend::BwServe => "bw-serve",
+            VaultBackend::Native => "native",
+        }
+    }
+}
+
+/// Environment variables the native backend's API key is read from. Each also
+/// has a `_FILE` variant that names a file holding the value.
+pub const ENV_VAULT_CLIENT_ID: &str = "FERROWARDEN_VAULT_CLIENT_ID";
+pub const ENV_VAULT_CLIENT_SECRET: &str = "FERROWARDEN_VAULT_CLIENT_SECRET";
+
+/// The Vaultwarden API key (personal API key: `client_id` and
+/// `client_secret`). Never from a config file, wiped when dropped, and
+/// `[redacted]` in `Debug` output.
+#[derive(Clone, Default)]
+pub struct VaultCredentials {
+    pub client_id: Option<Zeroizing<String>>,
+    pub client_secret: Option<Zeroizing<String>>,
+}
+
+impl fmt::Debug for VaultCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let show = |t: &Option<Zeroizing<String>>| if t.is_some() { "[redacted]" } else { "none" };
+        f.debug_struct("VaultCredentials")
+            .field("client_id", &show(&self.client_id))
+            .field("client_secret", &show(&self.client_secret))
+            .finish()
+    }
+}
+
+impl VaultCredentials {
+    /// Read the API key from the environment and the files it names (a
+    /// direct variable wins over its `_FILE`, like the admin key).
+    pub fn from_env() -> FerroResult<Self> {
+        Self::load(
+            |name| std::env::var(name).ok().filter(|v| !v.is_empty()),
+            |path| std::fs::read(path),
+        )
+    }
+
+    pub fn load(
+        get: impl Fn(&str) -> Option<String>,
+        read: impl Fn(&std::path::Path) -> std::io::Result<Vec<u8>>,
+    ) -> FerroResult<Self> {
+        Ok(Self {
+            client_id: secrets::load_secret(ENV_VAULT_CLIENT_ID, Both::DirectWins, &get, &read)?,
+            client_secret: secrets::load_secret(
+                ENV_VAULT_CLIENT_SECRET,
+                Both::DirectWins,
+                &get,
+                &read,
+            )?,
+        })
+    }
+}
+
+/// Settings of the vault backend. `[vault]` in the TOML file.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct VaultConfig {
+    /// `bw-serve` (default) or `native`.
+    pub backend: VaultBackend,
+    /// Vaultwarden base URL: how Ferrowarden reaches the server. Used by the
+    /// native backend and, with the admin UI, to verify the master password at
+    /// sign-in. Must be `https://` (plain `http://` only for loopback hosts).
+    /// Replaces `ui.vaultwarden_url`, which still works as an alias.
+    pub url: String,
+    /// PEM file with an extra CA certificate to trust for `url`, on top of the
+    /// public roots. Never replaces certificate verification. Replaces
+    /// `ui.vaultwarden_ca_file`, which still works as an alias.
+    pub ca_file: String,
+    /// The native backend's API key (`FERROWARDEN_VAULT_CLIENT_ID[_FILE]`,
+    /// `FERROWARDEN_VAULT_CLIENT_SECRET[_FILE]`).
+    #[serde(skip)]
+    pub credentials: VaultCredentials,
+}
+
+pub const DEFAULT_VAULT_URL: &str = "https://vaultwarden";
+
+impl Default for VaultConfig {
+    fn default() -> Self {
+        Self {
+            backend: VaultBackend::default(),
+            url: DEFAULT_VAULT_URL.to_string(),
+            ca_file: String::new(),
+            credentials: VaultCredentials::default(),
+        }
+    }
+}
+
+/// Check a Vaultwarden base URL: https, or http for loopback hosts only; no
+/// query or fragment. `name` is the setting's name for the message.
+fn validate_vaultwarden_url(name: &str, value: &str) -> FerroResult<()> {
+    let url = reqwest::Url::parse(value)
+        .map_err(|e| FerroError::Config(format!("{name} {value:?} is not a URL ({e})")))?;
+    let loopback = url.host_str().is_some_and(|h| {
+        h == "localhost"
+            || h.trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    match url.scheme() {
+        "https" => {}
+        "http" if loopback => {}
+        _ => {
+            return Err(FerroError::Config(format!(
+                "{name} must be an https:// URL (http:// only for localhost)"
+            )))
+        }
+    }
+    if url.host_str().is_none() || url.query().is_some() || url.fragment().is_some() {
+        return Err(FerroError::Config(format!(
+            "{name} must be a plain base URL (no query or fragment)"
+        )));
+    }
+    Ok(())
+}
+
+impl VaultConfig {
+    /// Settle `vault.url` / `vault.ca_file` against their deprecated aliases
+    /// `ui.vaultwarden_url` / `ui.vaultwarden_ca_file`, and write the result
+    /// back to both places so every user of Vaultwarden sees one value.
+    /// Returns the deprecation notices to log.
+    pub(crate) fn resolve_aliases(&mut self, ui: &mut UiConfig) -> Vec<String> {
+        let mut notes = Vec::new();
+        if ui.vaultwarden_url != DEFAULT_VAULT_URL {
+            if self.url == DEFAULT_VAULT_URL {
+                self.url = ui.vaultwarden_url.clone();
+                notes.push(
+                    "ui.vaultwarden_url is deprecated: use vault.url (FERROWARDEN_VAULT__URL)"
+                        .to_string(),
+                );
+            } else if self.url != ui.vaultwarden_url {
+                notes.push(
+                    "both vault.url and the deprecated ui.vaultwarden_url are set and differ: \
+                     vault.url is used"
+                        .to_string(),
+                );
+            }
+        }
+        if !ui.vaultwarden_ca_file.is_empty() {
+            if self.ca_file.is_empty() {
+                self.ca_file = ui.vaultwarden_ca_file.clone();
+                notes.push(
+                    "ui.vaultwarden_ca_file is deprecated: use vault.ca_file \
+                     (FERROWARDEN_VAULT__CA_FILE)"
+                        .to_string(),
+                );
+            } else if self.ca_file != ui.vaultwarden_ca_file {
+                notes.push(
+                    "both vault.ca_file and the deprecated ui.vaultwarden_ca_file are set and \
+                     differ: vault.ca_file is used"
+                        .to_string(),
+                );
+            }
+        }
+        ui.vaultwarden_url = self.url.clone();
+        ui.vaultwarden_ca_file = self.ca_file.clone();
+        notes
+    }
+
+    /// Native settings are required in native mode and meaningless otherwise.
+    /// Returns warnings for settings that are set but ignored.
+    pub(crate) fn validate(
+        &self,
+        bw_serve_url_set: bool,
+        native_vars_set: bool,
+    ) -> FerroResult<Vec<String>> {
+        let mut warnings = Vec::new();
+        match self.backend {
+            VaultBackend::Native => {
+                validate_vaultwarden_url("vault.url", &self.url)?;
+                if self.credentials.client_id.is_none() || self.credentials.client_secret.is_none()
+                {
+                    return Err(FerroError::Config(format!(
+                        "vault.backend = native requires the Vaultwarden API key: set \
+                         {ENV_VAULT_CLIENT_ID} (or {ENV_VAULT_CLIENT_ID}_FILE) and \
+                         {ENV_VAULT_CLIENT_SECRET} (or {ENV_VAULT_CLIENT_SECRET}_FILE)"
+                    )));
+                }
+                if bw_serve_url_set {
+                    warnings.push("vault.backend = native: bw_serve_url is ignored".to_string());
+                }
+            }
+            VaultBackend::BwServe => {
+                if native_vars_set {
+                    warnings.push(format!(
+                        "vault.backend = bw-serve: {ENV_VAULT_CLIENT_ID} and \
+                         {ENV_VAULT_CLIENT_SECRET} are ignored (they belong to the native backend)"
+                    ));
+                }
+            }
+        }
+        Ok(warnings)
     }
 }
 
@@ -743,6 +937,16 @@ impl Config {
 
         cfg.notify.tokens = NotifyTokens::from_env()?;
 
+        let notes = cfg.vault.resolve_aliases(&mut cfg.ui);
+        for note in &notes {
+            tracing::warn!("{note}");
+        }
+        // The API key matters to the native backend only. In bw-serve mode
+        // the variables are not read (a stale `_FILE` must not stop startup).
+        if cfg.vault.backend == VaultBackend::Native {
+            cfg.vault.credentials = VaultCredentials::from_env()?;
+        }
+
         cfg.validate()?;
 
         Ok(cfg)
@@ -802,6 +1006,17 @@ impl Config {
         self.events.validate()?;
         self.ui.validate()?;
         self.notify.validate()?;
+        let native_vars_set = [ENV_VAULT_CLIENT_ID, ENV_VAULT_CLIENT_SECRET]
+            .iter()
+            .any(|n| {
+                std::env::var_os(n).is_some() || std::env::var_os(format!("{n}_FILE")).is_some()
+            });
+        for warning in self
+            .vault
+            .validate(self.bw_serve_url != default_bw_serve_url(), native_vars_set)?
+        {
+            tracing::warn!("{warning}");
+        }
 
         if self.tls_enabled {
             if self.tls_cert_file.is_none() {
@@ -850,6 +1065,7 @@ mod tests {
             events: Default::default(),
             ui: Default::default(),
             notify: Default::default(),
+            vault: Default::default(),
         }
     }
 
@@ -1436,5 +1652,205 @@ file_keep = 3
         cfg.ui.vaultwarden_url = "garbage".into();
         cfg.ui.session_idle_minutes = 0;
         assert!(cfg.validate().is_ok());
+    }
+
+    // ── [vault] ───────────────────────────────────────────────────────────────
+
+    fn vault_creds(id: Option<&str>, secret: Option<&str>) -> VaultCredentials {
+        VaultCredentials {
+            client_id: id.map(|v| Zeroizing::new(v.to_string())),
+            client_secret: secret.map(|v| Zeroizing::new(v.to_string())),
+        }
+    }
+
+    #[test]
+    fn vault_defaults_to_bw_serve_and_the_documented_url() {
+        let v = VaultConfig::default();
+        assert_eq!(v.backend, VaultBackend::BwServe);
+        assert_eq!(v.url, "https://vaultwarden");
+        assert_eq!(v.ca_file, "");
+        assert_eq!(VaultBackend::Native.as_str(), "native");
+        assert_eq!(VaultBackend::BwServe.as_str(), "bw-serve");
+        assert!(base_config(UnlockMode::Manual).validate().is_ok());
+    }
+
+    #[test]
+    fn vault_backend_comes_from_the_file_or_the_environment() {
+        let v: VaultConfig =
+            serde_json::from_str(r#"{"backend":"native","url":"https://vw.example"}"#).unwrap();
+        assert_eq!(v.backend, VaultBackend::Native);
+        assert_eq!(v.url, "https://vw.example");
+        assert!(serde_json::from_str::<VaultConfig>(r#"{"backend":"nope"}"#).is_err());
+
+        let mut env = std::collections::HashMap::new();
+        env.insert("FERROWARDEN_UNLOCK_MODE".to_string(), "manual".to_string());
+        env.insert(
+            "FERROWARDEN_VAULT__BACKEND".to_string(),
+            "native".to_string(),
+        );
+        env.insert(
+            "FERROWARDEN_VAULT__CA_FILE".to_string(),
+            "/ca/ca.crt".to_string(),
+        );
+        // The API key variables share the prefix: they must be ignored here.
+        env.insert(
+            "FERROWARDEN_VAULT_CLIENT_SECRET".to_string(),
+            "not-a-setting".to_string(),
+        );
+        let cfg: Config = config::Config::builder()
+            .add_source(
+                config::Environment::with_prefix("FERROWARDEN")
+                    .prefix_separator("_")
+                    .separator("__")
+                    .ignore_empty(true)
+                    .source(Some(env)),
+            )
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert_eq!(cfg.vault.backend, VaultBackend::Native);
+        assert_eq!(cfg.vault.ca_file, "/ca/ca.crt");
+        assert!(cfg.vault.credentials.client_secret.is_none());
+    }
+
+    #[test]
+    fn native_mode_needs_a_valid_url_and_the_api_key() {
+        let native = |url: &str, id: Option<&str>, secret: Option<&str>| {
+            let mut cfg = base_config(UnlockMode::Manual);
+            cfg.vault.backend = VaultBackend::Native;
+            cfg.vault.url = url.to_string();
+            cfg.vault.credentials = vault_creds(id, secret);
+            cfg.validate()
+        };
+        assert!(native("https://vaultwarden", Some("i"), Some("s")).is_ok());
+        assert!(native("http://localhost:8000", Some("i"), Some("s")).is_ok());
+        for bad in [
+            "http://vaultwarden",
+            "ftp://x",
+            "not a url",
+            "https://vw/?a=b",
+            "https://vw/#f",
+        ] {
+            let err = native(bad, Some("i"), Some("s")).unwrap_err().to_string();
+            assert!(err.contains("vault.url"), "{bad}: {err}");
+        }
+        for (id, secret) in [(None, Some("s")), (Some("i"), None), (None, None)] {
+            let err = native("https://vaultwarden", id, secret)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(ENV_VAULT_CLIENT_ID), "{err}");
+            assert!(err.contains(ENV_VAULT_CLIENT_SECRET), "{err}");
+        }
+    }
+
+    #[test]
+    fn bw_serve_mode_does_not_need_or_check_the_native_settings() {
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.vault.url = "http://not-https-and-never-used".to_string();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn ignored_settings_produce_warnings_in_either_mode() {
+        let mut v = VaultConfig::default();
+        assert!(v.validate(false, false).unwrap().is_empty());
+        let w = v.validate(false, true).unwrap();
+        assert!(w[0].contains("ignored"), "{w:?}");
+        v.backend = VaultBackend::Native;
+        v.credentials = vault_creds(Some("i"), Some("s"));
+        assert!(v.validate(false, true).unwrap().is_empty());
+        let w = v.validate(true, true).unwrap();
+        assert!(w[0].contains("bw_serve_url is ignored"), "{w:?}");
+    }
+
+    #[test]
+    fn the_api_key_comes_from_the_environment_or_a_file_and_is_redacted() {
+        let load = |vars: &[(&str, &str)], files: &[(&str, &str)]| {
+            let vars: std::collections::HashMap<String, String> = vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let files: std::collections::HashMap<String, String> = files
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            VaultCredentials::load(
+                |n| vars.get(n).cloned(),
+                |p| {
+                    files
+                        .get(p.to_str().unwrap())
+                        .map(|v| v.clone().into_bytes())
+                        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+                },
+            )
+        };
+        let c = load(
+            &[
+                ("FERROWARDEN_VAULT_CLIENT_ID_FILE", "/run/secrets/id"),
+                ("FERROWARDEN_VAULT_CLIENT_SECRET", "direct-secret-value"),
+            ],
+            &[("/run/secrets/id", "user.abc\n")],
+        )
+        .unwrap();
+        assert_eq!(c.client_id.as_ref().unwrap().as_str(), "user.abc");
+        assert_eq!(
+            c.client_secret.as_ref().unwrap().as_str(),
+            "direct-secret-value"
+        );
+        // Never in Debug output.
+        let dbg = format!("{c:?}");
+        assert!(!dbg.contains("direct-secret-value") && !dbg.contains("user.abc"));
+        assert!(dbg.contains("[redacted]"));
+        // A missing file is an error that names the variable, not the value.
+        let err = load(&[("FERROWARDEN_VAULT_CLIENT_ID_FILE", "/nope")], &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("FERROWARDEN_VAULT_CLIENT_ID_FILE"), "{err}");
+        // Nothing set: both absent.
+        let none = load(&[], &[]).unwrap();
+        assert!(none.client_id.is_none() && none.client_secret.is_none());
+    }
+
+    #[test]
+    fn deprecated_ui_settings_are_aliases_for_the_vault_settings() {
+        // Only the old names set: they are adopted, with a deprecation note.
+        let mut vault = VaultConfig::default();
+        let mut ui = UiConfig {
+            vaultwarden_url: "https://old.example".to_string(),
+            vaultwarden_ca_file: "/ca/old.crt".to_string(),
+            ..UiConfig::default()
+        };
+        let notes = vault.resolve_aliases(&mut ui);
+        assert_eq!(vault.url, "https://old.example");
+        assert_eq!(vault.ca_file, "/ca/old.crt");
+        assert_eq!(notes.len(), 2);
+        assert!(notes.iter().all(|n| n.contains("deprecated")));
+
+        // New names win when both are set and differ.
+        let mut vault = VaultConfig {
+            url: "https://new.example".to_string(),
+            ca_file: "/ca/new.crt".to_string(),
+            ..VaultConfig::default()
+        };
+        let mut ui = UiConfig {
+            vaultwarden_url: "https://old.example".to_string(),
+            vaultwarden_ca_file: "/ca/old.crt".to_string(),
+            ..UiConfig::default()
+        };
+        let notes = vault.resolve_aliases(&mut ui);
+        assert_eq!(vault.url, "https://new.example");
+        assert_eq!(ui.vaultwarden_url, "https://new.example", "written back");
+        assert_eq!(ui.vaultwarden_ca_file, "/ca/new.crt");
+        assert_eq!(notes.len(), 2);
+
+        // Only the new names, or nothing: no notes.
+        let mut vault = VaultConfig {
+            ca_file: "/ca/new.crt".to_string(),
+            ..VaultConfig::default()
+        };
+        let mut ui = UiConfig::default();
+        assert!(vault.resolve_aliases(&mut ui).is_empty());
+        assert_eq!(ui.vaultwarden_ca_file, "/ca/new.crt");
     }
 }

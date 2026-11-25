@@ -46,7 +46,9 @@ services:
   vaultwarden:
     # Pinned: bw CLI 2026.11.0 (see docker/bw-cli.Dockerfile) is verified
     # against this release. Upgrade both deliberately and re-run the tests.
-    image: vaultwarden/server:1.37.5
+    # VAULTWARDEN_VERSION selects another release: CI runs the equivalence
+    # suite against the previous minor (.github/workflows/test.yml).
+    image: vaultwarden/server:${VAULTWARDEN_VERSION:-1.37.5}
     restart: unless-stopped
     # Same as production: the only hardening Vaultwarden gets (it binds 443 as root).
     security_opt:
@@ -176,8 +178,8 @@ services:
       # HTTP, hence insecure_http; never do this outside a test stack.
       FERROWARDEN_UI__BIND: "0.0.0.0:3001"
       FERROWARDEN_UI__INSECURE_HTTP: "true"
-      FERROWARDEN_UI__VAULTWARDEN_URL: "https://vaultwarden"
-      FERROWARDEN_UI__VAULTWARDEN_CA_FILE: "/ca-public/ca.crt"
+      FERROWARDEN_VAULT__URL: "https://vaultwarden"
+      FERROWARDEN_VAULT__CA_FILE: "/ca-public/ca.crt"
       # Push notifications (docs/notifications.md) to the mock API's second
       # network alias, which records them in a log of their own. Plain HTTP is
       # fine on this private test network. The token comes from a test secret
@@ -206,6 +208,75 @@ services:
     healthcheck:
       # The image has no curl: the binary checks itself (GET /health on its own
       # port; TLS verified against tls_cert_file when the TLS overlay is on).
+      test: ["CMD", "/app/ferrowarden", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── Ferrowarden, native vault backend ────────────────────────────────────────
+  # The same image and the same hardening as `ferrowarden`, reading the vault
+  # itself (vault.backend = native, docs/native-vault.md) instead of through
+  # bw serve. It runs next to the bw serve instance, against the same
+  # Vaultwarden account, so the equivalence test (tests/equivalence.rs) can
+  # compare the two. Its own key volume: agent keys are not shared.
+  #   ports 3003 (API) and 3004 (admin UI); bw-serve is not involved.
+  ferrowarden-native:
+    build: .
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    pids_limit: 256
+    mem_limit: 1g
+    secrets:
+      - ferrowarden_admin_key
+      - bw_master_password
+      - bw_client_id
+      - bw_client_secret
+      - notify_webhook_token
+    volumes:
+      - ferrowarden-native-keys:/data
+      - internal-ca-public:/ca-public:ro
+    environment:
+      FERROWARDEN_VAULT__BACKEND: "native"
+      FERROWARDEN_VAULT__URL: "https://vaultwarden"
+      FERROWARDEN_VAULT__CA_FILE: "/ca-public/ca.crt"
+      FERROWARDEN_VAULT_CLIENT_ID_FILE: "/run/secrets/bw_client_id"
+      FERROWARDEN_VAULT_CLIENT_SECRET_FILE: "/run/secrets/bw_client_secret"
+      FERROWARDEN_UNLOCK_MODE: "file"
+      FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
+      FERROWARDEN_BIND_ADDR: "0.0.0.0:3000"
+      FERROWARDEN_ADMIN_KEY_FILE: "/run/secrets/ferrowarden_admin_key"
+      FERROWARDEN_KEYS_FILE: "/data/agent_keys.json"
+      FERROWARDEN_TLS_ENABLED: "false"
+      FERROWARDEN_ALLOWED_TARGETS: "mock-api,notify-sink"
+      FERROWARDEN_REFRESH_INTERVAL_SECS: "30"
+      FERROWARDEN_AGENT_RATE_LIMIT_BURST: "1000"
+      FERROWARDEN_ADMIN_RATE_LIMIT_BURST: "1000"
+      FERROWARDEN_EVENTS__FILE: "/data/events/events.jsonl"
+      FERROWARDEN_UI__BIND: "0.0.0.0:3001"
+      FERROWARDEN_UI__INSECURE_HTTP: "true"
+      FERROWARDEN_NOTIFY__WEBHOOK_URL: "http://notify-sink:7777/notify"
+      FERROWARDEN_NOTIFY__ALLOW_HTTP: "true"
+      FERROWARDEN_NOTIFY_WEBHOOK_TOKEN_FILE: "/run/secrets/notify_webhook_token"
+      FERROWARDEN_NOTIFY__EVENTS: "blocked,auth_failure,vault,system"
+      FERROWARDEN_NOTIFY__MIN_INTERVAL_SECS: "2"
+      FERROWARDEN_NOTIFY__MAX_PER_HOUR: "100000"
+    networks:
+      - vault-internal
+      - test-net
+    ports:
+      - "${FERROWARDEN_TEST_PUBLISH:-127.0.0.1}:3003:3000"
+      - "${FERROWARDEN_TEST_PUBLISH:-127.0.0.1}:3004:3001"
+    depends_on:
+      internal-certs:
+        condition: service_completed_successfully
+      vaultwarden:
+        condition: service_started
+    healthcheck:
       test: ["CMD", "/app/ferrowarden", "healthcheck"]
       interval: 5s
       timeout: 5s
@@ -315,6 +386,7 @@ volumes:
   # Public CA certificate only (see internal-certs); mounted into ferrowarden.
   internal-ca-public:
   ferrowarden-keys:
+  ferrowarden-native-keys:
 
 secrets:
   bw_client_id:

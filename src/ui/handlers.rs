@@ -39,6 +39,7 @@ use crate::ui::web::{
     PENDING_COOKIE, PENDING_COOKIE_MAX_AGE, SESSION_COOKIE,
 };
 use crate::ui::{lock, UiState};
+use crate::vault::Vault;
 
 // ── Fixed texts ───────────────────────────────────────────────────────────────
 
@@ -644,6 +645,7 @@ pub(super) async fn status_page(
         (keys.len(), keys.values().filter(|k| !k.policy_set).count())
     };
     let last_sync = ui
+        .app
         .vault
         .status()
         .await
@@ -683,6 +685,7 @@ pub(super) async fn status_page(
             nav: Some(nav),
             account_email: &email,
             vault_locked,
+            vault_backend: ui.app.vault.name(),
             credential_count,
             last_sync: &last_sync,
             version: env!("CARGO_PKG_VERSION"),

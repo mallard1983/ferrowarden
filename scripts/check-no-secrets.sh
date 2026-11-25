@@ -8,14 +8,19 @@
 #   - passwords, notes, custom field values and TOTP seeds from
 #     tests/seed/credentials.json
 #   - the test agent key, admin key and notifier webhook token from .env.test
+#     (and the native instance's agent key from .env.test.native, if present)
 #   - the vault master password from secrets/bw_master_password (if present)
+#   - the Vaultwarden API key (secrets/bw_client_id, secrets/bw_client_secret):
+#     the native backend holds it, so it must never reach a log or an event
 #   - agent tokens the integration tests created during the run, from
 #     target/integration-secrets.txt (or $FERROWARDEN_GATE_EXTRA_SECRETS_FILE)
 # then greps (fixed-string) for each of them in
-#   - `docker compose -f docker-compose.test.yml logs ferrowarden`
+#   - `docker compose -f docker-compose.test.yml logs <service>`
 #   - the event file(s) copied out of the container with `docker compose cp`
 #     (docker-compose.test.yml enables the file sink at
 #     /data/events/events.jsonl)
+# for both Ferrowarden instances: `ferrowarden` (bw serve) and
+# `ferrowarden-native` (the native vault backend).
 #   - any extra files given as arguments
 # and exits non-zero if any value appears. Secret values are never printed:
 # a hit is reported by its label (e.g. "test_api_token: value") only.
@@ -26,6 +31,8 @@
 #
 # Usage: scripts/check-no-secrets.sh [extra-file ...]
 #   FERROWARDEN_GATE_SKIP_DOCKER=1  scan only the extra files (self-test)
+#   FERROWARDEN_GATE_SERVICES="a b" the compose services to scan (default:
+#                                   "ferrowarden ferrowarden-native")
 
 set -euo pipefail
 # Git Bash on Windows would otherwise rewrite the container path below.
@@ -37,6 +44,8 @@ COMPOSE_FILE="docker-compose.test.yml"
 SEED_FILE="tests/seed/credentials.json"
 ENV_FILE=".env.test"
 MASTER_PW_FILE="secrets/bw_master_password"
+NATIVE_ENV_FILE=".env.test.native"
+SERVICES="${FERROWARDEN_GATE_SERVICES:-ferrowarden ferrowarden-native}"
 CONTAINER_EVENTS_DIR="/data/events"
 
 work="$(mktemp -d)"
@@ -61,7 +70,7 @@ secrets="$work/secrets.tsv"
 "$PYTHON" -I - "$SEED_FILE" <<'PY' | tr -d '\r' > "$secrets"
 import json, sys
 
-sys.stdout.reconfigure(newline="\n")  # no CRLF on Windows: it would break the match
+sys.stdout.reconfigure(newline="\n", encoding="utf-8")  # no CRLF on Windows: it would break the match
 
 MIN_LEN = 6  # shorter fragments would match ordinary text
 
@@ -101,6 +110,17 @@ if [ -f "$MASTER_PW_FILE" ]; then
     v="$(tr -d '\r\n' < "$MASTER_PW_FILE")"
     [ -z "$v" ] || printf 'bw_master_password\t%s\n' "$v" >> "$secrets"
 fi
+# The native instance's agent key, and the Vaultwarden API key it holds.
+if [ -f "$NATIVE_ENV_FILE" ]; then
+    v="$(sed -n 's/^FERROWARDEN_TEST_AGENT_KEY=//p' "$NATIVE_ENV_FILE" | head -n 1 | tr -d '\r')"
+    [ -z "$v" ] || printf 'native_agent_key\t%s\n' "$v" >> "$secrets"
+fi
+for f in bw_client_id bw_client_secret; do
+    if [ -f "secrets/$f" ]; then
+        v="$(tr -d '\r\n' < "secrets/$f")"
+        [ -z "$v" ] || printf '%s\t%s\n' "$f" "$v" >> "$secrets"
+    fi
+done
 
 # Secrets generated during the run (agent tokens created through the UI by the
 # integration tests): one value per line, in a file the tests write. Set
@@ -130,21 +150,23 @@ grep -qF -e "$canary" -- "$work/canary.txt" || fail "self-test failed: a known s
 # ── 2. Collect the output to scan ────────────────────────────────────────────
 scan_files=()
 if [ "${FERROWARDEN_GATE_SKIP_DOCKER:-}" != "1" ]; then
-    docker compose -f "$COMPOSE_FILE" logs --no-color ferrowarden > "$work/container.log" 2>&1 \
-        || fail "could not read the ferrowarden container logs (is the test stack up?)"
-    # The gate must not pass vacuously: the log has to contain events.
-    grep -qF 'ferrowarden.security' "$work/container.log" \
-        || fail "container log contains no security events; nothing meaningful to scan"
-    scan_files+=("$work/container.log")
+    for service in $SERVICES; do
+        docker compose -f "$COMPOSE_FILE" logs --no-color "$service" > "$work/$service.log" 2>&1 \
+            || fail "could not read the $service container logs (is the test stack up?)"
+        # The gate must not pass vacuously: the log has to contain events.
+        grep -qF 'ferrowarden.security' "$work/$service.log" \
+            || fail "$service log contains no security events; nothing meaningful to scan"
+        scan_files+=("$work/$service.log")
 
-    mkdir "$work/events"
-    docker compose -f "$COMPOSE_FILE" cp "ferrowarden:$CONTAINER_EVENTS_DIR/." "$(native_path "$work/events")" >/dev/null 2>&1 \
-        || fail "could not copy $CONTAINER_EVENTS_DIR out of the ferrowarden container (file sink not enabled?)"
-    [ -s "$work/events/events.jsonl" ] \
-        || fail "events.jsonl is missing or empty; nothing meaningful to scan"
-    grep -qF 'ferrowarden.security' "$work/events/events.jsonl" \
-        || fail "events.jsonl contains no security events"
-    for f in "$work"/events/*; do scan_files+=("$f"); done
+        mkdir "$work/events-$service"
+        docker compose -f "$COMPOSE_FILE" cp "$service:$CONTAINER_EVENTS_DIR/." "$(native_path "$work/events-$service")" >/dev/null 2>&1 \
+            || fail "could not copy $CONTAINER_EVENTS_DIR out of the $service container (file sink not enabled?)"
+        [ -s "$work/events-$service/events.jsonl" ] \
+            || fail "$service: events.jsonl is missing or empty; nothing meaningful to scan"
+        grep -qF 'ferrowarden.security' "$work/events-$service/events.jsonl" \
+            || fail "$service: events.jsonl contains no security events"
+        for f in "$work/events-$service"/*; do scan_files+=("$f"); done
+    done
 fi
 for f in "$@"; do
     [ -f "$f" ] || fail "extra file not found: $f"

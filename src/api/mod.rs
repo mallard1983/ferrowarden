@@ -250,6 +250,7 @@ mod tests {
             events: Default::default(),
             ui: Default::default(),
             notify: Default::default(),
+            vault: Default::default(),
         };
         let state = Arc::new(AppState::new(cfg, Arc::new(EventLog::buffer_only(100))));
         (router(state.clone()), state)
@@ -802,7 +803,7 @@ mod tests {
 
     // ── Per-key policy ────────────────────────────────────────────────────────
 
-    use crate::vault::client::CredentialEntry;
+    use crate::vault::model::CredentialEntry;
     use serde_json::json;
 
     const ADMIN: [(&str, &str); 1] = [("x-admin-key", ADMIN_KEY)];
@@ -1451,6 +1452,34 @@ mod tests {
         let e = serde_json::to_value(crate::startup_event(&state.config, 3, 2)).unwrap();
         assert_eq!(e["ferrowarden"]["details"]["keys_without_policy"], 2);
         assert_eq!(e["ferrowarden"]["details"]["agent_key_count"], 3);
+    }
+
+    #[tokio::test]
+    async fn startup_event_and_admin_status_name_the_vault_backend() {
+        let (_app, state) = app_with_state("");
+        let e = serde_json::to_value(crate::startup_event(&state.config, 0, 0)).unwrap();
+        assert_eq!(e["ferrowarden"]["details"]["vault_backend"], "bw-serve");
+        let mut config = state.config.clone();
+        config.vault.backend = crate::config::VaultBackend::Native;
+        let e = serde_json::to_value(crate::startup_event(&config, 0, 0)).unwrap();
+        assert_eq!(e["ferrowarden"]["details"]["vault_backend"], "native");
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/admin/status")
+                    .header("X-Admin-Key", "a".repeat(32))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 4096).await.unwrap())
+                .unwrap();
+        assert_eq!(body["vault_backend"], "bw-serve");
     }
     // ── POST /v1/admin/notify/test ────────────────────────────────────────────
 

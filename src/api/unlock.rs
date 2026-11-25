@@ -11,7 +11,7 @@ use crate::events::{emit_rejected, Action, Outcome, Reason, SecurityEvent};
 use crate::middleware::request_context::RequestContext;
 use crate::state::AppState;
 use crate::vault::refresh::refresh_credentials;
-use crate::vault::unlock_vault;
+use crate::vault::Vault;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,7 +62,7 @@ pub async fn unlock(
     }
 
     let result = async {
-        unlock_vault(&state.config.bw_serve_url, password).await?;
+        state.vault.unlock(password).await?;
         // Sync and refresh the credential cache now that the vault is unlocked
         refresh_credentials(&state).await
     }

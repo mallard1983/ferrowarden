@@ -1,10 +1,11 @@
-//! Credential cache refresh and lock-state tracking.
+//! Credential cache refresh and lock-state tracking, for either backend.
 //!
 //! bw serve keeps a local copy of the vault that is only updated by
-//! `POST /sync`, and it can lock or restart independently of ferrowarden.
-//! The refresher periodically syncs, reloads the credential cache and keeps
-//! ferrowarden's lock state honest. In file unlock mode it also re-unlocks
-//! bw serve after a restart by re-reading the password file.
+//! `POST /sync`, and it can lock or restart independently of ferrowarden; the
+//! native backend holds its own copy and locks itself when the account's key
+//! changes. The refresher periodically syncs, reloads the credential cache
+//! and keeps ferrowarden's lock state honest. In file unlock mode it also
+//! re-unlocks the vault after it was locked by re-reading the password file.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,24 +14,25 @@ use crate::config::UnlockMode;
 use crate::error::{FerroError, FerroResult};
 use crate::events::{Action, Outcome, Reason, SecurityEvent};
 use crate::state::AppState;
-use crate::vault::{read_password_file, unlock_vault, VaultClient};
+use crate::vault::{read_password_file, Vault};
 
-/// Sync bw serve with Vaultwarden and reload the credential cache.
-/// A failed sync (e.g. Vaultwarden briefly down) is logged and the cached
-/// copy in bw serve is used instead. Marks the state locked if bw serve
-/// reports the vault locked.
+/// Sync the vault backend with Vaultwarden and reload the credential cache.
+/// A failed sync (e.g. Vaultwarden briefly down) is logged and the backend's
+/// cached copy is used instead. Marks the state locked if the backend reports
+/// the vault locked.
 ///
-/// Emits `vault_sync`: always on failure, and on success only when the
-/// credential count changed.
+/// Emits `vault_sync`: always on failure, and on success when the credential
+/// count changed or the sync left items out (the native backend, with counts
+/// by reason).
 pub async fn refresh_credentials(state: &AppState) -> FerroResult<()> {
-    let vault = VaultClient::new(state.config.bw_serve_url.clone());
+    let vault = &*state.vault;
 
     if let Err(e) = vault.sync().await {
         if matches!(e, FerroError::VaultLocked) {
-            state.set_locked("bw_serve_locked").await;
+            state.set_locked(vault.lock_cause()).await;
             return Err(e);
         }
-        tracing::warn!(error = %e, "bw serve sync failed; using its cached vault copy");
+        tracing::warn!(error = %e, backend = vault.name(), "Vault sync failed; using the cached vault copy");
         emit_sync_failed(state, "sync");
     }
 
@@ -47,22 +49,35 @@ pub async fn refresh_credentials(state: &AppState) -> FerroResult<()> {
     };
 
     match listed {
-        Ok(map) => {
+        Ok(listing) => {
+            let map = listing.map;
             let count = map.len();
             let previous = std::mem::replace(&mut *state.credentials.write().await, map).len();
             tracing::debug!(credential_count = count, "Credential cache refreshed");
-            if count != previous {
-                state.events.emit(
-                    SecurityEvent::new(Action::VaultSync)
-                        .detail("credential_count", count)
-                        .detail("previous", previous),
-                );
+            let excluded = listing.excluded.filter(|r| !r.is_empty());
+            if count != previous || excluded.is_some() {
+                let mut event = SecurityEvent::new(Action::VaultSync)
+                    .detail("credential_count", count)
+                    .detail("previous", previous);
+                if let Some(report) = &excluded {
+                    // Counts by reason and the (random) ids of the items; never
+                    // names or values.
+                    tracing::warn!(
+                        excluded = report.total(),
+                        "Vault items were left out because they could not be read safely"
+                    );
+                    event = event
+                        .detail("excluded", report.total())
+                        .detail("excluded_reasons", serde_json::json!(report.counts))
+                        .detail("excluded_ids", serde_json::json!(report.ids));
+                }
+                state.events.emit(event);
             }
             Ok(())
         }
         Err(e) => {
             if matches!(e, FerroError::VaultLocked) {
-                state.set_locked("bw_serve_locked").await;
+                state.set_locked(vault.lock_cause()).await;
             } else {
                 emit_sync_failed(state, "list");
             }
@@ -80,7 +95,7 @@ fn emit_sync_failed(state: &AppState, stage: &'static str) {
     );
 }
 
-/// Unlock bw serve using the configured password file (file mode only),
+/// Unlock the vault using the configured password file (file mode only),
 /// then refresh the cache and mark the state unlocked. Emits `vault_unlock`
 /// with the given `mode` (`"file"` at startup, `"reunlock"` afterwards).
 pub async fn unlock_from_file(state: &AppState, mode: &'static str) -> FerroResult<()> {
@@ -100,13 +115,13 @@ async fn unlock_from_file_inner(state: &AppState) -> FerroResult<()> {
         .as_ref()
         .ok_or_else(|| FerroError::Config("unlock_file is not set".to_string()))?;
     let password = read_password_file(path)?;
-    unlock_vault(&state.config.bw_serve_url, password).await?;
+    state.vault.unlock(password).await?;
     refresh_credentials(state).await?;
     state.set_unlocked().await;
     Ok(())
 }
 
-/// File mode only: unlock bw serve again right away, instead of waiting for
+/// File mode only: unlock the vault again right away, instead of waiting for
 /// the next refresh — e.g. when a request finds the vault locked because bw
 /// serve restarted. Attempts are serialized, and a caller that waited while
 /// another task re-unlocked simply sees the vault unlocked. Returns true when
@@ -150,7 +165,10 @@ pub fn spawn_refresher(state: Arc<AppState>) {
             match refresh_credentials(&state).await {
                 Ok(()) => {}
                 Err(FerroError::VaultLocked) => {
-                    tracing::warn!("bw serve reports the vault is locked; marking locked");
+                    tracing::warn!(
+                        backend = state.vault.name(),
+                        "The vault is locked; marking it locked"
+                    );
                     reunlock_if_possible(&state).await;
                 }
                 Err(e) => tracing::warn!(error = %e, "Credential refresh failed"),

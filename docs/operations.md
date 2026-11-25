@@ -6,9 +6,9 @@ Ferrowarden starts locked regardless of mode. The vault must be unlocked before 
 
 ### File Mode (`unlock_mode = "file"`)
 
-Ferrowarden reads the master password from the path specified in `unlock_file`, sends it to `bw serve`'s `POST /unlock` endpoint, zeroes the value from memory, and then begins serving.
+Ferrowarden reads the master password from the path specified in `unlock_file`, sends it to `bw serve`'s `POST /unlock` endpoint (with the native backend: logs in with the API key, syncs, and derives the vault keys from it), zeroes the value from memory, and then begins serving.
 
-This all happens before the HTTP server starts accepting connections. If the unlock fails (wrong password, bw serve unreachable), Ferrowarden exits with an error. No requests are possible until the issue is corrected and the process is restarted.
+This all happens before the HTTP server starts accepting connections. If the unlock fails (wrong password, bw serve or Vaultwarden unreachable, the API key rejected), Ferrowarden exits with an error. No requests are possible until the issue is corrected and the process is restarted.
 
 **Use this mode when:**
 - Running in Docker with a Docker secret or a bind-mounted password file
@@ -33,6 +33,18 @@ curl -X POST https://<ferrowarden-host>:3000/v1/unlock \
 - You want explicit human confirmation per boot (audit/compliance requirement)
 - You prefer the master password to never exist on disk at the deployment host
 - You can tolerate a brief period after restart where the proxy is unavailable
+
+---
+
+## Switching the vault backend
+
+`vault.backend` is `bw-serve` (default) or `native` ([native-vault.md](native-vault.md)). Switching is a configuration change and a restart; neither backend stores anything between runs.
+
+1. **To native.** Set `FERROWARDEN_VAULT__BACKEND=native`, give the ferrowarden service the `bw_client_id` / `bw_client_secret` secrets and set `FERROWARDEN_VAULT_CLIENT_ID_FILE` and `FERROWARDEN_VAULT_CLIENT_SECRET_FILE` to their paths, and check `FERROWARDEN_VAULT__URL` / `FERROWARDEN_VAULT__CA_FILE` (`ui.vaultwarden_*` still work as deprecated aliases). The `bw-serve` service can then be removed. The unlock mode is unchanged.
+2. **Check.** `GET /v1/admin/status` reports `"vault_backend": "native"`, so does the startup event and the admin UI's status page. A `vault_sync` event with an `excluded` count means some items could not be read safely and were left out: see its `excluded_reasons`.
+3. **Back.** Set `FERROWARDEN_VAULT__BACKEND=bw-serve` (or remove it) and start `bw-serve` again.
+
+Settings of the other backend are ignored, and Ferrowarden logs a warning if it sees them. With the native backend, the account's password or key changing locks the vault (`vault_lock`, cause `vault_key_changed` or `security_stamp_changed`): in file mode update the password file, then restart.
 
 ---
 
@@ -276,7 +288,7 @@ NEW_KEY="NewKeyHere"
 curl -s https://<ferrowarden-host>:3000/v1/admin/status \
   -H "X-Admin-Key: $NEW_KEY" \
   --cacert certs/server.crt
-# Should return: {"locked":false,"credential_count":N,"agent_key_count":N}
+# Should return: {"locked":false,"vault_backend":"bw-serve","credential_count":N,"agent_key_count":N}
 ```
 
 **5. Update any scripts or automation** that use the old admin key.
@@ -414,6 +426,7 @@ curl https://<ferrowarden-host>:3000/v1/admin/status \
 ```json
 {
   "locked": false,
+  "vault_backend": "bw-serve",
   "credential_count": 12,
   "agent_key_count": 2
 }
@@ -535,7 +548,7 @@ The optional UI is described in [admin-ui.md](admin-ui.md). Common problems:
 
 - **"HTTPS is required" instead of the sign-in form** — the request did not arrive over HTTPS. Serve the UI behind a TLS proxy that sends `X-Forwarded-Proto: https` and list the proxy in `trusted_proxies`, enable Ferrowarden's own TLS, or (local testing only) set `ui.insecure_http`.
 - **"Too many attempts"** — the per-IP (5 failures) or global (10 failures) lockout is active for 15 minutes. Behind a proxy, check `trusted_proxies`: without it every client looks like the proxy. Restarting Ferrowarden clears the lockouts.
-- **"Ferrowarden could not complete the sign-in with Vaultwarden"** — `bw serve` is not logged in (the account email comes from it), Vaultwarden is unreachable at `ui.vaultwarden_url`, or its certificate is not trusted. Check `docker compose exec ferrowarden ls -l /ca-public` shows `ca.crt` (run `docker compose up -d` so the `internal-certs` one-shot populates `internal-ca-public`), and set `FERROWARDEN_LOG_LEVEL=ferrowarden=debug` to see Vaultwarden's own message in the log.
+- **"Ferrowarden could not complete the sign-in with Vaultwarden"** — `bw serve` is not logged in (the account email comes from it), Vaultwarden is unreachable at `vault.url`, or its certificate is not trusted. Check `docker compose exec ferrowarden ls -l /ca-public` shows `ca.crt` (run `docker compose up -d` so the `internal-certs` one-shot populates `internal-ca-public`), and set `FERROWARDEN_LOG_LEVEL=ferrowarden=debug` to see Vaultwarden's own message in the log.
 - **"Request rejected"** — a CSRF or same-origin check failed, for example because the proxy rewrites `Host` without sending `X-Forwarded-Host`, or the page was open for over 15 minutes before submitting.
 - **"This account requires a second factor that the admin UI cannot complete"** — the account's only second factors are WebAuthn, Duo or a recovery code. Add an authenticator app, email or YubiKey in the web vault.
 
