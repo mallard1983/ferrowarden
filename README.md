@@ -10,7 +10,7 @@
 
 **The credential boundary for AI agents.** Ferrowarden is a source-available credential proxy that sits alongside Vaultwarden. AI agents send requests using `{{vault:name}}` placeholders; Ferrowarden resolves credentials and forwards requests, without returning the secret values to the agent by design.
 
-Ferrowarden resolves the credential through the Bitwarden CLI's vault API (`bw serve`), makes the outbound call, and scrubs known credential values from the response. The agent uses a scoped proxy key instead of direct vault access.
+Ferrowarden resolves the credential through the Bitwarden CLI's vault API (`bw serve`; an opt-in [native backend](docs/native-vault.md) reads the vault itself, with no CLI), makes the outbound call, and scrubs known credential values from the response. The agent uses a scoped proxy key instead of direct vault access.
 
 Ferrowarden is a **sidecar to [Vaultwarden](https://github.com/dani-garcia/vaultwarden)**, not a fork or replacement vault: Vaultwarden keeps storing your credentials. Ferrowarden is an independent project and is not affiliated with or endorsed by the Vaultwarden or Bitwarden projects.
 

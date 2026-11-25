@@ -76,6 +76,25 @@ See [`.github/workflows/test.yml`](../.github/workflows/test.yml).
 
 To cut a release: update the version in `Cargo.toml` and the changelog, merge, tag `vX.Y.Z` on the merge commit, push the tag, wait for the workflow, check the draft release and publish it.
 
+## The Two Vault Backends in CI
+
+The test stack runs two Ferrowarden instances against one Vaultwarden account (see [native-vault.md](native-vault.md)): `ferrowarden` with `bw serve` (port 3000) and `ferrowarden-native` with the native backend (port 3003). The integration job therefore runs, in this order:
+
+1. the whole integration suite against the `bw serve` instance (`.env.test`);
+2. `tests/equivalence.rs`, which compares the two instances field for field (`FERROWARDEN_EQUIVALENCE_REQUIRED=1` makes an unreachable native instance a failure instead of a skip);
+3. the whole integration suite again against the native instance (`.env.test.native`: `FERROWARDEN_TEST_URL`, `FERROWARDEN_TEST_UI_URL` and the native instance's agent key). No test is skipped for the native backend. One test, `test_container_is_healthy_and_hardened`, inspects the `ferrowarden` service container whichever instance the suite targets, so in the second run it checks the `bw serve` instance again; the native container has the same hardening and health check in `docker-compose.test.yml` and is covered by the secret gate and the image checks;
+4. the MCP tests and the secret gate, which scans the logs and event files of both instances.
+
+### Previous Vaultwarden minor: not in CI yet (TODO, issue #36)
+
+`docker-compose.test.yml` takes the Vaultwarden release from `VAULTWARDEN_VERSION` (default `1.37.5`, the one the Bitwarden CLI is verified against). It was tried with `1.36.0`, the previous minor, on a separate stack:
+
+- account registration needed a fix for 1.36.0 (it returns the verification token as a JSON string; `docker/bw-register.js` now handles both), and after that the seeder, including the organisation, the per-item keys and the archived item, works unchanged;
+- the **native backend works against 1.36.0**: it unlocks, syncs and the whole integration suite passes against it (67 tests);
+- the **`bw serve` side does not**: the pinned Bitwarden CLI (2026.11.0) cannot sync a 1.36.0 vault (its SDK rejects a cipher the server sends and `bw serve` exits), so the equivalence suite has nothing to compare against there.
+
+So a job for the previous minor is left out rather than added half-working. To add it, either move to a CLI release that supports both servers, or give `scripts/dev-setup.*` a native-only mode (no `bw-serve`, no `ferrowarden` instance) and run the native integration suite there. The vault version matters to the native backend because it implements the protocol itself: until the job exists, treat a Vaultwarden upgrade as something to run `docker compose -f docker-compose.test.yml` and the equivalence suite against first.
+
 ## Secret Gate
 
 After the integration tests, the GitHub workflow runs `scripts/check-no-secrets.sh` while the stack is still up. It collects every secret the test stack knows about (passwords, notes, custom field values and TOTP seeds from `tests/seed/credentials.json`, the agent and admin keys from `.env.test`, the vault master password, and any agent token the integration tests created through the UI, which they write to `target/integration-secrets.txt`), then greps the `ferrowarden` container logs and the security event file for each of them (fixed-string) and fails if any appears. The test stack enables the file sink at `/data/events/events.jsonl` inside the container (on the `ferrowarden-keys` volume, because the root filesystem is read-only); the script copies it out with `docker compose cp`, so no host directory is mounted and host UIDs do not matter. Secret values are never printed, only the name of the leaked item. It needs `python3` (preinstalled on `ubuntu-latest`). To see it fail, pass an extra file containing a seeded password: `bash scripts/check-no-secrets.sh some-file`.

@@ -6,6 +6,8 @@
 <dl class="facts">
 <dt>Vault</dt>
 <dd>{% if vault_locked %}<span class="badge bad">Locked</span>{% else %}<span class="badge ok">Unlocked</span>{% endif %}</dd>
+<dt>Vault backend</dt>
+<dd><code>{{ vault_backend }}</code></dd>
 <dt>Credentials</dt>
 <dd>{{ credential_count }}</dd>
 <dt>Last sync</dt>

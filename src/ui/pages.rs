@@ -60,6 +60,8 @@ pub struct StatusPage<'a> {
     pub nav: Option<Nav<'a>>,
     pub account_email: &'a str,
     pub vault_locked: bool,
+    /// `bw-serve` or `native`.
+    pub vault_backend: &'a str,
     pub credential_count: usize,
     pub last_sync: &'a str,
     pub version: &'a str,
@@ -340,6 +342,7 @@ mod tests {
             nav: None,
             account_email: "<b>a@b.test</b>",
             vault_locked: false,
+            vault_backend: "native",
             credential_count: 1,
             last_sync: "never",
             version: "1",

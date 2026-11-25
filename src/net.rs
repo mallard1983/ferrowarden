@@ -196,7 +196,13 @@ impl TargetPolicy {
                 None => allowed_hosts.push(entry.to_ascii_lowercase()),
             }
         }
-        let vault = Url::parse(&cfg.bw_serve_url).ok();
+        // The vault endpoint agents may never reach: bw serve, or in native
+        // mode Vaultwarden itself (which holds the whole encrypted vault).
+        let vault_url = match cfg.vault.backend {
+            crate::config::VaultBackend::BwServe => &cfg.bw_serve_url,
+            crate::config::VaultBackend::Native => &cfg.vault.url,
+        };
+        let vault = Url::parse(vault_url).ok();
         Self {
             allow_private: cfg.allow_private_targets,
             allowed_cidrs,
@@ -442,6 +448,7 @@ mod tests {
             events: Default::default(),
             ui: Default::default(),
             notify: Default::default(),
+            vault: Default::default(),
         }
     }
 

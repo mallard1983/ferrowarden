@@ -5,7 +5,7 @@ use super::*;
 use crate::api::key_service::{self, Caller, Via};
 use crate::keys::{hash_token, load};
 use crate::middleware::request_context::RequestContext;
-use crate::vault::client::CredentialEntry;
+use crate::vault::model::CredentialEntry;
 
 const HOSTILE_CRED: &str = "\"><img src=x onerror=alert(1)>";
 const HOSTILE_KEY: &str = "<script>alert(1)</script>";

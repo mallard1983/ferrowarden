@@ -2909,9 +2909,14 @@ fn record_secret_for_gate(value: &str) {
     use std::io::Write;
     // Start from an empty file once per test run, so values of an earlier
     // run are not carried along, and no test erases another's.
+    // CI runs the suite more than once (once per vault backend) and the
+    // equivalence suite too, and sets FERROWARDEN_KEEP_GATE_SECRETS=1 so that
+    // the gate sees every run's values; it clears the file itself first.
     static FRESH: std::sync::Once = std::sync::Once::new();
     FRESH.call_once(|| {
-        let _ = std::fs::remove_file(extra_secrets_file());
+        if env::var("FERROWARDEN_KEEP_GATE_SECRETS").unwrap_or_default() != "1" {
+            let _ = std::fs::remove_file(extra_secrets_file());
+        }
     });
     let path = extra_secrets_file();
     let _ = std::fs::create_dir_all(path.parent().unwrap());

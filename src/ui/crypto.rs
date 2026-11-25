@@ -77,7 +77,11 @@ pub fn normalize_email(email: &str) -> String {
 }
 
 /// Derive the master key from the password.
-fn master_key(password: &[u8], email: &str, kdf: Kdf) -> Result<Zeroizing<[u8; 32]>, KdfError> {
+pub(crate) fn master_key(
+    password: &[u8],
+    email: &str,
+    kdf: Kdf,
+) -> Result<Zeroizing<[u8; 32]>, KdfError> {
     kdf.validate()?;
     let salt_str = normalize_email(email);
     let mut key = Zeroizing::new([0u8; 32]);

@@ -24,3 +24,6 @@ certs/*
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated test config for the native-backend instance
+.env.test.native

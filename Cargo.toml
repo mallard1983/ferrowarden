@@ -103,6 +103,21 @@ form_urlencoded = "1"
 # own and can zeroize.
 http-body-util = "0.1"
 
+# ── Native vault backend (docs/native-vault.md) ───────────────────────────────
+# Bitwarden client cryptography implemented from the published algorithm
+# descriptions with RustCrypto primitives (MIT OR Apache-2.0). No Bitwarden SDK
+# crate is used or linked: those are GPL-3.0 / Bitwarden SDK Licence.
+# AES-256-CBC (EncString type 2) with PKCS#7 padding; the MAC is HMAC-SHA256 (`hmac` above).
+# The `zeroize` features wipe the expanded AES key and the CBC state on drop.
+aes = { version = "0.9", features = ["zeroize"] }
+cbc = { version = "0.2", features = ["block-padding", "zeroize"] }
+# HKDF-Expand: the master key is stretched into the `enc` and `mac` keys.
+hkdf = "0.13"
+# RSA-OAEP (SHA-1 / SHA-256) for organisation keys. 0.10 or later only: earlier
+# releases carry RUSTSEC-2023-0071 (Marvin timing side channel).
+rsa = "0.10"
+sha1 = "0.11"
+
 # ── OpenAPI description (docs/openapi.yaml) ───────────────────────────────────
 # The hand-written spec is embedded in the binary and parsed once at startup.
 # serde_norway is the maintained fork of the archived serde_yaml (same API);
@@ -114,6 +129,10 @@ serde_norway = "0.9"
 # no macros, no OAuth). The tool schemas are written out in src/mcp/tools.rs and
 # tested against docs/openapi.yaml.
 rmcp = { version = "3.11", default-features = false, features = ["server", "transport-io"] }
+
+# Process hardening of the native vault backend (PR_SET_DUMPABLE, RLIMIT_CORE).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # The MCP bridge tests drive the server with rmcp's own client over an

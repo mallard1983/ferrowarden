@@ -21,7 +21,6 @@ use crate::proxy::{
 };
 use crate::state::AppState;
 use crate::vault::refresh::reunlock_if_possible;
-use crate::vault::VaultClient;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -177,8 +176,7 @@ async fn run_forward(
     names: &BTreeSet<Placeholder>,
 ) -> FerroResult<crate::proxy::forward::ProxyResponse> {
     let (target, plan) = prepare(state, req, names, false).await?;
-    let vault = VaultClient::new(state.config.bw_serve_url.clone());
-    let values = fetch_credentials(&plan, &vault).await?;
+    let values = fetch_credentials(&plan, &*state.vault).await?;
 
     // URL: substitute, then require the scheme/host/port to be unchanged.
     let subst_url = substitute_str(&req.url, &values);

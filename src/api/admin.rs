@@ -15,6 +15,7 @@ use crate::middleware::request_context::RequestContext;
 use crate::policy::{self, Patch};
 use crate::proxy::forward::ProxyRequest;
 use crate::state::AppState;
+use crate::vault::Vault;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -259,7 +260,8 @@ pub async fn get_audit(
 
 /// GET /v1/admin/status
 ///
-/// Return vault lock state and credential count. Admin auth required.
+/// Return vault lock state, the vault backend and the credential count.
+/// Admin auth required.
 pub async fn get_status(
     State(state): State<Arc<AppState>>,
     ctx: RequestContext,
@@ -279,6 +281,7 @@ pub async fn get_status(
 
     Ok(Json(serde_json::json!({
         "locked": locked,
+        "vault_backend": state.vault.name(),
         "credential_count": credential_count,
         "agent_key_count": key_count,
     })))

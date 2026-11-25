@@ -51,8 +51,10 @@ FERROWARDEN_UI__BIND: "0.0.0.0:3001"
 | Config key | Environment variable | Default |
 |---|---|---|
 | `ui.bind` | `FERROWARDEN_UI__BIND` | *(empty: UI disabled)* |
-| `ui.vaultwarden_url` | `FERROWARDEN_UI__VAULTWARDEN_URL` | `https://vaultwarden` |
-| `ui.vaultwarden_ca_file` | `FERROWARDEN_UI__VAULTWARDEN_CA_FILE` | *(empty; the Compose files set `/ca-public/ca.crt`)* |
+| `vault.url` (was `ui.vaultwarden_url`) | `FERROWARDEN_VAULT__URL` | `https://vaultwarden` |
+| `vault.ca_file` (was `ui.vaultwarden_ca_file`) | `FERROWARDEN_VAULT__CA_FILE` | *(empty; the Compose files set `/ca-public/ca.crt`)* |
+
+The two `ui.vaultwarden_*` names still work as deprecated aliases (a warning is logged); `vault.*` is also how the native vault backend reaches Vaultwarden ([native-vault.md](native-vault.md)). The status page shows the vault backend in use.
 | `ui.insecure_http` | `FERROWARDEN_UI__INSECURE_HTTP` | `false` |
 | `ui.session_idle_minutes` | `FERROWARDEN_UI__SESSION_IDLE_MINUTES` | `15` |
 | `ui.session_max_hours` | `FERROWARDEN_UI__SESSION_MAX_HOURS` | `8` |
@@ -70,7 +72,7 @@ At startup the `startup` event records `ui_enabled`, `ui_tls` and `ui_insecure_h
 
 ### How Ferrowarden trusts Vaultwarden
 
-The sign-in talks to Vaultwarden over HTTPS at `ui.vaultwarden_url` (host `vaultwarden` on the `vault-internal` network). That certificate comes from the stack's private CA, so Ferrowarden needs the CA certificate. It must **not** get the CA private key: anyone who holds the key can issue a certificate for `vaultwarden` and capture the master password.
+The sign-in talks to Vaultwarden over HTTPS at `vault.url` (host `vaultwarden` on the `vault-internal` network). That certificate comes from the stack's private CA, so Ferrowarden needs the CA certificate. It must **not** get the CA private key: anyone who holds the key can issue a certificate for `vaultwarden` and capture the master password.
 
 So the `internal-certs` one-shot copies **only `ca.crt`** into a second volume, `internal-ca-public`, and Ferrowarden mounts that read-only at `/ca-public`. The `internal-pki` volume, which holds `ca.key`, is never mounted into Ferrowarden:
 
@@ -81,9 +83,9 @@ docker run --rm -v ferrowarden_internal-ca-public:/ca-public:ro busybox ls -l /c
 # -rw-r--r-- 1 root root 639 ... ca.crt        <- and nothing else
 ```
 
-The copy runs on every `docker compose up` (the one-shot is re-run), so an existing deployment gets the new volume the next time you start the stack, and a regenerated CA is picked up. The file is world-readable (`0644`) because Ferrowarden runs as UID 999; the key stays `0600` in `internal-pki`. `ui.vaultwarden_ca_file` adds the CA **on top of** the public roots; certificate verification is never disabled.
+The copy runs on every `docker compose up` (the one-shot is re-run), so an existing deployment gets the new volume the next time you start the stack, and a regenerated CA is picked up. The file is world-readable (`0644`) because Ferrowarden runs as UID 999; the key stays `0600` in `internal-pki`. `vault.ca_file` adds the CA **on top of** the public roots; certificate verification is never disabled.
 
-If you run Ferrowarden without Docker, point `vaultwarden_ca_file` at your CA certificate, or leave it empty when Vaultwarden has a publicly trusted certificate. `vaultwarden_url` must be `https://` (plain `http://` is accepted for loopback addresses only, for tests).
+If you run Ferrowarden without Docker, point `vault.ca_file` at your CA certificate, or leave it empty when Vaultwarden has a publicly trusted certificate. `vault.url` must be `https://` (plain `http://` is accepted for loopback addresses only, for tests).
 
 ---
 

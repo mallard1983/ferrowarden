@@ -305,7 +305,11 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | Config key | Environment variable | Default |
 |---|---|---|
 | `bind_addr` | `FERROWARDEN_BIND_ADDR` | `0.0.0.0:3000` |
-| `bw_serve_url` | `FERROWARDEN_BW_SERVE_URL` | `http://127.0.0.1:8087` |
+| `vault.backend` | `FERROWARDEN_VAULT__BACKEND` | `bw-serve` — or `native`: Ferrowarden reads the vault itself, no bw serve ([native-vault.md](native-vault.md)) |
+| `vault.url` | `FERROWARDEN_VAULT__URL` | `https://vaultwarden` — how Ferrowarden reaches Vaultwarden (native backend, admin UI sign-in) |
+| `vault.ca_file` | `FERROWARDEN_VAULT__CA_FILE` | *(empty; the Compose files set `/ca-public/ca.crt`)* — extra CA for `vault.url`, on top of the public roots |
+| *(env or file only)* | `FERROWARDEN_VAULT_CLIENT_ID` / `_FILE`, `FERROWARDEN_VAULT_CLIENT_SECRET` / `_FILE` | Vaultwarden personal API key, **native backend only** (the same two secret files `bw serve` uses) |
+| `bw_serve_url` | `FERROWARDEN_BW_SERVE_URL` | `http://127.0.0.1:8087` — `bw-serve` backend only |
 | `unlock_mode` | `FERROWARDEN_UNLOCK_MODE` | *(required)* |
 | `unlock_file` | `FERROWARDEN_UNLOCK_FILE` | *(required in file mode)* |
 | *(env or file only)* | `FERROWARDEN_ADMIN_KEY` or `FERROWARDEN_ADMIN_KEY_FILE` | *(one required)*: the file variant names a file holding the key (the Compose files use `/run/secrets/ferrowarden_admin_key`). Ferrowarden reads the file itself and never puts the key in its environment; a plain `FERROWARDEN_ADMIN_KEY` wins if both are set |
@@ -326,12 +330,17 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `admin_rate_limit_burst` | `FERROWARDEN_ADMIN_RATE_LIMIT_BURST` | `5` — keep low; slows admin key guessing |
 | `trusted_proxies` | `FERROWARDEN_TRUSTED_PROXIES` | *(empty)* — CIDRs/IPs of reverse proxies whose `X-Forwarded-For` is trusted for rate limiting |
 | `ui.bind` | `FERROWARDEN_UI__BIND` | *(empty: admin web UI disabled)* — e.g. `0.0.0.0:3001`; see [admin-ui.md](admin-ui.md) |
-| `ui.vaultwarden_url` | `FERROWARDEN_UI__VAULTWARDEN_URL` | `https://vaultwarden` |
-| `ui.vaultwarden_ca_file` | `FERROWARDEN_UI__VAULTWARDEN_CA_FILE` | *(empty; the Compose files set `/ca-public/ca.crt`)* |
+| `ui.vaultwarden_url`, `ui.vaultwarden_ca_file` | `FERROWARDEN_UI__VAULTWARDEN_URL`, `FERROWARDEN_UI__VAULTWARDEN_CA_FILE` | **deprecated aliases** of `vault.url` and `vault.ca_file` (a warning is logged) |
 | `ui.insecure_http` | `FERROWARDEN_UI__INSECURE_HTTP` | `false` — serve the sign-in form over plain HTTP (local testing only) |
 | `ui.session_idle_minutes` | `FERROWARDEN_UI__SESSION_IDLE_MINUTES` | `15` |
 | `ui.session_max_hours` | `FERROWARDEN_UI__SESSION_MAX_HOURS` | `8` |
 | *(env only)* | `FERROWARDEN_LOG_LEVEL` | `info` — requires restart to change |
+
+---
+
+### Using the native vault backend
+
+By default Ferrowarden reads the vault through `bw serve`. To use the native backend instead (no `bw-serve` container, no Bitwarden CLI), see [native-vault.md](native-vault.md). In short: set `FERROWARDEN_VAULT__BACKEND=native`, give the ferrowarden service the `bw_client_id` and `bw_client_secret` secrets and point `FERROWARDEN_VAULT_CLIENT_ID_FILE` / `FERROWARDEN_VAULT_CLIENT_SECRET_FILE` at them, and make sure `FERROWARDEN_VAULT__CA_FILE` trusts your Vaultwarden certificate. `docker-compose.yml` has the lines ready, commented out. Read the trade-off in [security.md](security.md#18-the-native-vault-backend) first.
 
 ---
 
