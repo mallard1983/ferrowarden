@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::events::{Action, EventLog, SecurityEvent};
 use crate::keys::hash_token;
 use crate::net::TargetPolicy;
+use crate::notify::NotifyHandle;
 use crate::policy::KeyPolicy;
 use crate::vault::CredentialMap;
 
@@ -66,6 +67,10 @@ pub struct AppState {
     /// Security event stream (ring buffer + sinks) — the one emitter, also
     /// read by the admin audit endpoint.
     pub events: Arc<EventLog>,
+
+    /// The push notifier: what is enabled, its counters and the test
+    /// notification. Disabled until `main` starts it.
+    pub notify: Arc<NotifyHandle>,
 }
 
 impl AppState {
@@ -73,6 +78,7 @@ impl AppState {
         // Start locked regardless of unlock mode — unlock happens during
         // startup (file mode) or on first POST /v1/unlock (manual mode).
         let target_policy = Arc::new(TargetPolicy::from_config(&config));
+        let notify = Arc::new(NotifyHandle::disabled(config.notify.categories()));
         Self {
             config,
             lock_state: Arc::new(RwLock::new(LockState::Locked)),
@@ -82,7 +88,14 @@ impl AppState {
             unlock_lock: Arc::new(tokio::sync::Mutex::new(())),
             target_policy,
             events,
+            notify,
         }
+    }
+
+    /// Use `notify` as the notifier (the one `main` started).
+    pub fn with_notify(mut self, notify: Arc<NotifyHandle>) -> Self {
+        self.notify = notify;
+        self
     }
 
     /// Load the persisted agent keys from `path` into the key ring. Returns
@@ -202,6 +215,7 @@ mod tests {
             admin_rate_limit_burst: 5,
             events: Default::default(),
             ui: Default::default(),
+            notify: Default::default(),
         }
     }
 

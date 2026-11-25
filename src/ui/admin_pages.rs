@@ -37,11 +37,11 @@ use crate::middleware::request_context::RequestContext;
 use crate::policy::{KeyPolicy, Patch, METHODS};
 use crate::proxy::forward::ProxyRequest;
 use crate::ui::drafts::{DraftTarget, RequestDraft, SavedDraft};
-use crate::ui::handlers::{page, Reply};
+use crate::ui::handlers::{page, status_page, Reply};
 use crate::ui::pages::{
     AuditPage, AuditRow, CredRow, DraftForm, KeyFacts, KeyFormUsedPage, KeyNewPage, KeyPage,
-    KeyRevokePage, KeyRow, KeyTokenPage, KeysPage, LimitOpt, MethodBox, Nav, Opt, PolicyView,
-    PreviewView, RequestCheckView,
+    KeyRevokePage, KeyRow, KeyTokenPage, KeysPage, LimitOpt, MethodBox, Nav, NotifyTestRow,
+    NotifyTestView, Opt, PolicyView, PreviewView, RequestCheckView,
 };
 use crate::ui::session::{secrets_equal, SessionView};
 use crate::ui::web::{
@@ -1248,6 +1248,48 @@ pub async fn revoke_post(
         Ok(_) => Reply::redirect("/ui/keys?m=revoked"),
         Err(e) => failed(&ui, &view, &e).await,
     }
+}
+
+// -- Test notification ----------------------------------------------------------------------
+
+/// `POST /ui/notify/test`: send a test notification to every enabled sender
+/// and show what each one answered on the status page. A session, the
+/// same-origin proof and the CSRF token are required; no sign-in within the
+/// sudo window, since it changes nothing and at most one test is sent every
+/// ten seconds.
+pub async fn notify_test_post(
+    State(ui): State<Arc<UiState>>,
+    ctx: RequestContext,
+    Extension(transport): Extension<Transport>,
+    request: Request,
+) -> Reply {
+    let (view, _form) =
+        match begin_post(&ui, &ctx, &transport, request, "/ui/notify/test", &["csrf"]).await {
+            Ok(ok) => ok,
+            Err(reply) => return reply,
+        };
+    let test = match crate::api::admin::run_notify_test(&ui.app, &ctx, "ui").await {
+        Ok(results) => NotifyTestView {
+            wait: None,
+            rows: results
+                .into_iter()
+                .map(|r| NotifyTestRow {
+                    sender: r.sender,
+                    ok: r.ok,
+                    detail: match (r.ok, r.status, r.error) {
+                        (true, Some(status), _) => format!("HTTP {status}"),
+                        (_, _, Some(error)) => error,
+                        _ => String::new(),
+                    },
+                })
+                .collect(),
+        },
+        Err(wait) => NotifyTestView {
+            wait: Some(wait),
+            rows: Vec::new(),
+        },
+    };
+    status_page(&ui, &view, &transport, Some(test)).await
 }
 
 // -- Audit ---------------------------------------------------------------------------------

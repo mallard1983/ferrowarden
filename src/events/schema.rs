@@ -69,12 +69,13 @@ pub enum Action {
     UiLogout,
     UiSessionExpired,
     UiTwoFactorEmailSent,
+    NotifyTest,
 }
 
 impl Action {
     /// Every action, in the order the audit view lists them. Keep in step
     /// with the enum: the `all_actions_are_listed` test counts the variants.
-    pub const ALL: [Action; 24] = [
+    pub const ALL: [Action; 25] = [
         Action::Forward,
         Action::CredentialsList,
         Action::AgentAuth,
@@ -99,6 +100,7 @@ impl Action {
         Action::UiLogout,
         Action::UiSessionExpired,
         Action::UiTwoFactorEmailSent,
+        Action::NotifyTest,
     ];
 
     /// The action whose wire name (`as_str`) is `name`.
@@ -132,6 +134,7 @@ impl Action {
             Action::UiLogout => "ui_logout",
             Action::UiSessionExpired => "ui_session_expired",
             Action::UiTwoFactorEmailSent => "ui_two_factor_email_sent",
+            Action::NotifyTest => "notify_test",
         }
     }
 
@@ -161,7 +164,8 @@ impl Action {
             | Action::VaultSync
             | Action::Startup
             | Action::Shutdown
-            | Action::EventsDropped => "configuration",
+            | Action::EventsDropped
+            | Action::NotifyTest => "configuration",
         }
     }
 
@@ -199,6 +203,7 @@ impl Action {
             Action::UiLogout => "UI sign-out",
             Action::UiSessionExpired => "UI session",
             Action::UiTwoFactorEmailSent => "UI email code",
+            Action::NotifyTest => "test notification",
         }
     }
 
@@ -229,6 +234,7 @@ impl Action {
             Action::UiLogout => "UI signed out",
             Action::UiSessionExpired => "UI session expired",
             Action::UiTwoFactorEmailSent => "UI email code requested",
+            Action::NotifyTest => "test notification sent",
         }
     }
 }
@@ -296,6 +302,77 @@ pub enum Reason {
 }
 
 impl Reason {
+    /// Every reason, in declaration order (tests and the notifier tables).
+    #[cfg(test)]
+    pub const ALL: [Reason; 30] = [
+        Reason::MissingKey,
+        Reason::InvalidKey,
+        Reason::MissingAdminKey,
+        Reason::InvalidAdminKey,
+        Reason::RateLimited,
+        Reason::InvalidJson,
+        Reason::InvalidRequest,
+        Reason::TargetBlocked,
+        Reason::InvalidTargetUrl,
+        Reason::CredentialHostNotAllowed,
+        Reason::CredentialOutOfScope,
+        Reason::MethodNotAllowed,
+        Reason::RepromptRequired,
+        Reason::UnknownCredential,
+        Reason::AmbiguousCredential,
+        Reason::AmbiguousField,
+        Reason::MalformedPlaceholder,
+        Reason::VaultLocked,
+        Reason::UpstreamError,
+        Reason::ResponseTooLarge,
+        Reason::KeyNotFound,
+        Reason::UnlockFailed,
+        Reason::SyncFailed,
+        Reason::InternalError,
+        Reason::InvalidCredentials,
+        Reason::TwoFactorRequired,
+        Reason::TwoFactorFailed,
+        Reason::LoginLockedOut,
+        Reason::UpstreamRateLimited,
+        Reason::InsecureTransport,
+    ];
+
+    /// The wire code (`event.reason`), the same text serde writes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Reason::MissingKey => "missing_key",
+            Reason::InvalidKey => "invalid_key",
+            Reason::MissingAdminKey => "missing_admin_key",
+            Reason::InvalidAdminKey => "invalid_admin_key",
+            Reason::RateLimited => "rate_limited",
+            Reason::InvalidJson => "invalid_json",
+            Reason::InvalidRequest => "invalid_request",
+            Reason::TargetBlocked => "target_blocked",
+            Reason::InvalidTargetUrl => "invalid_target_url",
+            Reason::CredentialHostNotAllowed => "credential_host_not_allowed",
+            Reason::CredentialOutOfScope => "credential_out_of_scope",
+            Reason::MethodNotAllowed => "method_not_allowed",
+            Reason::RepromptRequired => "reprompt_required",
+            Reason::UnknownCredential => "unknown_credential",
+            Reason::AmbiguousCredential => "ambiguous_credential",
+            Reason::AmbiguousField => "ambiguous_field",
+            Reason::MalformedPlaceholder => "malformed_placeholder",
+            Reason::VaultLocked => "vault_locked",
+            Reason::UpstreamError => "upstream_error",
+            Reason::ResponseTooLarge => "response_too_large",
+            Reason::KeyNotFound => "key_not_found",
+            Reason::UnlockFailed => "unlock_failed",
+            Reason::SyncFailed => "sync_failed",
+            Reason::InternalError => "internal_error",
+            Reason::InvalidCredentials => "invalid_credentials",
+            Reason::TwoFactorRequired => "two_factor_required",
+            Reason::TwoFactorFailed => "two_factor_failed",
+            Reason::LoginLockedOut => "login_locked_out",
+            Reason::UpstreamRateLimited => "upstream_rate_limited",
+            Reason::InsecureTransport => "insecure_transport",
+        }
+    }
+
     /// A request that was refused on policy or authentication grounds, as
     /// opposed to one that failed for operational reasons. Adds ECS type
     /// `denied` and turns "failed" into "blocked" in the message.
@@ -562,7 +639,7 @@ impl SecurityEvent {
             Action::KeyCreate => vec!["creation"],
             Action::KeyRevoke => vec!["deletion"],
             Action::VaultLock => vec!["change"],
-            Action::VaultSync | Action::EventsDropped => vec!["info"],
+            Action::VaultSync | Action::EventsDropped | Action::NotifyTest => vec!["info"],
             Action::Startup => vec!["start"],
             Action::Shutdown => vec!["end"],
         };
@@ -732,6 +809,7 @@ mod tests {
                 Action::UiLogout => 21,
                 Action::UiSessionExpired => 22,
                 Action::UiTwoFactorEmailSent => 23,
+                Action::NotifyTest => 24,
             }
         }
         for (i, a) in Action::ALL.into_iter().enumerate() {
@@ -837,6 +915,7 @@ mod tests {
             (Action::Startup, "configuration", vec!["start"]),
             (Action::Shutdown, "configuration", vec!["end"]),
             (Action::EventsDropped, "configuration", vec!["info"]),
+            (Action::NotifyTest, "configuration", vec!["info"]),
         ];
         for (action, category, types) in cases {
             let e = SecurityEvent::new(action);
@@ -897,6 +976,7 @@ mod tests {
             Action::UiLogout,
             Action::UiSessionExpired,
             Action::UiTwoFactorEmailSent,
+            Action::NotifyTest,
         ] {
             assert_eq!(serde_json::to_value(a).unwrap(), a.as_str());
         }
@@ -1014,8 +1094,11 @@ mod tests {
             (Reason::UpstreamRateLimited, "upstream_rate_limited"),
             (Reason::InsecureTransport, "insecure_transport"),
         ];
-        for (reason, code) in all {
+        assert_eq!(all.len(), Reason::ALL.len());
+        for ((reason, code), listed) in all.into_iter().zip(Reason::ALL) {
             assert_eq!(serde_json::to_value(reason).unwrap(), code);
+            assert_eq!(reason.as_str(), code);
+            assert_eq!(listed, reason, "Reason::ALL is in declaration order");
         }
     }
 

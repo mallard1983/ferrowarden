@@ -18,6 +18,14 @@ Management endpoints (not logged themselves):
   GET  /__requests__/last  — return the most recent captured request
   POST /__reset__          — clear the request log (call between tests)
   GET  /__health__         — liveness check
+  GET  /__notifications__        — requests sent to the notification sink
+  POST /__notifications__/reset  — clear the notification log
+
+Notification sink: the test stack gives this container a second network alias,
+"notify-sink", which Ferrowarden's notifier posts to. A request whose Host is
+"notify-sink" is captured in its own log (the /__notifications__ endpoints),
+not in the main one, so a notification that arrives while a test inspects
+/__requests__/last cannot be mistaken for a forwarded request.
 
 All other paths are captured and return 200 OK with {"captured": true, "id": N}.
 
@@ -37,10 +45,21 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 # Thread-safe log of all captured requests.
 # Each entry is a dict with: id, timestamp, method, path, headers, body.
 _requests: list[dict] = []
+_notifications: list[dict] = []
 _lock = threading.Lock()
 _counter = 0
+_notify_counter = 0
 
-MANAGEMENT_PATHS = {"/__requests__", "/__requests__/last", "/__reset__", "/__health__"}
+NOTIFY_SINK_HOST = "notify-sink"
+
+MANAGEMENT_PATHS = {
+    "/__requests__",
+    "/__requests__/last",
+    "/__reset__",
+    "/__health__",
+    "/__notifications__",
+    "/__notifications__/reset",
+}
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -92,6 +111,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "no requests captured yet"})
             return True
 
+        if path == "/__notifications__" and self.command == "GET":
+            with _lock:
+                data = list(_notifications)
+            self._send_json(200, data)
+            return True
+
+        if path == "/__notifications__/reset" and self.command == "POST":
+            with _lock:
+                cleared = len(_notifications)
+                _notifications.clear()
+            print(f"[reset] cleared {cleared} captured notifications", flush=True)
+            self._send_json(200, {"cleared": cleared})
+            return True
+
         if path == "/__reset__" and self.command == "POST":
             with _lock:
                 cleared = len(_requests)
@@ -102,11 +135,42 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         return False
 
+    def _is_notify_sink(self) -> bool:
+        host = self.headers.get("Host", "").split(":")[0].strip().lower()
+        return host == NOTIFY_SINK_HOST
+
+    def _capture_notification(self, body: str) -> None:
+        """Record a request made to the notification sink, in its own log."""
+        global _notify_counter
+
+        with _lock:
+            _notify_counter += 1
+            _notifications.append(
+                {
+                    "id": _notify_counter,
+                    "timestamp": time.time(),
+                    "method": self.command,
+                    "path": self.path,
+                    "headers": {k: v for k, v in self.headers.items()},
+                    "body": body,
+                }
+            )
+            entry_id = _notify_counter
+        print(
+            f"[notification #{entry_id}] {self.command} (body: {len(body)} bytes)",
+            flush=True,
+        )
+        self._send_json(200, {"captured": True, "sink": "notifications", "id": entry_id})
+
     def _capture_and_respond(self) -> None:
         """Record this request and send a 200 echo response."""
         global _counter
 
         body = self._read_body()
+
+        if self._is_notify_sink():
+            self._capture_notification(body)
+            return
 
         with _lock:
             _counter += 1
@@ -175,6 +239,7 @@ def main() -> None:
     print("  GET  /__requests__/last  — most recent request", flush=True)
     print("  POST /__reset__          — clear log", flush=True)
     print("  GET  /__health__         — liveness check", flush=True)
+    print("  GET  /__notifications__  — requests to the notify-sink alias", flush=True)
     server.serve_forever()
 
 

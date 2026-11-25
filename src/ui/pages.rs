@@ -69,6 +69,44 @@ pub struct StatusPage<'a> {
     pub keys_without_policy: usize,
     pub events_dropped: u64,
     pub session_expires: &'a str,
+    pub csrf: &'a str,
+    pub notify: NotifyView,
+}
+
+/// The "Notifications" section of the status page.
+pub struct NotifyView {
+    pub enabled: bool,
+    pub senders: Vec<NotifySenderRow>,
+    /// Enabled categories, comma-separated.
+    pub categories: String,
+    pub sent: u64,
+    pub failed: u64,
+    pub suppressed: u64,
+    pub dropped: u64,
+    /// Set on the page that answers "Send test notification".
+    pub test: Option<NotifyTestView>,
+}
+
+/// One enabled sender: its type and host, never the URL.
+pub struct NotifySenderRow {
+    pub kind: &'static str,
+    pub host: String,
+    pub sent: u64,
+    pub failed: u64,
+}
+
+/// What a test notification did.
+pub struct NotifyTestView {
+    /// Seconds to wait when the test was refused for being too soon.
+    pub wait: Option<u64>,
+    pub rows: Vec<NotifyTestRow>,
+}
+
+pub struct NotifyTestRow {
+    pub sender: &'static str,
+    pub ok: bool,
+    /// What happened, in fixed words (HTTP status or the failure).
+    pub detail: String,
 }
 
 #[derive(Template)]
@@ -311,11 +349,35 @@ mod tests {
             keys_without_policy: 0,
             events_dropped: 0,
             session_expires: "soon",
+            csrf: "tok",
+            notify: NotifyView {
+                enabled: true,
+                senders: vec![NotifySenderRow {
+                    kind: "webhook",
+                    host: "<i>h</i>".to_string(),
+                    sent: 1,
+                    failed: 0,
+                }],
+                categories: "blocked".to_string(),
+                sent: 1,
+                failed: 0,
+                suppressed: 0,
+                dropped: 0,
+                test: Some(NotifyTestView {
+                    wait: None,
+                    rows: vec![NotifyTestRow {
+                        sender: "webhook",
+                        ok: false,
+                        detail: "<u>x</u>".to_string(),
+                    }],
+                }),
+            },
         }
         .render()
         .unwrap();
         assert!(!page.contains("<b>a@b.test"));
         assert!(page.contains("&#60;b&#62;a@b.test") || page.contains("&lt;b&gt;a@b.test"));
+        assert!(!page.contains("<i>h</i>") && !page.contains("<u>x</u>"));
     }
 
     #[test]

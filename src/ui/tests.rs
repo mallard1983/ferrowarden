@@ -257,6 +257,8 @@ struct Opts {
     trusted_proxies: &'static str,
     two_fa: Option<TwoFa>,
     keys_file: bool,
+    /// Notifier settings (started against whatever URLs they name).
+    notify: Option<crate::config::NotifyConfig>,
 }
 
 impl Default for Opts {
@@ -267,6 +269,7 @@ impl Default for Opts {
             trusted_proxies: "",
             two_fa: None,
             keys_file: false,
+            notify: None,
         }
     }
 }
@@ -326,8 +329,14 @@ async fn harness(opts: Opts) -> Harness {
             insecure_http: opts.insecure_http,
             ..UiConfig::default()
         },
+        notify: opts.notify.clone().unwrap_or_default(),
     };
-    let app = Arc::new(AppState::new(config, Arc::new(EventLog::buffer_only(1000))));
+    let events = Arc::new(EventLog::buffer_only(1000));
+    let mut app = AppState::new(config.clone(), events.clone());
+    if opts.notify.is_some() {
+        app = app.with_notify(crate::notify::start(&config.notify, &events).unwrap());
+    }
+    let app = Arc::new(app);
     app.set_unlocked().await;
     let ui = UiState::new(app.clone()).unwrap();
     Harness {
@@ -1891,3 +1900,4 @@ fn the_provider_enum_matches_the_documented_event_names() {
 
 mod admin;
 mod brand;
+mod notify;

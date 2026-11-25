@@ -1,5 +1,7 @@
 use serde::Deserialize;
+use std::fmt;
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 use crate::error::{FerroError, FerroResult};
 
@@ -144,6 +146,13 @@ pub struct Config {
     /// `ui.bind` is set (see docs/admin-ui.md).
     #[serde(default)]
     pub ui: UiConfig,
+
+    /// Push notifications for security events: Gotify, ntfy and a generic
+    /// webhook. `[notify]` in the TOML file, `FERROWARDEN_NOTIFY__*` in the
+    /// environment; the tokens only ever come from `FERROWARDEN_NOTIFY_*_TOKEN`
+    /// (or `_FILE`). Disabled unless a sender URL is set (docs/notifications.md).
+    #[serde(default)]
+    pub notify: NotifyConfig,
 }
 
 /// Settings of the admin web UI.
@@ -333,6 +342,294 @@ impl EventsConfig {
     }
 }
 
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+/// Environment variables the notifier tokens are read from. Each also has a
+/// `_FILE` variant that names a file holding the token.
+pub const ENV_GOTIFY_TOKEN: &str = "FERROWARDEN_NOTIFY_GOTIFY_TOKEN";
+pub const ENV_NTFY_TOKEN: &str = "FERROWARDEN_NOTIFY_NTFY_TOKEN";
+pub const ENV_WEBHOOK_TOKEN: &str = "FERROWARDEN_NOTIFY_WEBHOOK_TOKEN";
+
+/// Notifier tokens. They never come from the config file (the field is
+/// skipped by serde), are wiped from memory when dropped, and print as
+/// `[redacted]` in `Debug` output.
+#[derive(Clone, Default)]
+pub struct NotifyTokens {
+    pub gotify: Option<Zeroizing<String>>,
+    pub ntfy: Option<Zeroizing<String>>,
+    pub webhook: Option<Zeroizing<String>>,
+}
+
+impl fmt::Debug for NotifyTokens {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let show = |t: &Option<Zeroizing<String>>| if t.is_some() { "[redacted]" } else { "none" };
+        f.debug_struct("NotifyTokens")
+            .field("gotify", &show(&self.gotify))
+            .field("ntfy", &show(&self.ntfy))
+            .field("webhook", &show(&self.webhook))
+            .finish()
+    }
+}
+
+impl NotifyTokens {
+    /// Read the tokens from the process environment and the files it names.
+    pub fn from_env() -> FerroResult<Self> {
+        Self::load(
+            |name| std::env::var(name).ok().filter(|v| !v.is_empty()),
+            |path| std::fs::read(path),
+        )
+    }
+
+    /// [`from_env`](Self::from_env) with the lookups injected (tests). Setting
+    /// both `NAME` and `NAME_FILE` is an error; so is an empty token file or a
+    /// token that is not a valid header value. Error messages carry names and
+    /// error kinds, never a value.
+    pub fn load(
+        get: impl Fn(&str) -> Option<String>,
+        read: impl Fn(&std::path::Path) -> std::io::Result<Vec<u8>>,
+    ) -> FerroResult<Self> {
+        let one = |name: &'static str| -> FerroResult<Option<Zeroizing<String>>> {
+            let file_name = format!("{name}_FILE");
+            let direct = get(name).map(Zeroizing::new);
+            let file = get(&file_name);
+            let raw = match (direct, file) {
+                (Some(_), Some(_)) => {
+                    return Err(FerroError::Config(format!(
+                        "set only one of {name} and {file_name}, not both"
+                    )))
+                }
+                (Some(v), None) => v,
+                (None, Some(path)) => {
+                    let bytes = Zeroizing::new(read(std::path::Path::new(&path)).map_err(|e| {
+                        FerroError::Config(format!("cannot read {file_name} ({:?})", e.kind()))
+                    })?);
+                    Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|_| {
+                        FerroError::Config(format!("{file_name} does not hold valid UTF-8 text"))
+                    })?)
+                }
+                (None, None) => return Ok(None),
+            };
+            let token = Zeroizing::new(raw.trim().to_string());
+            if token.is_empty() {
+                return Err(FerroError::Config(format!(
+                    "the token from {name} (or {file_name}) is empty"
+                )));
+            }
+            // Becomes a header value: visible ASCII only.
+            if !token.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err(FerroError::Config(format!(
+                    "the token from {name} (or {file_name}) must be printable ASCII without spaces"
+                )));
+            }
+            Ok(Some(token))
+        };
+        Ok(Self {
+            gotify: one(ENV_GOTIFY_TOKEN)?,
+            ntfy: one(ENV_NTFY_TOKEN)?,
+            webhook: one(ENV_WEBHOOK_TOKEN)?,
+        })
+    }
+}
+
+/// Settings of the notifier (see docs/notifications.md).
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct NotifyConfig {
+    /// Gotify base URL, e.g. `https://gotify.example.com`. Needs
+    /// `FERROWARDEN_NOTIFY_GOTIFY_TOKEN`. Empty (default) disables it.
+    pub gotify_url: String,
+    /// ntfy topic URL, e.g. `https://ntfy.example.com/ferrowarden`. A token
+    /// (`FERROWARDEN_NOTIFY_NTFY_TOKEN`) is optional. Empty disables it.
+    pub ntfy_url: String,
+    /// Generic webhook URL (JSON POST). A token
+    /// (`FERROWARDEN_NOTIFY_WEBHOOK_TOKEN`) is optional. Empty disables it.
+    pub webhook_url: String,
+    /// Categories to notify about: `blocked`, `auth_failure`, `vault`,
+    /// `admin`, `system`. A TOML list, or a comma-separated string in the
+    /// environment. Default: all but `admin`.
+    #[serde(deserialize_with = "string_or_list")]
+    pub events: Vec<String>,
+    /// At most one notification per category and subject in this many
+    /// seconds; the rest are counted and summarised. Default 60.
+    pub min_interval_secs: u64,
+    /// At most this many notifications per hour in total. Default 60.
+    pub max_per_hour: u32,
+    /// Failed authentications from one IP address that make a notification.
+    /// Default 5.
+    pub auth_failure_threshold: u32,
+    /// The window those failures are counted in, in seconds. Default 300.
+    pub auth_failure_window_secs: u64,
+    /// Allow `http://` notifier URLs for hosts other than loopback. Off by
+    /// default: a notification crossing the network in clear text can be read
+    /// and altered.
+    pub allow_http: bool,
+    /// PEM file with an extra CA certificate to trust for the notifier URLs,
+    /// on top of the public roots.
+    pub ca_file: String,
+    /// The tokens, from the environment. Never read from the config file.
+    #[serde(skip)]
+    pub tokens: NotifyTokens,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            gotify_url: String::new(),
+            ntfy_url: String::new(),
+            webhook_url: String::new(),
+            events: crate::notify::Category::DEFAULT
+                .iter()
+                .map(|c| c.as_str().to_string())
+                .collect(),
+            min_interval_secs: 60,
+            max_per_hour: 60,
+            auth_failure_threshold: 5,
+            auth_failure_window_secs: 300,
+            allow_http: false,
+            ca_file: String::new(),
+            tokens: NotifyTokens::default(),
+        }
+    }
+}
+
+/// Accept a list, or one comma-separated string (what an environment
+/// variable can carry).
+fn string_or_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Either::deserialize(d)? {
+        Either::One(s) => split_list(&s),
+        Either::Many(v) => v.into_iter().map(|s| s.trim().to_string()).collect(),
+    })
+}
+
+/// A host that is this machine: `localhost` or a loopback address.
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.to_canonical().is_loopback())
+}
+
+impl NotifyConfig {
+    /// The configured sender URLs as `(name, url)`, for the senders that are
+    /// enabled.
+    pub fn urls(&self) -> Vec<(&'static str, &str)> {
+        [
+            ("gotify", self.gotify_url.trim()),
+            ("ntfy", self.ntfy_url.trim()),
+            ("webhook", self.webhook_url.trim()),
+        ]
+        .into_iter()
+        .filter(|(_, u)| !u.is_empty())
+        .collect()
+    }
+
+    /// At least one sender is configured.
+    pub fn enabled(&self) -> bool {
+        !self.urls().is_empty()
+    }
+
+    /// The enabled categories (valid after validation).
+    pub fn categories(&self) -> crate::notify::CategorySet {
+        crate::notify::CategorySet::from_names(&self.events).unwrap_or_default()
+    }
+
+    /// `(host, port)` of every configured notifier URL, lower-cased, for the
+    /// outbound target policy's deny list.
+    pub fn endpoints(&self) -> Vec<(String, u16)> {
+        self.urls()
+            .into_iter()
+            .filter_map(|(_, raw)| {
+                let url = reqwest::Url::parse(raw).ok()?;
+                let host = url
+                    .host_str()?
+                    .trim_matches(['[', ']'])
+                    .to_ascii_lowercase();
+                Some((host, url.port_or_known_default()?))
+            })
+            .collect()
+    }
+
+    fn validate(&self) -> FerroResult<()> {
+        let err = |m: String| Err(FerroError::Config(m));
+        if crate::notify::CategorySet::from_names(&self.events).is_err() {
+            let bad: Vec<&str> = self
+                .events
+                .iter()
+                .map(String::as_str)
+                .filter(|n| crate::notify::Category::parse(n).is_none())
+                .collect();
+            return err(format!(
+                "notify.events has unknown categories {bad:?}; valid: blocked, auth_failure, vault, admin, system"
+            ));
+        }
+        if self.max_per_hour == 0 || self.auth_failure_threshold == 0 {
+            return err(
+                "notify.max_per_hour and notify.auth_failure_threshold must be greater than 0"
+                    .to_string(),
+            );
+        }
+        if self.auth_failure_window_secs == 0 || self.auth_failure_window_secs > 86_400 {
+            return err("notify.auth_failure_window_secs must be between 1 and 86400".to_string());
+        }
+        if self.min_interval_secs > 86_400 {
+            return err("notify.min_interval_secs must be at most 86400".to_string());
+        }
+        for (name, raw) in self.urls() {
+            let key = format!("notify.{name}_url");
+            let Ok(url) = reqwest::Url::parse(raw) else {
+                return err(format!("{key} is not a valid URL"));
+            };
+            let Some(host) = url.host_str() else {
+                return err(format!("{key} has no host"));
+            };
+            // Secrets belong in the token variables, not in a URL that ends
+            // up in the config file and in logs.
+            if !url.username().is_empty() || url.password().is_some() {
+                return err(format!(
+                    "{key} must not contain a user name or password; use the *_TOKEN variable"
+                ));
+            }
+            if url.query().is_some() || url.fragment().is_some() {
+                return err(format!(
+                    "{key} must not have a query or fragment; use the *_TOKEN variable for secrets"
+                ));
+            }
+            match url.scheme() {
+                "https" => {}
+                "http" if is_loopback_host(host) || self.allow_http => {}
+                "http" => {
+                    return err(format!(
+                        "{key} must be https:// (http:// only for localhost, or with notify.allow_http = true)"
+                    ))
+                }
+                _ => return err(format!("{key} must be an https:// URL")),
+            }
+        }
+        if !self.gotify_url.trim().is_empty() && self.tokens.gotify.is_none() {
+            return err(format!(
+                "notify.gotify_url needs a token: set {ENV_GOTIFY_TOKEN} or {ENV_GOTIFY_TOKEN}_FILE"
+            ));
+        }
+        if self.enabled() && self.events.is_empty() {
+            return err("notify.events must list at least one category".to_string());
+        }
+        if !self.ca_file.trim().is_empty() {
+            if !self.enabled() {
+                return err("notify.ca_file is set but no notifier URL is".to_string());
+            }
+            crate::notify::senders::load_ca(self.ca_file.trim()).map_err(FerroError::Config)?;
+        }
+        Ok(())
+    }
+}
+
 fn default_bind_addr() -> String {
     "0.0.0.0:3000".to_string()
 }
@@ -441,6 +738,8 @@ impl Config {
         cfg.admin_key = std::env::var("FERROWARDEN_ADMIN_KEY")
             .map_err(|_| FerroError::Config("FERROWARDEN_ADMIN_KEY must be set".to_string()))?;
 
+        cfg.notify.tokens = NotifyTokens::from_env()?;
+
         cfg.api_prefix = normalize_api_prefix(&cfg.api_prefix)?;
 
         cfg.validate()?;
@@ -494,6 +793,7 @@ impl Config {
 
         self.events.validate()?;
         self.ui.validate()?;
+        self.notify.validate()?;
 
         if self.tls_enabled {
             if self.tls_cert_file.is_none() {
@@ -541,6 +841,7 @@ mod tests {
             admin_rate_limit_burst: 5,
             events: Default::default(),
             ui: Default::default(),
+            notify: Default::default(),
         }
     }
 
@@ -765,6 +1066,313 @@ file_keep = 3
         assert!(with(&|u| u.vaultwarden_url = "ftp://vault".into()).is_err());
         assert!(with(&|u| u.vaultwarden_url = "https://vault/?x=1".into()).is_err());
         assert!(with(&|u| u.vaultwarden_url = "not a url".into()).is_err());
+    }
+
+    // ── [notify] ──────────────────────────────────────────────────────────────
+
+    fn tokens_from(env: &[(&str, &str)], files: &[(&str, &[u8])]) -> FerroResult<NotifyTokens> {
+        let env: std::collections::HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let files: std::collections::HashMap<String, Vec<u8>> = files
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_vec()))
+            .collect();
+        NotifyTokens::load(
+            |name| env.get(name).cloned(),
+            |path| {
+                files
+                    .get(path.to_str().unwrap())
+                    .cloned()
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+            },
+        )
+    }
+
+    #[test]
+    fn notify_defaults_match_the_documentation() {
+        let n = NotifyConfig::default();
+        assert!(!n.enabled());
+        assert_eq!(n.events, ["blocked", "auth_failure", "vault", "system"]);
+        assert_eq!(n.min_interval_secs, 60);
+        assert_eq!(n.max_per_hour, 60);
+        assert_eq!(n.auth_failure_threshold, 5);
+        assert_eq!(n.auth_failure_window_secs, 300);
+        assert!(!n.allow_http);
+        assert!(n.ca_file.is_empty());
+        assert!(base_config(UnlockMode::Manual).validate().is_ok());
+    }
+
+    #[test]
+    fn notify_section_deserializes_from_a_list_or_a_comma_separated_string() {
+        let from = |text: &str| -> Config {
+            config::Config::builder()
+                .add_source(config::File::from_str(text, config::FileFormat::Toml))
+                .build()
+                .unwrap()
+                .try_deserialize()
+                .unwrap()
+        };
+        let cfg = from(
+            "unlock_mode = \"manual\"\n[notify]\nwebhook_url = \"https://hooks.example.com/x\"\nevents = [\"blocked\", \"admin\"]\nmax_per_hour = 5\n",
+        );
+        assert_eq!(cfg.notify.events, ["blocked", "admin"]);
+        assert_eq!(cfg.notify.max_per_hour, 5);
+        assert_eq!(
+            cfg.notify.min_interval_secs, 60,
+            "unspecified keys keep their defaults"
+        );
+        let cfg = from("unlock_mode = \"manual\"\n[notify]\nevents = \"blocked, vault\"\n");
+        assert_eq!(cfg.notify.events, ["blocked", "vault"]);
+    }
+
+    #[test]
+    fn notify_settings_come_from_the_environment_too() {
+        // The same builder the real loader uses, with a fake environment.
+        let mut env = std::collections::HashMap::new();
+        env.insert("FERROWARDEN_UNLOCK_MODE".to_string(), "manual".to_string());
+        env.insert(
+            "FERROWARDEN_NOTIFY__WEBHOOK_URL".to_string(),
+            "https://hooks.example.com/x".to_string(),
+        );
+        env.insert(
+            "FERROWARDEN_NOTIFY__EVENTS".to_string(),
+            "blocked,auth_failure".to_string(),
+        );
+        env.insert(
+            "FERROWARDEN_NOTIFY__MIN_INTERVAL_SECS".to_string(),
+            "5".to_string(),
+        );
+        env.insert(
+            "FERROWARDEN_NOTIFY__ALLOW_HTTP".to_string(),
+            "true".to_string(),
+        );
+        // Token variables share the prefix: they must be ignored here.
+        env.insert(
+            "FERROWARDEN_NOTIFY_GOTIFY_TOKEN".to_string(),
+            "not-a-setting".to_string(),
+        );
+        let cfg: Config = config::Config::builder()
+            .add_source(
+                config::Environment::with_prefix("FERROWARDEN")
+                    .prefix_separator("_")
+                    .separator("__")
+                    .ignore_empty(true)
+                    .source(Some(env)),
+            )
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert_eq!(cfg.notify.webhook_url, "https://hooks.example.com/x");
+        assert_eq!(cfg.notify.events, ["blocked", "auth_failure"]);
+        assert_eq!(cfg.notify.min_interval_secs, 5);
+        assert!(cfg.notify.allow_http);
+        assert!(cfg.notify.tokens.gotify.is_none());
+    }
+
+    #[test]
+    fn notifier_tokens_come_from_the_environment_or_a_file_never_both() {
+        assert!(tokens_from(&[], &[]).unwrap().gotify.is_none());
+        let t = tokens_from(&[(ENV_GOTIFY_TOKEN, "  direct-token-1 \n")], &[]).unwrap();
+        assert_eq!(
+            t.gotify.as_deref().map(String::as_str),
+            Some("direct-token-1")
+        );
+        let t = tokens_from(
+            &[("FERROWARDEN_NOTIFY_NTFY_TOKEN_FILE", "/run/secrets/ntfy")],
+            &[("/run/secrets/ntfy", b"file-token-2\r\n")],
+        )
+        .unwrap();
+        assert_eq!(t.ntfy.as_deref().map(String::as_str), Some("file-token-2"));
+        assert!(t.gotify.is_none() && t.webhook.is_none());
+
+        let both = tokens_from(
+            &[
+                (ENV_WEBHOOK_TOKEN, "tok-one-secret-value"),
+                ("FERROWARDEN_NOTIFY_WEBHOOK_TOKEN_FILE", "/f"),
+            ],
+            &[("/f", b"tok-two-secret-value")],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(both.contains("only one of"), "{both}");
+        assert!(!both.contains("secret-value"), "{both}");
+    }
+
+    #[test]
+    fn bad_token_sources_are_errors_that_never_echo_the_value() {
+        let spaced = "s3cr3t token with spaces";
+        type Case<'a> = (Vec<(&'a str, &'a str)>, Vec<(&'a str, &'a [u8])>);
+        let cases: Vec<Case> = vec![
+            // A missing file.
+            (
+                vec![("FERROWARDEN_NOTIFY_GOTIFY_TOKEN_FILE", "/nope")],
+                vec![],
+            ),
+            // An empty file, a whitespace-only value.
+            (
+                vec![("FERROWARDEN_NOTIFY_GOTIFY_TOKEN_FILE", "/e")],
+                vec![("/e", b"\n")],
+            ),
+            (vec![(ENV_GOTIFY_TOKEN, "   ")], vec![]),
+            // Not valid UTF-8.
+            (
+                vec![("FERROWARDEN_NOTIFY_GOTIFY_TOKEN_FILE", "/b")],
+                vec![("/b", &[0xff, 0xfe, 0x41])],
+            ),
+            // Not a valid header value: spaces inside, control characters.
+            (vec![(ENV_GOTIFY_TOKEN, spaced)], vec![]),
+            (vec![(ENV_GOTIFY_TOKEN, "ab\u{1}cd")], vec![]),
+            (vec![(ENV_GOTIFY_TOKEN, "tok\u{e9}n")], vec![]),
+        ];
+        for (env, files) in cases {
+            let err = tokens_from(&env, &files).unwrap_err().to_string();
+            assert!(err.contains("FERROWARDEN_NOTIFY_GOTIFY_TOKEN"), "{err}");
+            for (_, v) in &env {
+                if v.len() > 6 && !v.starts_with('/') {
+                    assert!(!err.contains(v), "{err}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tokens_are_redacted_in_debug_output_and_not_read_from_the_config_file() {
+        let t = tokens_from(&[(ENV_GOTIFY_TOKEN, "gotify-secret-123456")], &[]).unwrap();
+        let shown = format!("{t:?}");
+        assert!(!shown.contains("gotify-secret"), "{shown}");
+        assert!(shown.contains("[redacted]"));
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.notify.tokens = t;
+        assert!(!format!("{cfg:?}").contains("gotify-secret"));
+
+        // A `tokens` key in the file is ignored (serde skip), not read.
+        let cfg: Config = config::Config::builder()
+            .add_source(config::File::from_str(
+                "unlock_mode = \"manual\"\n[notify.tokens]\ngotify = \"from-the-file-12345\"\n",
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert!(cfg.notify.tokens.gotify.is_none());
+    }
+
+    fn notify_cfg(f: impl Fn(&mut NotifyConfig)) -> FerroResult<()> {
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.notify.webhook_url = "https://hooks.example.com/ferrowarden".into();
+        f(&mut cfg.notify);
+        cfg.validate()
+    }
+
+    #[test]
+    fn notify_validation_covers_urls_categories_limits_and_tokens() {
+        assert!(notify_cfg(|_| {}).is_ok());
+        type Tweak = Box<dyn Fn(&mut NotifyConfig)>;
+        let bad: Vec<(&str, Tweak)> = vec![
+            (
+                "not a url",
+                Box::new(|n| n.webhook_url = "not a url".into()),
+            ),
+            ("no host", Box::new(|n| n.webhook_url = "https://".into())),
+            (
+                "ftp",
+                Box::new(|n| n.webhook_url = "ftp://hooks.example.com/x".into()),
+            ),
+            (
+                "http",
+                Box::new(|n| n.webhook_url = "http://hooks.example.com/x".into()),
+            ),
+            (
+                "userinfo",
+                Box::new(|n| n.webhook_url = "https://u:p@hooks.example.com/x".into()),
+            ),
+            (
+                "query",
+                Box::new(|n| n.webhook_url = "https://hooks.example.com/x?token=abc".into()),
+            ),
+            (
+                "fragment",
+                Box::new(|n| n.webhook_url = "https://hooks.example.com/x#f".into()),
+            ),
+            (
+                "bad ntfy",
+                Box::new(|n| n.ntfy_url = "ntfy.example.com/topic".into()),
+            ),
+            (
+                "gotify without token",
+                Box::new(|n| n.gotify_url = "https://gotify.example.com".into()),
+            ),
+            (
+                "unknown category",
+                Box::new(|n| n.events = vec!["blocked".into(), "everything".into()]),
+            ),
+            ("no categories", Box::new(|n| n.events = vec![])),
+            ("zero cap", Box::new(|n| n.max_per_hour = 0)),
+            ("zero threshold", Box::new(|n| n.auth_failure_threshold = 0)),
+            ("zero window", Box::new(|n| n.auth_failure_window_secs = 0)),
+            (
+                "huge window",
+                Box::new(|n| n.auth_failure_window_secs = 100_000),
+            ),
+            ("huge interval", Box::new(|n| n.min_interval_secs = 100_000)),
+            (
+                "missing ca file",
+                Box::new(|n| n.ca_file = "/no/such/ca.pem".into()),
+            ),
+        ];
+        for (name, tweak) in &bad {
+            assert!(notify_cfg(tweak).is_err(), "{name} should fail");
+        }
+        // http is fine for this machine, and anywhere with allow_http.
+        for url in [
+            "http://localhost:8080/x",
+            "http://127.0.0.1/x",
+            "http://[::1]:9/x",
+        ] {
+            assert!(notify_cfg(|n| n.webhook_url = url.into()).is_ok(), "{url}");
+        }
+        assert!(notify_cfg(|n| {
+            n.webhook_url = "http://hooks.example.com/x".into();
+            n.allow_http = true;
+        })
+        .is_ok());
+        // Gotify with its token.
+        assert!(notify_cfg(|n| {
+            n.gotify_url = "https://gotify.example.com".into();
+            n.tokens.gotify = Some(Zeroizing::new("tok".into()));
+        })
+        .is_ok());
+        // Unknown categories are an error even with no sender.
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.notify.events = vec!["nope".into()];
+        assert!(cfg.validate().unwrap_err().to_string().contains("nope"));
+        // A disabled notifier with a stray CA file is a mistake worth saying.
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.notify.ca_file = "/x.pem".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn notify_endpoints_list_each_notifier_host_and_port() {
+        let n = NotifyConfig {
+            gotify_url: "https://Gotify.Example.com/".into(),
+            ntfy_url: "https://ntfy.example.com:8443/topic".into(),
+            webhook_url: "http://[::1]:7777/n".into(),
+            ..NotifyConfig::default()
+        };
+        assert_eq!(
+            n.endpoints(),
+            [
+                ("gotify.example.com".to_string(), 443),
+                ("ntfy.example.com".to_string(), 8443),
+                ("::1".to_string(), 7777)
+            ]
+        );
+        assert!(NotifyConfig::default().endpoints().is_empty());
     }
 
     #[test]

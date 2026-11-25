@@ -9,6 +9,13 @@
 //!   * unspecified, multicast and broadcast addresses are never allowed;
 //!   * the bw serve endpoint (host name, and resolved IP + port) is never
 //!     allowed, whatever else is configured;
+//!   * neither are the notifier endpoints (Gotify, ntfy, webhook URLs): an
+//!     agent must not be able to post fake notifications or flood the
+//!     operator's phone. A notifier host name is refused on every port, an IP
+//!     literal or a resolved address on the notifier's port; an address
+//!     reached through a host name the operator listed in `allowed_targets`
+//!     is left to that explicit entry, since another service may share the
+//!     address;
 //!   * non-public addresses (loopback, RFC 1918, CGNAT, link-local, ULA, …)
 //!     are allowed only when `allow_private_targets = true` or when they match
 //!     an `allowed_targets` entry (CIDR, IP, or the request's host name);
@@ -154,6 +161,18 @@ impl fmt::Display for BlockedTarget {
 
 impl StdError for BlockedTarget {}
 
+/// Shown to the agent when a request names a notifier. It says no more than
+/// the vault message does.
+const NOTIFIER_BLOCKED: &str = "Target is a notification endpoint, which agents may not call";
+
+/// The addresses the denied endpoints currently resolve to.
+#[derive(Default)]
+struct DeniedAddrs {
+    vault: Vec<IpAddr>,
+    /// `(address, port)` of each notifier endpoint.
+    notifiers: Vec<(IpAddr, u16)>,
+}
+
 #[derive(Debug)]
 pub struct TargetPolicy {
     allow_private: bool,
@@ -162,6 +181,9 @@ pub struct TargetPolicy {
     /// bw serve host name (lower-cased) and port — never a valid target.
     vault_host: Option<String>,
     vault_port: Option<u16>,
+    /// Host (lower-cased) and port of every notifier URL — never a valid
+    /// target either.
+    notifiers: Vec<(String, u16)>,
 }
 
 impl TargetPolicy {
@@ -185,7 +207,34 @@ impl TargetPolicy {
                     .to_ascii_lowercase()
             }),
             vault_port: vault.as_ref().and_then(|u| u.port_or_known_default()),
+            notifiers: cfg.notify.endpoints(),
         }
+    }
+
+    /// Whether `host` (lower-cased, no brackets) is a notifier's host name.
+    fn is_notifier_name(&self, host: &str) -> bool {
+        host.parse::<IpAddr>().is_err() && self.notifiers.iter().any(|(h, _)| h == host)
+    }
+
+    /// Resolve the bw serve host and the notifier hosts.
+    async fn denied_addrs(&self) -> DeniedAddrs {
+        let mut out = DeniedAddrs {
+            vault: self.vault_addrs().await,
+            notifiers: Vec::new(),
+        };
+        for (host, port) in &self.notifiers {
+            match tokio::net::lookup_host((host.as_str(), *port)).await {
+                Ok(addrs) => out
+                    .notifiers
+                    .extend(addrs.map(|a| (a.ip().to_canonical(), *port))),
+                Err(_) => {
+                    if let Ok(ip) = host.parse::<IpAddr>() {
+                        out.notifiers.push((ip.to_canonical(), *port));
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn host_allowed_by_name(&self, host: &str) -> bool {
@@ -212,11 +261,21 @@ impl TargetPolicy {
         host: &str,
         ip: IpAddr,
         port: u16,
-        vault_addrs: &[IpAddr],
+        denied: &DeniedAddrs,
     ) -> Result<(), String> {
         let ip = ip.to_canonical();
-        if Some(port) == self.vault_port && vault_addrs.contains(&ip) {
+        if Some(port) == self.vault_port && denied.vault.contains(&ip) {
             return Err("Target is the vault backend, which agents may not call".to_string());
+        }
+        // A notifier's address on its port. A host name the operator has
+        // listed in `allowed_targets` is their explicit decision about that
+        // name (the notifier may share an address with a service they allow);
+        // everything else, IP literals included, is refused.
+        if denied.notifiers.contains(&(ip, port)) && !self.host_allowed_by_name(host) {
+            return Err(NOTIFIER_BLOCKED.to_string());
+        }
+        if self.is_notifier_name(host) {
+            return Err(NOTIFIER_BLOCKED.to_string());
         }
         match classify(ip) {
             AddrClass::Forbidden => Err(format!("Target address {ip} is not routable")),
@@ -265,9 +324,14 @@ impl TargetPolicy {
             ));
         }
 
+        // A notifier host name is blocked on every port.
+        if self.is_notifier_name(&host) {
+            return Err(FerroError::TargetBlocked(NOTIFIER_BLOCKED.to_string()));
+        }
+
         if let Ok(ip) = host.parse::<IpAddr>() {
-            let vault_addrs = self.vault_addrs().await;
-            self.check_ip(&host, ip, port, &vault_addrs)
+            let denied = self.denied_addrs().await;
+            self.check_ip(&host, ip, port, &denied)
                 .map_err(FerroError::TargetBlocked)?;
         }
         Ok(())
@@ -298,12 +362,12 @@ impl Resolve for PolicyResolver {
                 .await
                 .map_err(|e| -> Box<dyn StdError + Send + Sync> { Box::new(e) })?
                 .collect();
-            let vault_addrs = policy.vault_addrs().await;
+            let denied = policy.denied_addrs().await;
 
             let mut allowed = Vec::new();
             let mut last_reason = None;
             for addr in resolved {
-                match policy.check_ip(&host, addr.ip(), port, &vault_addrs) {
+                match policy.check_ip(&host, addr.ip(), port, &denied) {
                     Ok(()) => allowed.push(addr),
                     Err(reason) => last_reason = Some(reason),
                 }
@@ -377,6 +441,7 @@ mod tests {
             admin_rate_limit_burst: 5,
             events: Default::default(),
             ui: Default::default(),
+            notify: Default::default(),
         }
     }
 
@@ -492,6 +557,170 @@ mod tests {
         let p = Arc::new(TargetPolicy::from_config(&cfg("localhost", false)));
         let r = p.resolver(80);
         assert!(r.resolve("localhost".parse().unwrap()).await.is_ok());
+    }
+
+    // ── Notifier endpoints are off-limits to agents ───────────────────────────
+
+    fn notify_cfg(allowed: &str, allow_private: bool, urls: [&str; 3]) -> Config {
+        let mut c = cfg(allowed, allow_private);
+        c.notify.gotify_url = urls[0].to_string();
+        c.notify.ntfy_url = urls[1].to_string();
+        c.notify.webhook_url = urls[2].to_string();
+        c.notify.allow_http = true;
+        c
+    }
+
+    fn blocked_with(err: FerroResult<()>) -> String {
+        match err {
+            Err(FerroError::TargetBlocked(m)) => m,
+            other => panic!("expected TargetBlocked, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn notifier_host_names_are_refused_on_every_port_even_when_listed_as_allowed() {
+        let c = notify_cfg(
+            "gotify.lan,ntfy.lan,notify-sink,mock-api",
+            true,
+            [
+                "http://gotify.lan:8080",
+                "https://ntfy.lan/ferrowarden",
+                "http://notify-sink:7777/notify",
+            ],
+        );
+        let p = TargetPolicy::from_config(&c);
+        for url in [
+            "http://gotify.lan:8080/message",
+            "http://gotify.lan:9999/anything",
+            "https://GOTIFY.lan/",
+            "https://ntfy.lan/ferrowarden",
+            "http://ntfy.lan:80/other",
+            "http://notify-sink:7777/notify",
+            "http://notify-sink:7777/__requests__",
+            "http://notify-sink/",
+        ] {
+            let m = blocked_with(p.check_url(&Url::parse(url).unwrap()).await);
+            assert!(m.contains("notification endpoint"), "{url}: {m}");
+            assert!(!m.contains("gotify") && !m.contains("notify-sink"), "{m}");
+        }
+        // The host next to it (same address, other name) is not affected.
+        for url in [
+            "http://mock-api:7777/api/check",
+            "http://other.example.com/",
+        ] {
+            assert!(
+                p.check_url(&Url::parse(url).unwrap()).await.is_ok(),
+                "{url}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_resolver_path_refuses_notifier_names_too() {
+        let c = notify_cfg("localhost", true, ["", "", "http://localhost:9999/notify"]);
+        let p = Arc::new(TargetPolicy::from_config(&c));
+        for port in [9999, 80] {
+            let r = p.resolver(port);
+            let err = match r.resolve("LocalHost".parse().unwrap()).await {
+                Ok(_) => panic!("the notifier host must be refused"),
+                Err(e) => e,
+            };
+            let blocked = err.downcast_ref::<BlockedTarget>().expect("BlockedTarget");
+            assert!(blocked.0.contains("notification endpoint"), "{blocked}");
+        }
+        // Without the notifier, the same allowed name resolves.
+        let p = Arc::new(TargetPolicy::from_config(&cfg("localhost", true)));
+        assert!(p
+            .resolver(9999)
+            .resolve("localhost".parse().unwrap())
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_notifier_ip_literal_is_refused_on_its_port_only() {
+        let c = notify_cfg(
+            "",
+            true,
+            ["", "http://127.0.0.1:9999/topic", "http://[::1]:7777/n"],
+        );
+        let p = TargetPolicy::from_config(&c);
+        for url in ["http://127.0.0.1:9999/message", "http://[::1]:7777/x"] {
+            blocked_with(p.check_url(&Url::parse(url).unwrap()).await);
+        }
+        // Another service on the same address is a different target.
+        for url in [
+            "http://127.0.0.1:9998/",
+            "http://127.0.0.1/",
+            "http://[::1]:7778/",
+        ] {
+            assert!(
+                p.check_url(&Url::parse(url).unwrap()).await.is_ok(),
+                "{url}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ip_literal_that_a_notifier_name_resolves_to_is_refused() {
+        // `localhost` resolves to loopback addresses; the notifier is there on 9999.
+        let c = notify_cfg("", true, ["", "", "http://localhost:9999/n"]);
+        let p = TargetPolicy::from_config(&c);
+        let resolved: Vec<IpAddr> = tokio::net::lookup_host(("localhost", 9999))
+            .await
+            .unwrap()
+            .map(|a| a.ip())
+            .collect();
+        assert!(!resolved.is_empty());
+        for ip in resolved {
+            let url = match ip {
+                IpAddr::V4(v4) => format!("http://{v4}:9999/x"),
+                IpAddr::V6(v6) => format!("http://[{v6}]:9999/x"),
+            };
+            blocked_with(p.check_url(&Url::parse(&url).unwrap()).await);
+        }
+    }
+
+    #[test]
+    fn an_address_shared_with_a_notifier_is_the_operators_call_by_name_only() {
+        // notify-sink and mock-api share 10.0.0.5:7777 (compose aliases). The
+        // operator listed mock-api, so that name still works; any other way
+        // to the same address and port is refused.
+        let mut c = notify_cfg("mock-api", true, ["", "", "http://notify-sink:7777/n"]);
+        c.allow_private_targets = false;
+        let p = TargetPolicy::from_config(&c);
+        let shared: IpAddr = "10.0.0.5".parse().unwrap();
+        let denied = DeniedAddrs {
+            vault: Vec::new(),
+            notifiers: vec![(shared, 7777)],
+        };
+        assert!(p.check_ip("mock-api", shared, 7777, &denied).is_ok());
+        assert!(p.check_ip("mock-api", shared, 7778, &denied).is_ok());
+        let m = p
+            .check_ip("notify-sink", shared, 7777, &denied)
+            .unwrap_err();
+        assert!(m.contains("notification endpoint"), "{m}");
+        let m = p.check_ip("10.0.0.5", shared, 7777, &denied).unwrap_err();
+        assert!(m.contains("notification endpoint"), "{m}");
+        // A name that is not listed falls to the private-address rule anyway.
+        assert!(p.check_ip("evil.example", shared, 7777, &denied).is_err());
+        // Even listed, the notifier's own name never passes.
+        let c = notify_cfg(
+            "mock-api,notify-sink",
+            false,
+            ["", "", "http://notify-sink:7777/n"],
+        );
+        let p = TargetPolicy::from_config(&c);
+        assert!(p.check_ip("notify-sink", shared, 1234, &denied).is_err());
+    }
+
+    #[tokio::test]
+    async fn without_a_notifier_nothing_extra_is_denied() {
+        let p = TargetPolicy::from_config(&cfg("notify-sink", true));
+        assert!(p
+            .check_url(&Url::parse("http://notify-sink:7777/").unwrap())
+            .await
+            .is_ok());
     }
 
     #[test]

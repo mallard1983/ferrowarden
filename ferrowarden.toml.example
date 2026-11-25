@@ -132,6 +132,31 @@ max_response_bytes = 10485760
 # syslog_ca_file = "/run/certs/siem-ca.pem" # extra CA for tls://, besides the public roots
 
 
+# ── Push notifications ──────────────────────────────────────────────────────
+#
+# Tell Gotify, ntfy or a generic webhook about blocked requests, repeated
+# authentication failures, vault lock/unlock failures and (opt-in) admin changes.
+# Off unless a URL is set. Best effort and rate limited; never delays a
+# request. See docs/notifications.md. Environment: FERROWARDEN_NOTIFY__<KEY>.
+#
+# TOKENS ARE NOT SET HERE. Set them in the environment or in a secret file:
+#   FERROWARDEN_NOTIFY_GOTIFY_TOKEN  / FERROWARDEN_NOTIFY_GOTIFY_TOKEN_FILE   (required with gotify_url)
+#   FERROWARDEN_NOTIFY_NTFY_TOKEN    / FERROWARDEN_NOTIFY_NTFY_TOKEN_FILE     (optional)
+#   FERROWARDEN_NOTIFY_WEBHOOK_TOKEN / FERROWARDEN_NOTIFY_WEBHOOK_TOKEN_FILE  (optional, sent as a bearer token)
+#
+# [notify]
+# gotify_url = "https://gotify.example.com"               # POST {gotify_url}/message
+# ntfy_url = "https://ntfy.example.com/ferrowarden"       # the full topic URL
+# webhook_url = "https://hooks.example.com/ferrowarden"   # JSON POST (Matrix, Slack, ... via their bridges)
+# events = ["blocked", "auth_failure", "vault", "system"]   # add "admin" for key changes and UI sign-ins
+# min_interval_secs = 60          # per category and subject; the rest are summarised
+# max_per_hour = 60               # all notifications together, then one "paused" notice
+# auth_failure_threshold = 5      # failed authentications from one IP ...
+# auth_failure_window_secs = 300  # ... within this many seconds
+# allow_http = false              # true permits http:// URLs for hosts other than this machine
+# ca_file = "/run/certs/notifier-ca.pem"   # extra CA for the notifier URLs
+
+
 # ── Admin web UI ────────────────────────────────────────────────────────────
 #
 # Optional operator UI on its own port (separate from the API): sign in with the

@@ -376,6 +376,17 @@ curl https://<ferrowarden-host>:3000/v1/admin/status \
 
 A `locked: true` response means all proxy requests are failing. Unlock the vault (manual mode) or check startup logs for why file-mode unlock failed.
 
+### Push notifications
+
+Ferrowarden can push blocked requests, repeated authentication failures, vault lock and unlock failures, and (opt-in) admin changes to Gotify, ntfy or a generic webhook. Configure a sender (`[notify]`, `FERROWARDEN_NOTIFY__*`), put its token in a secret file (`FERROWARDEN_NOTIFY_*_TOKEN_FILE`), restart, then check it:
+
+```sh
+curl -X POST https://<ferrowarden-host>:3000/v1/admin/notify/test \
+  -H "X-Admin-Key: $ADMIN_KEY" --cacert certs/server.crt
+```
+
+The admin UI status page shows the same test as a button, with the enabled senders, the categories and the counters (sent, failed, suppressed, dropped). Notifications are best effort and rate limited; they do not replace shipping the [events](events.md) to a persistent sink. Setup, what a notification contains, and limits are in [notifications.md](notifications.md).
+
 ---
 
 ## Troubleshooting

@@ -13,7 +13,7 @@ pub mod sinks;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
@@ -23,6 +23,7 @@ use sinks::Sink;
 use crate::config::EventsConfig;
 use crate::error::{FerroError, FerroResult};
 use crate::middleware::request_context::RequestContext;
+use crate::notify::Feed;
 use crate::state::AgentKey;
 
 /// Events written per sink flush.
@@ -40,6 +41,9 @@ struct Shared {
     dropped: AtomicU64,
     /// Events dropped since start (never reset); shown on the admin UI.
     dropped_total: AtomicU64,
+    /// The push notifier's queue, once one is attached. Offering an event to
+    /// it is a classification and a `try_send`: it cannot block.
+    notify: OnceLock<Feed>,
 }
 
 impl Shared {
@@ -73,6 +77,7 @@ impl EventLog {
                 capacity: capacity.max(1),
                 dropped: AtomicU64::new(0),
                 dropped_total: AtomicU64::new(0),
+                notify: OnceLock::new(),
             }),
             tx: None,
         }
@@ -97,10 +102,21 @@ impl EventLog {
         log
     }
 
+    /// Connect the push notifier (docs/notifications.md). Only the first call
+    /// has an effect.
+    pub fn attach_notifier(&self, feed: Feed) {
+        let _ = self.shared.notify.set(feed);
+    }
+
     /// Record an event. Never blocks, never fails.
     pub fn emit(&self, event: SecurityEvent) {
         let event = Arc::new(event);
         self.shared.push(event.clone());
+        // The notifier has its own queue: a stalled sink cannot hold it up,
+        // and it cannot hold up the sinks.
+        if let Some(feed) = self.shared.notify.get() {
+            feed.offer(&event);
+        }
         let Some(tx) = &self.tx else { return };
         if tx.try_send(Msg::Event(event)).is_err() {
             // Queue full (or the writer is gone). Count it; the writer reports
@@ -199,6 +215,9 @@ async fn run_writer(mut rx: mpsc::Receiver<Msg>, mut sinks: Vec<Sink>, shared: A
                     .detail("dropped", dropped),
             );
             shared.push(event.clone());
+            if let Some(feed) = shared.notify.get() {
+                feed.offer(&event);
+            }
             write_event(&mut sinks, &event).await;
         }
 

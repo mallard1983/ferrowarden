@@ -10,6 +10,7 @@ The UI is **off by default**. When you turn it on, it listens on its own port, s
 
 - **Sign in with your Vaultwarden master password**, including two-step login (authenticator app, email code or YubiKey OTP). Vaultwarden itself checks the password; Ferrowarden has no password of its own to guard.
 - A **status page**: vault locked or unlocked, credential count, last sync, Ferrowarden version, TLS/HTTPS state, agent key count and how many keys have **no policy** (those keys are deny-all until a policy is set), events dropped, the signed-in account and when your session ends. A **Sign out** button.
+- A **Notifications** section on the status page: which [push notifiers](notifications.md) are enabled (type and host only, never the URL or a token), which categories they cover, the counters (sent, failed, suppressed by the rate limits, dropped) and a **Send test notification** button that sends one test message to every sender and shows what each answered. It is a POST with the CSRF token and the same-origin check, needs no recent sign-in (it changes nothing), and accepts one test every 10 seconds.
 - **Keys, policy editor and audit pages**, described under [Managing keys](#managing-keys) and [Audit view](#audit-view).
 - No JavaScript, no external scripts, fonts or CDNs. Works at phone width and follows your system's light or dark setting. See [Appearance](#appearance).
 
@@ -250,6 +251,7 @@ Every UI action is a [security event](events.md) with a request ID and the clien
 |---|---|
 | `ui_login` | Sign-in attempt. Outcome `success`, `failure`, or `unknown` for step one of two-step. Reasons: `invalid_credentials`, `two_factor_required`, `two_factor_failed`, `login_locked_out`, `upstream_rate_limited`, `upstream_error`, `insecure_transport`. `details.provider` for second-factor steps |
 | `ui_two_factor_email_sent` | A code was requested (or the request failed) |
+| `notify_test` | The Send test notification button was used (`details.via` is `ui`; outcome `failure` if a sender did not accept it) |
 | `ui_logout` | Signed out |
 | `ui_session_expired` | An expired session was detected |
 | `key_create`, `key_revoke`, `key_policy_change`, `policy_preview`, `key_list`, `audit_read` | The same events as the admin API, with `ferrowarden.details.via` set to `"ui"` (the API sets `"api"`), so a SIEM can tell them apart. Never a token |

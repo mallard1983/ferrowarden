@@ -265,6 +265,7 @@ mod tests {
             admin_rate_limit_burst: 5,
             events: Default::default(),
             ui: Default::default(),
+            notify: Default::default(),
         }))
     }
 

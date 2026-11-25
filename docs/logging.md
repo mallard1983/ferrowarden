@@ -238,6 +238,12 @@ Alloy keeps IPs, request ids and key names out of the labels; query them with `|
 
 ---
 
+## Push notifications
+
+Events are for your log pipeline; to be told about the important ones right away (a blocked request, repeated authentication failures, the vault locking), Ferrowarden can also push a short message to Gotify, ntfy or a generic webhook. It is fed by the same event stream, never contains more than an allow-listed handful of fields (credential names, target host, key name, source IP, request id, reason; never values, paths, queries or headers), is rate limited, and never delays a request or an event sink. See [notifications.md](notifications.md).
+
+---
+
 ## Log Retention Recommendations
 
 | Destination | Retention | Notes |
