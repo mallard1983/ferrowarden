@@ -103,6 +103,16 @@ if (-not (Test-Path $adminKeyFile)) {
     Write-Sub 'Skipping: ferrowarden_admin_key already exists'
 }
 
+# Bearer token for the notifier's webhook to the mock API's notification sink
+# (docker-compose.test.yml). Test fixture; the secret gate checks for it.
+$notifyTokenFile = "$secretsDir\notify_webhook_token"
+if (-not (Test-Path $notifyTokenFile)) {
+    Write-Secret $notifyTokenFile (New-RandomToken 40)
+    Write-Sub 'Generated: notify_webhook_token'
+} else {
+    Write-Sub 'Skipping: notify_webhook_token already exists'
+}
+
 # ── Generate self-signed TLS certificate (if not already present) ────────────
 
 Write-Step '[1b/7] Generating TLS certificate...'
@@ -243,6 +253,7 @@ FERROWARDEN_INTEGRATION=1
 FERROWARDEN_TEST_URL=$ferroUrl
 FERROWARDEN_TEST_ADMIN_KEY=$($adminKey.Trim())
 FERROWARDEN_TEST_AGENT_KEY=$($agentKeyVal.Trim())
+FERROWARDEN_TEST_NOTIFY_TOKEN=$((Get-Content -Raw $notifyTokenFile).Trim())
 MOCK_API_URL=http://localhost:7777
 "@
 

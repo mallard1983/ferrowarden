@@ -24,7 +24,7 @@ This document describes what Ferrowarden is designed to protect against, the sec
 
 | Actor | Threat | Mitigation |
 |---|---|---|
-| The AI agent | Exfiltrates credentials through conversation or logs, or by steering the proxy (sending a credential to a host that echoes it back, or calling bw serve directly) | Agent API tokens are scoped to the proxy only; credentials are bound to the hosts in their vault item URIs; internal targets (always including bw serve) are blocked; every encoding of each substituted value is scrubbed from responses and errors |
+| The AI agent | Exfiltrates credentials through conversation or logs, or by steering the proxy (sending a credential to a host that echoes it back, or calling bw serve directly) | Agent API tokens are scoped to the proxy only; credentials are bound to the hosts in their vault item URIs; internal targets (always including bw serve and the notifier hosts) are blocked; every encoding of each substituted value is scrubbed from responses and errors |
 | The model provider | Logs prompt content including credentials | Credential values are not placed in the agent conversation by design: the agent only handles placeholders and scrubbed responses |
 | Target services | Return credential values or credential-shaped content in responses | Exact substituted values (raw, JSON-escaped, URL-encoded, base64) are scrubbed from body and headers, then common credential patterns |
 | An attacker who compromises the agent process | Reads credential values from agent memory or conversation | Same as AI agent above |
@@ -206,7 +206,7 @@ Placeholders may not appear in the URL's scheme, host, or port: the host is fixe
 
 Every address a target resolves to is checked inside Ferrowarden's DNS resolver, so the address checked is the address connected to (no DNS-rebinding gap):
 
-- **Always refused:** the bw serve endpoint (by host name, and by resolved IP + port), unspecified, multicast and broadcast addresses.
+- **Always refused:** the bw serve endpoint (by host name, and by resolved IP + port), the hosts of the configured [notifier URLs](notifications.md#notifier-hosts-are-off-limits-to-agents) (an agent must not be able to post fake notifications or flood your phone), unspecified, multicast and broadcast addresses.
 - **Refused unless allowed:** loopback, RFC 1918 private, CGNAT, link-local (including `169.254.169.254` cloud metadata), IPv6 ULA/link-local, and other non-public ranges. Allow specific ones with `allowed_targets` (CIDRs, IPs, or host names) or all of them with `allow_private_targets = true`.
 - **Allowed:** public addresses.
 
@@ -259,6 +259,8 @@ Credential values, agent tokens and their hashes, the admin key, the master pass
 Events are written to stdout (default), optionally a rotating file and syslog (UDP, TCP or TLS), and to an in-memory ring buffer (default 1000 events) behind `GET /v1/admin/audit`. Logging never blocks or fails a request; if the sink queue overflows, events are dropped for the sinks and an `events_dropped` event reports the count.
 
 **Recommendation:** ship the events to a persistent sink (Loki, Wazuh, a file, syslog) so the trail survives a restart, and alert on repeated `agent_auth` failures, any `credential_host_not_allowed` or `target_blocked` forward, and `admin_auth` failures.
+
+**Push notifications.** Ferrowarden can also send the important events to Gotify, ntfy or a generic webhook ([notifications.md](notifications.md)). A notification is built from an allow-listed set of event fields only (credential *names*, target *host*, key name, source IP, request id, reason code), never a value, token, URL path or query, header or body; the notifier tokens come only from the environment or a secret file and are never logged; and a slow or failing notifier cannot delay a request or an event sink, at the cost that notifications are best effort.
 
 ---
 

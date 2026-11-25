@@ -1083,6 +1083,7 @@ async fn every_new_post_route_enforces_csrf_origin_and_strict_forms() {
             ],
         ),
         (format!("/ui/keys/{id}/revoke"), vec![]),
+        ("/ui/notify/test".into(), vec![]),
         ("/ui/logout".into(), vec![]),
     ];
     for (path, extra) in &routes {

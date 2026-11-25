@@ -5,6 +5,7 @@ mod events;
 mod keys;
 mod middleware;
 mod net;
+mod notify;
 mod policy;
 mod proxy;
 mod state;
@@ -46,6 +47,19 @@ fn startup_event(
         .detail("api_prefix_set", !config.api_prefix.is_empty())
         .detail("agent_key_count", agent_key_count)
         .detail("sinks", config.events.enabled_sinks())
+        .detail(
+            "notify_senders",
+            config
+                .notify
+                .urls()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+        )
+        .detail(
+            "notify_allow_http",
+            config.notify.enabled() && config.notify.allow_http,
+        )
         .detail("ui_enabled", config.ui.enabled())
         .detail("ui_tls", config.ui.enabled() && config.tls_enabled)
         .detail(
@@ -141,7 +155,16 @@ async fn main() -> anyhow::Result<()> {
     // sinks (stdout by default). Application logs stay on tracing.
     let events = EventLog::start(&config.events)?;
 
-    let state = Arc::new(AppState::new(config.clone(), events.clone()));
+    // Push notifications: another consumer of the event stream, with its own
+    // queue and workers. Nothing starts unless a sender URL is configured.
+    let notify = notify::start(&config.notify, &events)?;
+    if config.notify.enabled() && config.notify.allow_http {
+        tracing::warn!(
+            "notify.allow_http = true: notifications to http:// URLs cross the network in clear text"
+        );
+    }
+
+    let state = Arc::new(AppState::new(config.clone(), events.clone()).with_notify(notify));
 
     // Load persisted agent keys if a key file is configured. Keys written by
     // 0.1.0 carry no policy and load as deny-all; they are counted so the

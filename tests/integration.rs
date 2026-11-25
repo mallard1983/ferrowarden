@@ -2907,6 +2907,12 @@ fn extra_secrets_file() -> std::path::PathBuf {
 
 fn record_secret_for_gate(value: &str) {
     use std::io::Write;
+    // Start from an empty file once per test run, so values of an earlier
+    // run are not carried along, and no test erases another's.
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
+        let _ = std::fs::remove_file(extra_secrets_file());
+    });
     let path = extra_secrets_file();
     let _ = std::fs::create_dir_all(path.parent().unwrap());
     let mut f = std::fs::OpenOptions::new()
@@ -2944,7 +2950,6 @@ async fn credentials_for(env: &TestEnv, token: &str) -> (u16, Vec<String>) {
 #[tokio::test]
 async fn test_ui_key_lifecycle() {
     let Some(env) = TestEnv::load() else { return };
-    let _ = std::fs::remove_file(extra_secrets_file());
     let mut b = env.ui_browser();
     let r = b.sign_in(&master_password()).await;
     assert_eq!(r.status, 303, "sign-in");
@@ -3611,6 +3616,7 @@ async fn test_openapi_admin_responses_match_the_spec() {
             "/v1/admin/keys/{id}/preview",
         ),
         ("POST", "/v1/unlock", "/v1/unlock"),
+        ("POST", "/v1/admin/notify/test", "/v1/admin/notify/test"),
     ] {
         for key in [None, Some("not-the-admin-key")] {
             let mut req = env.client.request(
@@ -3703,4 +3709,355 @@ async fn test_openapi_endpoint_serves_the_right_view_to_each_key() {
         let e = env.event_for(&rid, "openapi_read").await;
         assert_eq!(e["ferrowarden"]["details"]["variant"], "admin");
     }
+}
+
+// ── Push notifications ────────────────────────────────────────────────────────
+//
+// The test stack points Ferrowarden's notifier at `http://notify-sink:7777/notify`:
+// a second network alias of the mock API, which records requests made under that
+// name in a log of their own (`/__notifications__`), so a notification can never be
+// mistaken for a forwarded request in `/__requests__/last`.
+
+impl TestEnv {
+    async fn notifications(&self) -> Vec<Value> {
+        self.client
+            .get(format!("{}/__notifications__", self.mock_url))
+            .send()
+            .await
+            .expect("mock API request failed")
+            .json::<Vec<Value>>()
+            .await
+            .expect("mock API response was not JSON")
+    }
+
+    async fn reset_notifications(&self) {
+        self.client
+            .post(format!("{}/__notifications__/reset", self.mock_url))
+            .send()
+            .await
+            .expect("mock API reset failed");
+    }
+
+    /// Wait (up to 20 s) for a notification the sink received that `pred` accepts.
+    async fn wait_for_notification(&self, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
+        for _ in 0..80 {
+            if let Some(n) = self
+                .notifications()
+                .await
+                .into_iter()
+                .find(|n| pred(&notification_json(n)))
+            {
+                return n;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        panic!(
+            "no notification for {what}; the sink received:\n{:#?}",
+            self.notifications().await
+        );
+    }
+
+    /// POST /v1/admin/notify/test until it is not refused for being too soon.
+    async fn notify_test(&self, spec: &Spec) -> Value {
+        for _ in 0..4 {
+            let r = self.admin_call("POST", "/v1/admin/notify/test", None).await;
+            let (status, body) = spec.check("/v1/admin/notify/test", "POST", r).await;
+            match status {
+                200 => return body,
+                429 => tokio::time::sleep(std::time::Duration::from_secs(5)).await,
+                other => panic!("the test notification answered {other}"),
+            }
+        }
+        panic!("the test notification stayed rate limited");
+    }
+}
+
+/// Whether a captured notification carries `Authorization: Bearer <the test
+/// stack's notifier token>`. A bool, so a failure never prints the token.
+fn has_notifier_bearer(captured: &Value) -> bool {
+    captured_header(captured, "authorization")
+        == Some(format!("Bearer {}", notify_token()).as_str())
+}
+
+/// The JSON body of a captured notification (`Null` if it is not JSON).
+fn notification_json(n: &Value) -> Value {
+    serde_json::from_str(n["body"].as_str().unwrap_or("")).unwrap_or(Value::Null)
+}
+
+fn notify_token() -> String {
+    env::var("FERROWARDEN_TEST_NOTIFY_TOKEN")
+        .expect("FERROWARDEN_TEST_NOTIFY_TOKEN must be set (run scripts/dev-setup again)")
+}
+
+/// A fresh key per test: notifications are limited per key, so one test's
+/// notification can never hold back another's.
+async fn fresh_key(env: &TestEnv, label: &str) -> (String, String, String) {
+    let name = format!("{label}-{}", unique_suffix());
+    let (id, token) = env.create_key(&name, json!(["*"]), json!(["*"])).await;
+    record_secret_for_gate(&token);
+    (name, id, token)
+}
+
+fn unique_suffix() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{:x}", n % 0xffff_ffff)
+}
+
+/// A request blocked by credential host binding becomes one webhook POST with the
+/// documented fields, a bearer token from the secret file, and nothing else of
+/// the request: no path, query, placeholder or value.
+#[tokio::test]
+async fn test_notify_blocked_forward_posts_a_webhook_without_path_query_or_values() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_notifications().await;
+    let (name, id, token) = fresh_key(&env, "notify-blocked").await;
+
+    let resp = env
+        .forward_as(
+            &token,
+            "GET",
+            "/api/unbound/secret-path-segment?probe=query-marker-1",
+            json!({ "Authorization": "Bearer {{vault:test_unbound}}" }),
+        )
+        .await;
+    assert_eq!(resp.status(), 403);
+    let rid = request_id(&resp);
+
+    let n = env
+        .wait_for_notification("the blocked forward", |b| {
+            b["event"]["key_name"] == name.as_str()
+        })
+        .await;
+    assert_eq!(n["method"], "POST");
+    assert_eq!(n["path"], "/notify");
+    assert!(
+        has_notifier_bearer(&n),
+        "the bearer token from the secret file was not sent"
+    );
+    assert!(captured_header(&n, "content-type")
+        .unwrap()
+        .starts_with("application/json"));
+
+    let body = notification_json(&n);
+    assert_eq!(body["source"], "ferrowarden");
+    assert_eq!(body["schema_version"], 1);
+    assert_eq!(body["category"], "blocked");
+    assert_eq!(body["severity"], "high");
+    assert_eq!(body["title"], "Ferrowarden: request blocked");
+    assert_eq!(body["suppressed"], 0);
+    let event = &body["event"];
+    assert_eq!(event["action"], "forward");
+    assert_eq!(event["outcome"], "failure");
+    assert_eq!(event["reason"], "credential_host_not_allowed");
+    assert_eq!(event["key_name"], name.as_str());
+    assert_eq!(event["key_id"], id[..8].to_string());
+    assert_eq!(event["credentials"], json!(["test_unbound"]));
+    assert_eq!(event["target_host"], "mock-api");
+    assert_eq!(event["request_id"], rid.as_str());
+    assert!(event["source_ip"].is_string() && event["timestamp"].is_string());
+
+    // Only allow-listed fields.
+    let allowed = [
+        "category",
+        "action",
+        "outcome",
+        "reason",
+        "key_name",
+        "key_id",
+        "credentials",
+        "target_host",
+        "source_ip",
+        "request_id",
+        "timestamp",
+        "count",
+    ];
+    for key in event.as_object().unwrap().keys() {
+        assert!(allowed.contains(&key.as_str()), "unexpected field {key}");
+    }
+
+    // Nothing of the URL beyond the host, nothing secret.
+    let text = n["body"].as_str().unwrap();
+    for (i, bad) in [
+        "secret-path-segment",
+        "/api/unbound",
+        "query-marker-1",
+        "probe",
+        "{{",
+        "Authorization",
+        "Bearer",
+        token.as_str(),
+        env.admin_key.as_str(),
+        notify_token().as_str(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // The index, not the text: some of these are secrets.
+        assert!(
+            !text.contains(bad),
+            "forbidden item #{i} is in the notification"
+        );
+    }
+    for secret in seeded_secrets() {
+        assert!(!text.contains(&secret), "a seeded secret is in the payload");
+    }
+    env.revoke_key(&id).await;
+}
+
+/// Repeated bad agent keys: one `auth_failure` notification once the threshold
+/// is reached, and the rest are folded into it, not sent one by one.
+#[tokio::test]
+async fn test_notify_repeated_bad_agent_keys_make_one_notification_after_the_threshold() {
+    let Some(env) = TestEnv::load() else { return };
+    // Let any auth_failure notice of an earlier test pass its interval.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    env.reset_notifications().await;
+
+    for i in 0..8 {
+        let r = env
+            .agent_get(
+                "/v1/credentials",
+                Some(&format!("not-a-key-{i}-0123456789")),
+            )
+            .await;
+        assert_eq!(r.status(), 401);
+    }
+    let n = env
+        .wait_for_notification("repeated authentication failures", |b| {
+            b["category"] == "auth_failure"
+        })
+        .await;
+    let body = notification_json(&n);
+    assert_eq!(
+        body["title"],
+        "Ferrowarden: repeated authentication failures"
+    );
+    assert_eq!(body["severity"], "high");
+    assert!(body["event"]["count"].as_u64().unwrap() >= 5, "{body}");
+    assert!(body["event"]["source_ip"].is_string());
+    let text = n["body"].as_str().unwrap();
+    assert!(
+        !text.contains("not-a-key"),
+        "a presented key is in the payload"
+    );
+
+    // The burst was folded into that one notification.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let auth: Vec<Value> = env
+        .notifications()
+        .await
+        .into_iter()
+        .filter(|n| notification_json(n)["category"] == "auth_failure")
+        .collect();
+    assert_eq!(auth.len(), 1, "one notification for the burst: {auth:#?}");
+}
+
+/// The test endpoint sends to the sink and reports ok; its answers match the spec
+/// (200, then 429 for a second test within ten seconds, and 401 without a key).
+#[tokio::test]
+async fn test_notify_test_endpoint_reports_ok_and_sends_a_test_notification() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_notifications().await;
+
+    let body = env.notify_test(&spec).await;
+    assert_eq!(
+        body,
+        json!({ "results": [{ "sender": "webhook", "ok": true, "status": 200 }] })
+    );
+    let n = env
+        .wait_for_notification("the test notification", |b| {
+            b["title"] == "Ferrowarden: test notification"
+        })
+        .await;
+    assert!(
+        has_notifier_bearer(&n),
+        "the bearer token from the secret file was not sent"
+    );
+    let sent = notification_json(&n);
+    assert_eq!(sent["category"], "system");
+    assert_eq!(sent["severity"], "normal");
+    assert_eq!(sent["event"]["action"], "notify_test");
+
+    // A second test right away is refused (documented 429 with Retry-After).
+    let r = env.admin_call("POST", "/v1/admin/notify/test", None).await;
+    assert!(r.headers().contains_key("retry-after"));
+    assert_eq!(spec.check("/v1/admin/notify/test", "POST", r).await.0, 429);
+
+    for key in [None, Some("not-the-admin-key")] {
+        let mut req = env
+            .client
+            .post(format!("{}/v1/admin/notify/test", env.fw_url));
+        if let Some(key) = key {
+            req = req.header("X-Admin-Key", key);
+        }
+        let r = req.send().await.unwrap();
+        assert_eq!(spec.check("/v1/admin/notify/test", "POST", r).await.0, 401);
+    }
+
+    let events = env.events(200).await;
+    assert!(
+        events.iter().any(|e| e["event"]["action"] == "notify_test"
+            && e["ferrowarden"]["details"]["via"] == "api"
+            && e["event"]["outcome"] == "success"),
+        "a notify_test event was recorded"
+    );
+}
+
+/// The notifier's host is off-limits to agents: a forward to it is a 403
+/// `target_blocked` (although `notify-sink` is even listed in `allowed_targets`),
+/// nothing reaches the sink, and the mock API itself, under its own name, stays
+/// reachable.
+#[tokio::test]
+async fn test_notify_hosts_are_denied_to_agents_while_the_mock_api_stays_reachable() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+    env.reset_notifications().await;
+
+    for url in [
+        "http://notify-sink:7777/notify",
+        "http://notify-sink:7777/__requests__",
+        "http://notify-sink:9999/anything",
+        "http://NOTIFY-SINK/",
+    ] {
+        let resp = env
+            .forward_url("POST", url, json!({}), Some(json!({ "x": 1 })))
+            .await;
+        assert_eq!(resp.status(), 403, "{url}");
+        let rid = request_id(&resp);
+        let body: Value = resp.json().await.unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("notification endpoint"),
+            "{body}"
+        );
+        let e = env.event_for(&rid, "forward").await;
+        assert_eq!(e["event"]["reason"], "target_blocked", "{url}");
+    }
+    // No agent request reached the sink: anything it recorded is Ferrowarden's
+    // own POST of a `blocked` notification about the attempts above.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    for n in env.notifications().await {
+        assert_eq!(n["path"], "/notify", "{n}");
+        assert_eq!(notification_json(&n)["category"], "blocked", "{n}");
+    }
+
+    // The same container under its other name is still a valid target.
+    let resp = env
+        .forward(
+            "GET",
+            "/api/check",
+            json!({ "Authorization": "Bearer {{vault:test_api_token}}" }),
+            None,
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let captured = env.last_captured_request().await;
+    assert_eq!(captured["path"], "/mock-api/api/check");
 }

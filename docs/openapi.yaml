@@ -671,6 +671,42 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "429":
           $ref: "#/components/responses/RateLimited"
+  /v1/admin/notify/test:
+    post:
+      operationId: sendTestNotification
+      tags: [admin]
+      summary: Send a test notification
+      description: |
+        Sends one test notification to every enabled notifier (Gotify, ntfy, webhook) now, waits for each answer (up to 10 seconds each, no retries) and reports the result per notifier. The notification carries fixed text only. It is not subject to the notification rate limits, but a second test within 10 seconds of the first gets `429`, and the call counts against the per-IP admin rate limit. With no notifier configured, `results` is empty. The request has no body, and any body or query string is ignored.
+
+        The `error` text is one of a few fixed phrases (`timed out`, `could not connect`, `the request failed`, or `the notifier answered HTTP <status>`). It never contains a URL, a path or a token. See `docs/notifications.md`.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      responses:
+        "200":
+          description: The test was sent. A notifier that failed is reported in `results`, not as an error status.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotifyTestResponse"
+              examples:
+                oneFailed:
+                  value:
+                    results:
+                      - sender: gotify
+                        ok: true
+                        status: 200
+                      - sender: webhook
+                        ok: false
+                        error: could not connect
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 components:
   securitySchemes:
     agentKey:
@@ -1156,6 +1192,32 @@ components:
           type: integer
           minimum: 0
           description: The number of active agent keys.
+    NotifyTestResponse:
+      type: object
+      required: [results]
+      description: The outcome of `sendTestNotification`.
+      properties:
+        results:
+          type: array
+          description: One entry per enabled notifier, in the order gotify, ntfy, webhook. Empty when none is configured.
+          items:
+            $ref: "#/components/schemas/NotifyTestResult"
+    NotifyTestResult:
+      type: object
+      required: [sender, ok]
+      properties:
+        sender:
+          type: string
+          enum: [gotify, ntfy, webhook]
+        ok:
+          type: boolean
+          description: Whether the notifier accepted the notification (a 2xx answer).
+        status:
+          type: integer
+          description: The HTTP status the notifier answered with. Absent when it did not answer.
+        error:
+          type: string
+          description: Why it failed, in fixed words. Absent when `ok` is true.
     ReasonCode:
       type: string
       description: A fixed code that explains a failure. New codes may be added over time, so treat an unknown value as a generic failure.
@@ -1241,6 +1303,7 @@ components:
                 - ui_logout
                 - ui_session_expired
                 - ui_two_factor_email_sent
+                - notify_test
             category:
               type: array
               items:

@@ -158,6 +158,8 @@ services:
     secrets:
       - ferrowarden_admin_key
       - bw_master_password
+      # Notifier tokens, as needed (see the FERROWARDEN_NOTIFY_* lines below):
+      # - gotify_token
     volumes:
       # TLS certificate and private key. Generate before first start.
       # See docs/setup.md Step 0 or scripts/dev-setup.ps1 / dev-setup.sh.
@@ -219,6 +221,18 @@ services:
       # FERROWARDEN_EVENTS__SYSLOG_CA_FILE: "/run/certs/siem-ca.pem"
       # FERROWARDEN_EVENTS__BUFFER_SIZE: "1000"
       # FERROWARDEN_EVENTS__QUEUE_SIZE: "10000"
+      # Push notifications (docs/notifications.md): off unless a URL is set.
+      # Tokens come only from secret files (declare them under `secrets:` below
+      # and in this service's `secrets:` list), never from this file.
+      # FERROWARDEN_NOTIFY__GOTIFY_URL: "https://gotify.example.com"
+      # FERROWARDEN_NOTIFY_GOTIFY_TOKEN_FILE: "/run/secrets/gotify_token"
+      # FERROWARDEN_NOTIFY__NTFY_URL: "https://ntfy.example.com/ferrowarden"
+      # FERROWARDEN_NOTIFY_NTFY_TOKEN_FILE: "/run/secrets/ntfy_token"      # optional
+      # FERROWARDEN_NOTIFY__WEBHOOK_URL: "https://hooks.example.com/ferrowarden"
+      # FERROWARDEN_NOTIFY_WEBHOOK_TOKEN_FILE: "/run/secrets/webhook_token"  # optional
+      # FERROWARDEN_NOTIFY__EVENTS: "blocked,auth_failure,vault,system"      # add admin for key changes
+      # FERROWARDEN_NOTIFY__MIN_INTERVAL_SECS: "60"
+      # FERROWARDEN_NOTIFY__MAX_PER_HOUR: "60"
       # Admin web UI (docs/admin-ui.md): off unless FERROWARDEN_UI__BIND is set.
       # It accepts the vault master password, so it only serves its sign-in form
       # over HTTPS: put a TLS reverse proxy in front and list it in
@@ -334,3 +348,6 @@ secrets:
     file: ./secrets/bw_master_password
   ferrowarden_admin_key:
     file: ./secrets/ferrowarden_admin_key
+  # Notifier tokens (docs/notifications.md): one file each, only if you use them.
+  # gotify_token:
+  #   file: ./secrets/gotify_token

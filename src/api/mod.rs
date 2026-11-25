@@ -48,6 +48,7 @@ enum Op {
     PreviewKeyPolicy,
     ListAuditEvents,
     GetStatus,
+    SendTestNotification,
 }
 
 /// One route of the HTTP API.
@@ -66,7 +67,7 @@ pub struct Route {
 /// router from this table, and a unit test compares it with `docs/openapi.yaml`,
 /// so a route cannot be added without being described there.
 #[rustfmt::skip]
-pub const ROUTES: [Route; 12] = [
+pub const ROUTES: [Route; 13] = [
     Route { method: "GET", path: "/health", group: Group::Public, op: Op::Health },
     Route { method: "GET", path: "/v1/openapi.json", group: Group::Agent, op: Op::OpenApi },
     Route { method: "GET", path: "/v1/credentials", group: Group::Agent, op: Op::ListCredentials },
@@ -79,6 +80,7 @@ pub const ROUTES: [Route; 12] = [
     Route { method: "POST", path: "/v1/admin/keys/{id}/preview", group: Group::Admin, op: Op::PreviewKeyPolicy },
     Route { method: "GET", path: "/v1/admin/audit", group: Group::Admin, op: Op::ListAuditEvents },
     Route { method: "GET", path: "/v1/admin/status", group: Group::Admin, op: Op::GetStatus },
+    Route { method: "POST", path: "/v1/admin/notify/test", group: Group::Admin, op: Op::SendTestNotification },
 ];
 
 /// The axum method filter for a table entry's method.
@@ -108,6 +110,7 @@ fn handler(route: &Route) -> MethodRouter<Arc<AppState>> {
         Op::PreviewKeyPolicy => on(f, admin::preview_key),
         Op::ListAuditEvents => on(f, admin::get_audit),
         Op::GetStatus => on(f, admin::get_status),
+        Op::SendTestNotification => on(f, admin::send_test_notification),
     }
 }
 
@@ -246,6 +249,7 @@ mod tests {
             admin_rate_limit_burst: admin_burst,
             events: Default::default(),
             ui: Default::default(),
+            notify: Default::default(),
         };
         let state = Arc::new(AppState::new(cfg, Arc::new(EventLog::buffer_only(100))));
         (router(state.clone()), state)
@@ -1448,6 +1452,220 @@ mod tests {
         assert_eq!(e["ferrowarden"]["details"]["keys_without_policy"], 2);
         assert_eq!(e["ferrowarden"]["details"]["agent_key_count"], 3);
     }
+    // ── POST /v1/admin/notify/test ────────────────────────────────────────────
+
+    /// Router and state with the notifier started against `notify`.
+    fn build_notify(notify: crate::config::NotifyConfig) -> (Router, Arc<AppState>) {
+        let (_, state) = build("", 1000);
+        let mut state = Arc::try_unwrap(state).ok().expect("sole owner");
+        state.config.notify = notify;
+        let notify = crate::notify::start_with(
+            &state.config.notify,
+            &state.events,
+            crate::notify::senders::SendOptions {
+                timeout: std::time::Duration::from_secs(2),
+                retry_delays: vec![std::time::Duration::from_millis(10)],
+            },
+        )
+        .unwrap();
+        let state = Arc::new(state.with_notify(notify));
+        (router(state.clone()), state)
+    }
+
+    fn webhook_config(base: &str) -> crate::config::NotifyConfig {
+        crate::config::NotifyConfig {
+            webhook_url: format!("{base}/secret-hook-path/abc123"),
+            allow_http: true,
+            min_interval_secs: 0,
+            tokens: crate::config::NotifyTokens {
+                webhook: Some(zeroize::Zeroizing::new("hook-token-ZZZ-9876".into())),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_test_endpoint_needs_the_admin_key() {
+        let (app, state) = app_with_state("");
+        for headers in [
+            vec![],
+            vec![("x-admin-key", "nope")],
+            vec![("x-agent-key", "an-agent-key")],
+        ] {
+            let (s, _, _) = call(&app, "POST", "/v1/admin/notify/test", &headers, None).await;
+            assert_eq!(s, StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(events_of(&state, "admin_auth").len(), 3);
+        assert!(events_of(&state, "notify_test").is_empty());
+        let (s, _, _) = call(
+            &app,
+            "GET",
+            "/v1/admin/notify/test",
+            &[("x-admin-key", ADMIN_KEY)],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn the_test_endpoint_without_a_notifier_reports_an_empty_list() {
+        let (app, state) = app_with_state("");
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            "/v1/admin/notify/test",
+            &[("x-admin-key", ADMIN_KEY)],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(body, json!({ "results": [] }));
+        let e = &events_of(&state, "notify_test")[0];
+        assert_eq!(e["event"]["outcome"], "success");
+        assert_eq!(e["ferrowarden"]["details"]["senders"], 0);
+        assert_eq!(e["ferrowarden"]["details"]["via"], "api");
+    }
+
+    #[tokio::test]
+    async fn the_test_endpoint_sends_to_the_notifier_and_allows_one_per_ten_seconds() {
+        let recv = crate::notify::tests::receiver(vec![], std::time::Duration::ZERO).await;
+        let (app, state) = build_notify(webhook_config(&recv.url));
+        let admin = [("x-admin-key", ADMIN_KEY)];
+
+        let (s, _, body) = call(&app, "POST", "/v1/admin/notify/test", &admin, None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({ "results": [{ "sender": "webhook", "ok": true, "status": 200 }] })
+        );
+        let got = recv.requests();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].path, "/secret-hook-path/abc123");
+        assert_eq!(
+            got[0].headers["authorization"],
+            "Bearer hook-token-ZZZ-9876"
+        );
+        let payload: serde_json::Value = serde_json::from_str(&got[0].body).unwrap();
+        assert_eq!(payload["title"], "Ferrowarden: test notification");
+        assert_eq!(payload["category"], "system");
+
+        // A second one right away is refused like a rate limit.
+        let (s, headers, _) = call(&app, "POST", "/v1/admin/notify/test", &admin, None).await;
+        assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+        let retry: u64 = headers["retry-after"].to_str().unwrap().parse().unwrap();
+        assert!((1..=10).contains(&retry));
+        assert!(headers["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain"));
+        assert!(headers.contains_key("x-request-id"));
+        assert_eq!(recv.requests().len(), 1, "nothing more was sent");
+
+        assert_eq!(events_of(&state, "notify_test").len(), 1);
+        let limited = events_of(&state, "rate_limited");
+        assert_eq!(
+            limited[0]["ferrowarden"]["details"]["limiter"],
+            "notify_test"
+        );
+        // The test itself is never turned into a notification.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(recv.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failing_notifier_is_reported_without_urls_or_tokens() {
+        let recv = crate::notify::tests::receiver(vec![403], std::time::Duration::ZERO).await;
+        let (app, state) = build_notify(webhook_config(&recv.url));
+        let (s, _, body) = call(
+            &app,
+            "POST",
+            "/v1/admin/notify/test",
+            &[("x-admin-key", ADMIN_KEY)],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({ "results": [{
+                "sender": "webhook", "ok": false, "status": 403,
+                "error": "the notifier answered HTTP 403"
+            }] })
+        );
+        let text = body.to_string();
+        for bad in ["secret-hook-path", "abc123", "127.0.0.1", "hook-token"] {
+            assert!(!text.contains(bad), "{bad}");
+        }
+        let e = &events_of(&state, "notify_test")[0];
+        assert_eq!(e["event"]["outcome"], "failure");
+        assert_eq!(e["event"]["reason"], "upstream_error");
+        assert_eq!(e["ferrowarden"]["details"]["failed"], 1);
+        let events = serde_json::to_string(&events_of(&state, "notify_test")).unwrap();
+        assert!(!events.contains("hook-token") && !events.contains("secret-hook-path"));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_forward_through_the_router_reaches_the_notifier_with_allow_listed_fields() {
+        let recv = crate::notify::tests::receiver(vec![], std::time::Duration::ZERO).await;
+        let (app, state) = build_notify(webhook_config(&recv.url));
+        seed(&state).await;
+        let (_, token) = make_agent_with(&app, "lab", r#"["lab_*"]"#, r#"["GET"]"#).await;
+        let url = "https://db.prod/api/v1/rows?apikey={{vault:prod_db}}&q=1";
+        let (s, _) = forward_as(&app, &token, "GET", url).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+
+        let got = recv.wait_for(1).await;
+        let payload: serde_json::Value = serde_json::from_str(&got[0].body).unwrap();
+        assert_eq!(payload["category"], "blocked");
+        assert_eq!(payload["event"]["reason"], "credential_out_of_scope");
+        assert_eq!(payload["event"]["key_name"], "lab");
+        assert_eq!(payload["event"]["target_host"], "db.prod");
+        assert_eq!(payload["event"]["credentials"], json!(["prod_db"]));
+        let text = got[0].body.clone();
+        for bad in [
+            "/api/v1/rows",
+            "apikey",
+            "q=1",
+            "{{",
+            token.as_str(),
+            ADMIN_KEY,
+        ] {
+            assert!(!text.contains(bad), "{bad} in {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_bad_agent_keys_make_one_auth_failure_notification() {
+        let recv = crate::notify::tests::receiver(vec![], std::time::Duration::ZERO).await;
+        let mut cfg = webhook_config(&recv.url);
+        cfg.min_interval_secs = 60;
+        let (app, _state) = build_notify(cfg);
+        for _ in 0..8 {
+            let (s, _, _) = call(
+                &app,
+                "GET",
+                "/v1/credentials",
+                &[("x-agent-key", "wrong-key-0123456789")],
+                None,
+            )
+            .await;
+            assert_eq!(s, StatusCode::UNAUTHORIZED);
+        }
+        let got = recv.wait_for(1).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            recv.requests().len(),
+            1,
+            "one notification, the rest suppressed"
+        );
+        let payload: serde_json::Value = serde_json::from_str(&got[0].body).unwrap();
+        assert_eq!(payload["category"], "auth_failure");
+        assert_eq!(payload["event"]["count"], 5);
+        assert!(!got[0].body.contains("wrong-key"));
+    }
+
     // ── The route table and docs/openapi.yaml ─────────────────────────────────
 
     #[test]

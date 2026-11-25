@@ -1,6 +1,7 @@
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
@@ -9,7 +10,7 @@ use std::sync::Arc;
 use crate::api::key_service::{self, AuditFilter, Caller, CreateKeyResponse, KeySummary, Via};
 use crate::api::strict_json::StrictJson;
 use crate::error::{FerroError, FerroResult};
-use crate::events::{emit_rejected, truncate, Action, Reason, SecurityEvent};
+use crate::events::{emit_rejected, truncate, Action, Outcome, Reason, SecurityEvent};
 use crate::middleware::request_context::RequestContext;
 use crate::policy::{self, Patch};
 use crate::proxy::forward::ProxyRequest;
@@ -281,6 +282,68 @@ pub async fn get_status(
         "credential_count": credential_count,
         "agent_key_count": key_count,
     })))
+}
+
+/// POST /v1/admin/notify/test
+///
+/// Send one test notification to every enabled sender and report each result.
+/// Admin auth required; at most one test every ten seconds.
+pub async fn send_test_notification(
+    State(state): State<Arc<AppState>>,
+    ctx: RequestContext,
+    headers: HeaderMap,
+) -> FerroResult<Response> {
+    authenticate_admin(&state, &ctx, &headers, "/v1/admin/notify/test")?;
+    Ok(match run_notify_test(&state, &ctx, "api").await {
+        Ok(results) => Json(serde_json::json!({ "results": results })).into_response(),
+        Err(wait) => notify_test_too_soon(wait),
+    })
+}
+
+/// Send the test notification and record `notify_test`. `Err(seconds)`: one
+/// was sent less than ten seconds ago. Shared by the API and the admin UI.
+pub(crate) async fn run_notify_test(
+    state: &AppState,
+    ctx: &RequestContext,
+    via: &'static str,
+) -> Result<Vec<crate::notify::TestResult>, u64> {
+    let results = match state.notify.send_test().await {
+        Ok(results) => results,
+        Err(wait) => {
+            state.events.emit(
+                SecurityEvent::new(Action::RateLimited)
+                    .request(ctx)
+                    .status(StatusCode::TOO_MANY_REQUESTS.as_u16())
+                    .detail("limiter", "notify_test"),
+            );
+            return Err(wait);
+        }
+    };
+    let failed = results.iter().filter(|r| !r.ok).count();
+    let mut event = SecurityEvent::new(Action::NotifyTest)
+        .request(ctx)
+        .status(StatusCode::OK.as_u16())
+        .detail("via", via)
+        .detail("senders", results.len())
+        .detail("failed", failed);
+    if failed > 0 {
+        event = event
+            .outcome(Outcome::Failure)
+            .reason(Reason::UpstreamError);
+    }
+    state.events.emit(event);
+    Ok(results)
+}
+
+/// The 429 for a second test within ten seconds: the same plain-text answer
+/// and `Retry-After` as the rate limiters.
+fn notify_test_too_soon(wait: u64) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(axum::http::header::RETRY_AFTER, wait.max(1).to_string())],
+        "Rate limit exceeded. See the Retry-After header.",
+    )
+        .into_response()
 }
 
 /// Check the admin key. Accepts `X-Admin-Key: <key>` (documented) and, for

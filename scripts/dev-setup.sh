@@ -95,6 +95,24 @@ else
     echo "  Skipping: ferrowarden_admin_key already exists"
 fi
 
+# Bearer token for the notifier's webhook to the mock API's notification sink
+# (docker-compose.test.yml). Test fixture; the secret gate checks for it.
+if [ ! -f "$SECRETS_DIR/notify_webhook_token" ]; then
+    if command -v openssl > /dev/null 2>&1; then
+        openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40 \
+            > "$SECRETS_DIR/notify_webhook_token"
+    else
+        python3 -c "
+import secrets, string
+chars = string.ascii_letters + string.digits
+print(''.join(secrets.choice(chars) for _ in range(40)), end='')
+" > "$SECRETS_DIR/notify_webhook_token"
+    fi
+    echo "  Generated: notify_webhook_token"
+else
+    echo "  Skipping: notify_webhook_token already exists"
+fi
+
 # TEST FIXTURES ONLY: the test stack's containers run as UID 999
 # (ferrowarden) and 1000 (bw serve), and Compose mounts file secrets with
 # their host owner and mode, so make them readable to every UID. These
@@ -245,6 +263,7 @@ FERROWARDEN_INTEGRATION=1
 FERROWARDEN_TEST_URL=$FERROWARDEN_URL
 FERROWARDEN_TEST_ADMIN_KEY=$(cat "$SECRETS_DIR/ferrowarden_admin_key")
 FERROWARDEN_TEST_AGENT_KEY=$(cat "$SECRETS_DIR/test_agent_key" 2>/dev/null || echo "")
+FERROWARDEN_TEST_NOTIFY_TOKEN=$(cat "$SECRETS_DIR/notify_webhook_token")
 MOCK_API_URL=http://localhost:7777
 EOF
 

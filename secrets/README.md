@@ -18,4 +18,10 @@ openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48 > ferrowarden_admin_ke
 chmod 600 *
 ```
 
+Optional, for [push notifications](../docs/notifications.md): one file per notifier token, mounted as a Docker secret and named in `FERROWARDEN_NOTIFY_GOTIFY_TOKEN_FILE`, `FERROWARDEN_NOTIFY_NTFY_TOKEN_FILE` or `FERROWARDEN_NOTIFY_WEBHOOK_TOKEN_FILE`:
+
+```sh
+echo -n "YourGotifyApplicationToken" > gotify_token
+```
+
 See [docs/setup.md](../docs/setup.md) for the full setup guide.

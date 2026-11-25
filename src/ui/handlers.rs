@@ -26,7 +26,8 @@ use crate::middleware::request_context::RequestContext;
 use crate::ui::crypto::{self, Kdf};
 use crate::ui::lockout::LockedBy;
 use crate::ui::pages::{
-    InsecurePage, LoginPage, MessagePage, Nav, ProviderOption, StatusPage, SudoInfo, TwoFactorPage,
+    InsecurePage, LoginPage, MessagePage, Nav, NotifySenderRow, NotifyTestView, NotifyView,
+    ProviderOption, StatusPage, SudoInfo, TwoFactorPage,
 };
 use crate::ui::session::{
     random_token, secrets_equal, Lookup, PendingCheck, PendingLogin, SessionView,
@@ -619,7 +620,17 @@ pub async fn index(
         Auth::Expired => return Reply::redirect("/ui/login?m=session").clear(SESSION_COOKIE),
         Auth::None => return Reply::redirect("/ui/login"),
     };
+    status_page(&ui, &view, &transport, None).await
+}
 
+/// The status page for a signed-in session. `test` is the outcome of a test
+/// notification, shown above the Notifications section.
+pub(super) async fn status_page(
+    ui: &UiState,
+    view: &SessionView,
+    transport: &Transport,
+    test: Option<NotifyTestView>,
+) -> Reply {
     let email = ui.account_email().await.unwrap_or_default();
     let nav = Nav {
         current: "status",
@@ -644,6 +655,27 @@ pub async fn index(
         + chrono::Duration::from_std(remaining).unwrap_or_else(|_| chrono::Duration::zero());
     let expires = expires.format("%Y-%m-%d %H:%M UTC").to_string();
 
+    let snapshot = ui.app.notify.snapshot();
+    let notify = NotifyView {
+        enabled: snapshot.enabled(),
+        sent: snapshot.sent(),
+        failed: snapshot.failed(),
+        suppressed: snapshot.suppressed,
+        dropped: snapshot.dropped,
+        categories: snapshot.categories.join(", "),
+        senders: snapshot
+            .senders
+            .into_iter()
+            .map(|s| NotifySenderRow {
+                kind: s.kind,
+                host: s.host,
+                sent: s.sent,
+                failed: s.failed,
+            })
+            .collect(),
+        test,
+    };
+
     page(
         StatusCode::OK,
         StatusPage {
@@ -660,6 +692,8 @@ pub async fn index(
             keys_without_policy,
             events_dropped: ui.app.events.dropped_total(),
             session_expires: &expires,
+            csrf: &view.csrf,
+            notify,
         }
         .render(),
     )

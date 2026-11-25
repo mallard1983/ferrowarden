@@ -2,7 +2,7 @@
 {% block title %}Status{% endblock %}
 {% block content %}
 <h1>Status</h1>
-<p class="muted">Read-only overview. Signed in as {{ account_email }}.</p>
+<p class="muted">Overview. Signed in as {{ account_email }}.</p>
 <dl class="facts">
 <dt>Vault</dt>
 <dd>{% if vault_locked %}<span class="badge bad">Locked</span>{% else %}<span class="badge ok">Unlocked</span>{% endif %}</dd>
@@ -25,4 +25,43 @@
 <dt>Session expires</dt>
 <dd>{{ session_expires }}</dd>
 </dl>
+<h2 id="notifications">Notifications</h2>
+{% if let Some(test) = notify.test %}
+{% if let Some(wait) = test.wait %}
+<p class="alert bad" role="status">A test notification was sent a moment ago. Try again in {{ wait }} seconds.</p>
+{% else if test.rows.is_empty() %}
+<p class="alert bad" role="status">No notifier is configured, so nothing was sent.</p>
+{% else %}
+<div class="alert" role="status">
+<p><strong>Test notification</strong></p>
+<ul>
+{% for row in test.rows %}
+<li>{{ row.sender }}: {% if row.ok %}<span class="badge ok">Sent</span>{% else %}<span class="badge bad">Failed</span>{% endif %} {{ row.detail }}</li>
+{% endfor %}
+</ul>
+</div>
+{% endif %}
+{% endif %}
+{% if notify.enabled %}
+<dl class="facts">
+<dt>Senders</dt>
+<dd>{% for s in notify.senders %}<div>{{ s.kind }} at <code>{{ s.host }}</code> <span class="muted">({{ s.sent }} sent, {{ s.failed }} failed)</span></div>{% endfor %}</dd>
+<dt>Notifies about</dt>
+<dd>{{ notify.categories }}</dd>
+<dt>Sent</dt>
+<dd>{{ notify.sent }}</dd>
+<dt>Failed</dt>
+<dd>{{ notify.failed }}</dd>
+<dt>Suppressed</dt>
+<dd>{{ notify.suppressed }} <span class="muted">(held back by the rate limits)</span></dd>
+<dt>Dropped</dt>
+<dd>{{ notify.dropped }} <span class="muted">(a queue was full)</span></dd>
+</dl>
+<form method="post" action="/ui/notify/test">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<p class="actions"><button type="submit">Send test notification</button></p>
+</form>
+{% else %}
+<p class="muted">No notifier is configured. Set <code>notify.gotify_url</code>, <code>notify.ntfy_url</code> or <code>notify.webhook_url</code>; see <code>docs/notifications.md</code>.</p>
+{% endif %}
 {% endblock %}

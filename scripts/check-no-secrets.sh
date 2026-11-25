@@ -7,7 +7,7 @@
 # It collects every secret the test stack knows about:
 #   - passwords, notes, custom field values and TOTP seeds from
 #     tests/seed/credentials.json
-#   - the test agent key and admin key from .env.test
+#   - the test agent key, admin key and notifier webhook token from .env.test
 #   - the vault master password from secrets/bw_master_password (if present)
 #   - agent tokens the integration tests created during the run, from
 #     target/integration-secrets.txt (or $FERROWARDEN_GATE_EXTRA_SECRETS_FILE)
@@ -92,7 +92,7 @@ for item in items:
 PY
 
 env_value() { sed -n "s/^$1=//p" "$ENV_FILE" | head -n 1 | tr -d '\r'; }
-for var in FERROWARDEN_TEST_AGENT_KEY FERROWARDEN_TEST_ADMIN_KEY; do
+for var in FERROWARDEN_TEST_AGENT_KEY FERROWARDEN_TEST_ADMIN_KEY FERROWARDEN_TEST_NOTIFY_TOKEN; do
     v="$(env_value "$var")"
     [ -n "$v" ] || fail "$var is not set in $ENV_FILE"
     printf '%s\t%s\n' "$var" "$v" >> "$secrets"

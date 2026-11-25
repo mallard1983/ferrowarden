@@ -464,6 +464,31 @@ This replaces the pre-0.2 audit entry format (`timestamp`, `agent_id`, `credenti
 
 ---
 
+### `POST /v1/admin/notify/test`
+
+Send one test [push notification](notifications.md) to every enabled sender (Gotify, ntfy, webhook) now, and report each result. Each sender gets the 10 second timeout and no retries; a sender that fails is reported in the body, not as an error status. The notification carries fixed text only and is not subject to the notification rate limits, but only one test is accepted every 10 seconds. There is no request body.
+
+**Response `200 OK`**
+```json
+{
+  "results": [
+    { "sender": "gotify", "ok": true, "status": 200 },
+    { "sender": "webhook", "ok": false, "error": "could not connect" }
+  ]
+}
+```
+
+`results` has one entry per enabled sender (`gotify`, `ntfy`, `webhook`, in that order) and is empty when none is configured. `status` is the HTTP status the notifier answered with. `error` is one of `timed out`, `could not connect`, `the request failed` or `the notifier answered HTTP <status>`: it never contains a URL, a path or a token.
+
+| Status | Condition |
+|---|---|
+| `401 Unauthorized` | Missing or invalid admin key |
+| `429 Too Many Requests` | The admin rate limit, or a test was sent less than 10 seconds ago (`Retry-After` says when) |
+
+Emits a `notify_test` event.
+
+---
+
 ### `GET /v1/admin/status`
 
 Current operational status.

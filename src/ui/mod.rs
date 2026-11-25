@@ -271,6 +271,7 @@ pub fn router(ui: Arc<UiState>) -> Router {
             get(admin_pages::revoke_get).post(admin_pages::revoke_post),
         )
         .route("/ui/audit", get(admin_pages::audit_get))
+        .route("/ui/notify/test", post(admin_pages::notify_test_post))
         .route("/ui/static/{file}", get(handlers::static_file))
         .route("/favicon.ico", get(handlers::favicon))
         .fallback(handlers::fallback)
