@@ -92,6 +92,7 @@ Every response, including `/health`, 404s and 429s, carries an `X-Request-Id` he
 | `key_list` | iam / access | Admin listed keys. Details: `count` |
 | `audit_read` | web / access | Admin read `/v1/admin/audit`. Details: `limit`, `count` |
 | `status_read` | web / access | Admin read `/v1/admin/status` |
+| `openapi_read` | web / access | An agent key or the admin key fetched the [OpenAPI document](api-reference.md#openapi-description) (`GET /v1/openapi.json`). Details: `variant` (`agent` or `admin`, which view was served). The agent's key is on the event when an agent key was used |
 | `vault_unlock` | authentication / start | Details: `mode` = `manual` (`POST /v1/unlock`), `file` (startup) or `reunlock` (automatic, after bw serve restarted). Failure reason `unlock_failed` |
 | `vault_lock` | configuration / change | The vault went from unlocked to locked. Details: `cause` (`bw_serve_locked`, `forward_vault_locked`). Emitted on the transition only |
 | `vault_sync` | configuration / info | Credential refresh. Always on failure (reason `sync_failed`, details `stage`); on success **only when the credential count changed** (details `credential_count`, `previous`) |

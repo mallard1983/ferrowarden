@@ -10,7 +10,7 @@
 push → build → unit tests → integration tests → (optional) build Docker image
 ```
 
-The unit tests (run with `cargo test --bins`) need only a Rust toolchain. CI also runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
+The unit tests (run with `cargo test --bins`) need only a Rust toolchain. CI also runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`. The unit job also lints `docs/openapi.yaml` with Redocly CLI (`npx --yes @redocly/cli@2.83.0 lint docs/openapi.yaml`, rules in `redocly.yaml`); run the same command locally after editing the spec.
 
 The integration tests (`tests/integration.rs`) require the full Docker Compose stack — Vaultwarden, bw-serve, ferrowarden, and mock-api — all healthy and communicating. This makes integration tests significantly harder to run in CI than unit tests, and the two are separated below so unit tests can pass without a Docker environment.
 

@@ -141,6 +141,7 @@ Behind a TLS reverse proxy such as Pangolin, see [docs/tls.md](docs/tls.md#pango
 | [Security Model](docs/security.md) | Threat model, security properties, limits, design rationale |
 | [Setup Guide](docs/setup.md) | Installation, Vaultwarden setup, first run |
 | [API Reference](docs/api-reference.md) | All endpoints, request/response shapes, error codes |
+| [OpenAPI spec](docs/openapi.yaml) | OpenAPI 3.1 description of the agent and admin API; served at `GET /v1/openapi.json` to holders of a key |
 | [Operations](docs/operations.md) | Unlock modes, key rotation, monitoring, troubleshooting |
 | [Admin Web UI](docs/admin-ui.md) | Optional operator UI: Vaultwarden sign-in with two-step login, sessions, HTTPS and reverse proxy, lockouts |
 | [Security Events](docs/events.md) | Structured event schema for SIEMs; Loki and Wazuh examples in [examples/siem](examples/siem/README.md) |

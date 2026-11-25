@@ -1,0 +1,5 @@
+# Redocly CLI configuration for the CI lint step:
+#   npx --yes @redocly/cli@2.83.0 lint docs/openapi.yaml
+# The recommended ruleset is used as it comes: no rule is turned off.
+extends:
+  - recommended

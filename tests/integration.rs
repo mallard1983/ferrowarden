@@ -3074,3 +3074,633 @@ async fn test_ui_key_lifecycle() {
     let csrf = audit.csrf();
     assert_eq!(b.post("/ui/logout", &[("csrf", &csrf)]).await.status, 303);
 }
+
+// ── OpenAPI conformance ───────────────────────────────────────────────────────
+//
+// docs/openapi.yaml is hand-written, so it can drift from the code. These tests
+// send real requests to the stack and validate what comes back against the
+// operation's response schema in the spec: the status must be documented, the
+// declared headers must be present, and the body must match the schema. Object
+// schemas are checked strictly (`additionalProperties: false` is added where the
+// spec leaves it open), so a field the server sends but the spec does not
+// describe fails the test as well.
+
+/// The parsed `docs/openapi.yaml`.
+struct Spec {
+    doc: Value,
+}
+
+impl Spec {
+    fn load() -> Self {
+        let doc: Value = serde_norway::from_str(include_str!("../docs/openapi.yaml"))
+            .expect("docs/openapi.yaml must parse");
+        Self { doc }
+    }
+
+    /// Follow a local `$ref`, if `v` is one.
+    fn resolve<'a>(&'a self, v: &'a Value) -> &'a Value {
+        match v.get("$ref").and_then(Value::as_str) {
+            Some(r) => self
+                .doc
+                .pointer(r.trim_start_matches('#'))
+                .unwrap_or_else(|| panic!("unresolved $ref {r}")),
+            None => v,
+        }
+    }
+
+    /// The response object for `method path -> status`, with the documented
+    /// statuses listed when it is missing.
+    fn response(&self, path: &str, method: &str, status: u16) -> &Value {
+        let op = self
+            .doc
+            .pointer(&format!(
+                "/paths/{}/{}",
+                path.replace('~', "~0").replace('/', "~1"),
+                method.to_ascii_lowercase()
+            ))
+            .unwrap_or_else(|| panic!("{method} {path} is not in docs/openapi.yaml"));
+        let responses = op["responses"].as_object().expect("responses");
+        match responses.get(&status.to_string()) {
+            Some(r) => self.resolve(r),
+            None => panic!(
+                "{method} {path} answered {status}, which docs/openapi.yaml does not document \
+                 (documented: {:?})",
+                responses.keys().collect::<Vec<_>>()
+            ),
+        }
+    }
+
+    /// A validator for `schema`, resolving `$ref`s against the spec's
+    /// components, with unknown properties turned into errors.
+    fn validator(&self, schema: &Value) -> jsonschema::Validator {
+        let mut root = Self::strict(schema.clone());
+        let obj = root.as_object_mut().expect("schema is an object");
+        obj.insert(
+            "components".into(),
+            Self::strict(self.doc["components"].clone()),
+        );
+        obj.insert(
+            "$schema".into(),
+            json!("https://json-schema.org/draft/2020-12/schema"),
+        );
+        jsonschema::draft202012::new(&root).expect("the schema compiles")
+    }
+
+    /// Add `additionalProperties: false` to every object schema that lists
+    /// `properties` and says nothing about additional ones.
+    fn strict(mut v: Value) -> Value {
+        match &mut v {
+            Value::Object(map) => {
+                if map.contains_key("properties") && !map.contains_key("additionalProperties") {
+                    map.insert("additionalProperties".into(), json!(false));
+                }
+                for child in map.values_mut() {
+                    *child = Self::strict(child.take());
+                }
+            }
+            Value::Array(items) => {
+                for child in items.iter_mut() {
+                    *child = Self::strict(child.take());
+                }
+            }
+            _ => {}
+        }
+        v
+    }
+
+    /// Check one real response against the spec; returns its status and body
+    /// (`Null` when there is none).
+    async fn check(&self, path: &str, method: &str, resp: reqwest::Response) -> (u16, Value) {
+        let status = resp.status().as_u16();
+        let documented = self.response(path, method, status);
+        let what = format!("{method} {path} -> {status}");
+
+        // Headers the spec declares for this response.
+        if let Some(headers) = documented.get("headers").and_then(Value::as_object) {
+            for name in headers.keys() {
+                assert!(
+                    resp.headers().contains_key(name.as_str()),
+                    "{what}: header {name} is declared in the spec but missing"
+                );
+            }
+        }
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let bytes = resp.bytes().await.expect("body");
+
+        let Some(content) = documented.get("content").and_then(Value::as_object) else {
+            assert!(
+                bytes.is_empty(),
+                "{what}: the spec describes no body, got {} bytes",
+                bytes.len()
+            );
+            return (status, Value::Null);
+        };
+        let media = content.get(&content_type).unwrap_or_else(|| {
+            panic!(
+                "{what}: content type {content_type:?} is not documented (documented: {:?})",
+                content.keys().collect::<Vec<_>>()
+            )
+        });
+        if content_type != "application/json" {
+            return (
+                status,
+                Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+            );
+        }
+        let body: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("{what}: the body is not JSON: {e}"));
+        let schema = media.get("schema").expect("a JSON response has a schema");
+        let validator = self.validator(schema);
+        let errors: Vec<String> = validator
+            .iter_errors(&body)
+            .map(|e| format!("{e} (at {})", e.instance_path()))
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "{what}: the body does not match docs/openapi.yaml:\n  {}",
+            errors.join("\n  ")
+        );
+        (status, body)
+    }
+}
+
+impl TestEnv {
+    /// GET `path` (a path template without parameters) with an agent key.
+    async fn agent_get(&self, path: &str, key: Option<&str>) -> reqwest::Response {
+        let mut req = self.client.get(format!("{}{path}", self.fw_url));
+        if let Some(key) = key {
+            req = req.header("X-Agent-Key", key);
+        }
+        req.send().await.expect("request failed")
+    }
+
+    /// POST raw `body` to /v1/forward with a content type.
+    async fn forward_body_as(
+        &self,
+        key: &str,
+        content_type: &str,
+        body: &str,
+    ) -> reqwest::Response {
+        self.client
+            .post(format!("{}/v1/forward", self.fw_url))
+            .header("X-Agent-Key", key)
+            .header("Content-Type", content_type)
+            .body(body.to_string())
+            .send()
+            .await
+            .expect("request failed")
+    }
+}
+
+#[tokio::test]
+async fn test_openapi_agent_responses_match_the_spec() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_mock().await;
+
+    // GET /health
+    let r = env
+        .client
+        .get(format!("{}/health", env.fw_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spec.check("/health", "GET", r).await.0, 200);
+    let r = env
+        .client
+        .post(format!("{}/health", env.fw_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spec.check("/health", "GET", r).await.0, 405);
+
+    // GET /v1/credentials: names, detail, strict query, 401.
+    let (s, names) = spec
+        .check(
+            "/v1/credentials",
+            "GET",
+            env.agent_get("/v1/credentials", Some(&env.agent_key)).await,
+        )
+        .await;
+    assert_eq!(s, 200);
+    assert!(names.as_array().unwrap().iter().all(Value::is_string));
+    let (s, detail) = spec
+        .check(
+            "/v1/credentials",
+            "GET",
+            env.agent_get("/v1/credentials?detail=true", Some(&env.agent_key))
+                .await,
+        )
+        .await;
+    assert_eq!(s, 200);
+    assert!(detail.as_array().unwrap().iter().all(Value::is_object));
+    for (q, key, expected) in [
+        ("?bogus=1", Some(env.agent_key.as_str()), 400),
+        (
+            "?detail=true&detail=false",
+            Some(env.agent_key.as_str()),
+            400,
+        ),
+        ("", None, 401),
+        ("", Some("not-a-key"), 401),
+    ] {
+        let r = env.agent_get(&format!("/v1/credentials{q}"), key).await;
+        assert_eq!(spec.check("/v1/credentials", "GET", r).await.0, expected);
+    }
+
+    // POST /v1/forward: success and every error status the stack produces.
+    let ok = env
+        .forward(
+            "GET",
+            "/api/check",
+            json!({ "Authorization": "Bearer {{vault:test_bearer}}" }),
+            None,
+        )
+        .await;
+    let (s, body) = spec.check("/v1/forward", "POST", ok).await;
+    assert_eq!(s, 200);
+    assert_eq!(body["body_encoding"], "utf8");
+
+    let cases: Vec<(&str, reqwest::Response, u16)> = vec![
+        (
+            "unbound host",
+            env.forward(
+                "GET",
+                "/api/unbound",
+                json!({ "Authorization": "Bearer {{vault:test_unbound}}" }),
+                None,
+            )
+            .await,
+            403,
+        ),
+        (
+            "unknown credential",
+            env.forward(
+                "GET",
+                "/api/x",
+                json!({ "Authorization": "Bearer {{vault:this_credential_does_not_exist}}" }),
+                None,
+            )
+            .await,
+            422,
+        ),
+        (
+            "malformed placeholder",
+            env.forward(
+                "GET",
+                "/api/x",
+                json!({ "X": "{{vault:'unterminated}}" }),
+                None,
+            )
+            .await,
+            422,
+        ),
+        (
+            "ambiguous field",
+            env.forward(
+                "GET",
+                "/api/dup",
+                json!({ "X": "{{vault:test_login_full:field:dup}}" }),
+                None,
+            )
+            .await,
+            409,
+        ),
+        (
+            "placeholder in host",
+            env.forward_url(
+                "GET",
+                "http://{{vault:test_bearer}}.example.com/",
+                json!({}),
+                None,
+            )
+            .await,
+            400,
+        ),
+        (
+            "unknown method",
+            env.forward("TRACE", "/api/x", json!({}), None).await,
+            400,
+        ),
+        (
+            "target refuses the connection",
+            env.forward_url("GET", "http://mock-api:9/", json!({}), None)
+                .await,
+            502,
+        ),
+        (
+            "no key",
+            env.client
+                .post(format!("{}/v1/forward", env.fw_url))
+                .json(&json!({ "request": { "method": "GET", "url": "http://x" } }))
+                .send()
+                .await
+                .unwrap(),
+            401,
+        ),
+        (
+            "unknown field",
+            env.forward_body_as(
+                &env.agent_key,
+                "application/json",
+                r#"{"request":{"method":"GET","url":"http://x","extra":1}}"#,
+            )
+            .await,
+            400,
+        ),
+        (
+            "duplicate key",
+            env.forward_body_as(
+                &env.agent_key,
+                "application/json",
+                r#"{"request":{"method":"GET","url":"http://x"},"request":{}}"#,
+            )
+            .await,
+            400,
+        ),
+        (
+            "not JSON",
+            env.forward_body_as(&env.agent_key, "text/plain", "hello")
+                .await,
+            400,
+        ),
+    ];
+    for (name, resp, expected) in cases {
+        let (s, _) = spec.check("/v1/forward", "POST", resp).await;
+        assert_eq!(s, expected, "{name}");
+    }
+
+    // Policy refusals, from a key that may only GET a few credentials.
+    let (id, token) = env
+        .create_key("conformance-scoped", json!(["test_api_*"]), json!(["GET"]))
+        .await;
+    let out_of_scope = env
+        .forward_as(
+            &token,
+            "GET",
+            "/api/x",
+            json!({ "Authorization": "Bearer {{vault:test_bearer}}" }),
+        )
+        .await;
+    assert_eq!(spec.check("/v1/forward", "POST", out_of_scope).await.0, 403);
+    let wrong_method = env.forward_as(&token, "POST", "/api/x", json!({})).await;
+    assert_eq!(spec.check("/v1/forward", "POST", wrong_method).await.0, 403);
+    env.revoke_key(&id).await;
+}
+
+#[tokio::test]
+async fn test_openapi_admin_responses_match_the_spec() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+
+    // Create, list, patch, preview, revoke: the lifecycle of one key.
+    let r = env
+        .admin_call(
+            "POST",
+            "/v1/admin/keys",
+            Some(json!({
+                "name": "conformance-key",
+                "credentials": ["test_api_*"],
+                "methods": ["get", "HEAD"]
+            })),
+        )
+        .await;
+    let (s, created) = spec.check("/v1/admin/keys", "POST", r).await;
+    assert_eq!(s, 201);
+    let id = created["id"].as_str().unwrap().to_string();
+    // The token is returned only here: the listing must not carry it.
+    let token = created["token"].as_str().unwrap().to_string();
+
+    let r = env.admin_call("GET", "/v1/admin/keys", None).await;
+    let (s, listed) = spec.check("/v1/admin/keys", "GET", r).await;
+    assert_eq!(s, 200);
+    assert!(!listed.to_string().contains(&token));
+
+    let item = "/v1/admin/keys/{id}";
+    let r = env
+        .admin_call(
+            "PATCH",
+            &format!("/v1/admin/keys/{id}"),
+            Some(json!({ "credentials": ["test_api_*", "test_bearer"] })),
+        )
+        .await;
+    let (s, patched) = spec.check(item, "PATCH", r).await;
+    assert_eq!(s, 200);
+    assert_eq!(patched["methods"], json!(["GET", "HEAD"]));
+
+    for (body, expected) in [
+        (json!({}), 400),
+        (json!({ "credentials": null }), 400),
+        (json!({ "methods": ["TRACE"] }), 400),
+        (json!({ "bogus": 1 }), 400),
+    ] {
+        let r = env
+            .admin_call("PATCH", &format!("/v1/admin/keys/{id}"), Some(body))
+            .await;
+        assert_eq!(spec.check(item, "PATCH", r).await.0, expected);
+    }
+    let r = env
+        .admin_call(
+            "PATCH",
+            "/v1/admin/keys/no-such-key",
+            Some(json!({ "methods": ["GET"] })),
+        )
+        .await;
+    assert_eq!(spec.check(item, "PATCH", r).await.0, 404);
+
+    // Preview: no request, an allowed request, a refused one, and the errors.
+    let preview = "/v1/admin/keys/{id}/preview";
+    let url = format!("{}/mock-api/api/check", env.mock_url_via_ferrowarden());
+    let allowed = json!({ "method": "GET", "url": url,
+        "headers": { "Authorization": "Bearer {{vault:test_api_token}}" } });
+    let refused = json!({ "method": "GET", "url": url,
+        "headers": { "Authorization": "Bearer {{vault:nas_api_key}}" } });
+    for (body, check) in [
+        (json!({ "methods": ["GET"] }), None),
+        (json!({ "request": allowed }), Some(true)),
+        (
+            json!({ "credentials": ["nas_*"], "request": refused }),
+            Some(true),
+        ),
+        (json!({ "request": refused }), Some(false)),
+    ] {
+        let r = env
+            .admin_call("POST", &format!("/v1/admin/keys/{id}/preview"), Some(body))
+            .await;
+        let (s, p) = spec.check(preview, "POST", r).await;
+        assert_eq!(s, 200);
+        match check {
+            None => assert!(p.get("request_check").is_none()),
+            Some(allowed) => assert_eq!(p["request_check"]["allowed"], allowed),
+        }
+    }
+    for (path, body, expected) in [
+        (
+            "/v1/admin/keys/no-such-key/preview".to_string(),
+            json!({}),
+            404,
+        ),
+        (
+            format!("/v1/admin/keys/{id}/preview"),
+            json!({ "credentials": null }),
+            400,
+        ),
+    ] {
+        let r = env.admin_call("POST", &path, Some(body)).await;
+        assert_eq!(spec.check(preview, "POST", r).await.0, expected);
+    }
+
+    // Audit and status.
+    let r = env
+        .admin_call("GET", "/v1/admin/audit?limit=20", None)
+        .await;
+    let (s, events) = spec.check("/v1/admin/audit", "GET", r).await;
+    assert_eq!(s, 200);
+    assert!(!events.as_array().unwrap().is_empty());
+    for q in ["?limit=0", "?limit=abc", "?other=1"] {
+        let r = env
+            .admin_call("GET", &format!("/v1/admin/audit{q}"), None)
+            .await;
+        assert_eq!(spec.check("/v1/admin/audit", "GET", r).await.0, 400, "{q}");
+    }
+    let r = env.admin_call("GET", "/v1/admin/status", None).await;
+    let (s, status) = spec.check("/v1/admin/status", "GET", r).await;
+    assert_eq!(s, 200);
+    assert_eq!(status["locked"], false);
+
+    // Revoke, then revoke again.
+    let r = env
+        .admin_call("DELETE", &format!("/v1/admin/keys/{id}"), None)
+        .await;
+    assert_eq!(spec.check(item, "DELETE", r).await.0, 200);
+    let r = env
+        .admin_call("DELETE", &format!("/v1/admin/keys/{id}"), None)
+        .await;
+    assert_eq!(spec.check(item, "DELETE", r).await.0, 404);
+
+    // Unlock: the stack runs in file mode, so the endpoint answers 404.
+    let r = env
+        .admin_call("POST", "/v1/unlock", Some(json!({ "password": "x" })))
+        .await;
+    assert_eq!(spec.check("/v1/unlock", "POST", r).await.0, 404);
+    let r = env
+        .admin_call("POST", "/v1/unlock", Some(json!({ "bogus": 1 })))
+        .await;
+    assert_eq!(spec.check("/v1/unlock", "POST", r).await.0, 400);
+
+    // 401 on every admin operation: no key, and a bad one.
+    for (method, path, template) in [
+        ("GET", "/v1/admin/status", "/v1/admin/status"),
+        ("GET", "/v1/admin/audit", "/v1/admin/audit"),
+        ("GET", "/v1/admin/keys", "/v1/admin/keys"),
+        ("POST", "/v1/admin/keys", "/v1/admin/keys"),
+        ("PATCH", "/v1/admin/keys/x", "/v1/admin/keys/{id}"),
+        ("DELETE", "/v1/admin/keys/x", "/v1/admin/keys/{id}"),
+        (
+            "POST",
+            "/v1/admin/keys/x/preview",
+            "/v1/admin/keys/{id}/preview",
+        ),
+        ("POST", "/v1/unlock", "/v1/unlock"),
+    ] {
+        for key in [None, Some("not-the-admin-key")] {
+            let mut req = env.client.request(
+                reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
+                format!("{}{path}", env.fw_url),
+            );
+            if let Some(key) = key {
+                req = req.header("X-Admin-Key", key);
+            }
+            let r = req.json(&json!({})).send().await.unwrap();
+            assert_eq!(
+                spec.check(template, method, r).await.0,
+                401,
+                "{method} {path}"
+            );
+        }
+    }
+    // The bearer form is accepted where the spec says it is.
+    let r = env
+        .client
+        .get(format!("{}/v1/admin/status", env.fw_url))
+        .bearer_auth(&env.admin_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spec.check("/v1/admin/status", "GET", r).await.0, 200);
+}
+
+#[tokio::test]
+async fn test_openapi_endpoint_serves_the_right_view_to_each_key() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    let local = &spec.doc;
+
+    // No key, a bad key: 401, and nothing of the document.
+    for key in [None, Some("not-a-key")] {
+        let r = env.agent_get("/v1/openapi.json", key).await;
+        assert_eq!(spec.check("/v1/openapi.json", "GET", r).await.0, 401);
+    }
+    let r = env
+        .agent_get("/v1/openapi.json?x=1", Some(&env.agent_key))
+        .await;
+    assert_eq!(spec.check("/v1/openapi.json", "GET", r).await.0, 400);
+
+    // Agent key: agent and meta operations only.
+    let r = env
+        .agent_get("/v1/openapi.json", Some(&env.agent_key))
+        .await;
+    let rid = request_id(&r);
+    assert_eq!(r.headers()["cache-control"], "no-store");
+    let (s, agent) = spec.check("/v1/openapi.json", "GET", r).await;
+    assert_eq!(s, 200);
+    assert_eq!(agent["info"]["version"], local["info"]["version"]);
+    let paths: Vec<&str> = agent["paths"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "/health",
+            "/v1/credentials",
+            "/v1/forward",
+            "/v1/openapi.json"
+        ]
+    );
+    let text = serde_json::to_string(&agent).unwrap().to_lowercase();
+    assert!(!text.contains("admin"), "the agent view mentions admin");
+    let e = env.event_for(&rid, "openapi_read").await;
+    assert_eq!(e["ferrowarden"]["details"]["variant"], "agent");
+
+    // Admin key, both header forms: every operation of the spec.
+    for bearer in [false, true] {
+        let mut req = env.client.get(format!("{}/v1/openapi.json", env.fw_url));
+        req = if bearer {
+            req.bearer_auth(&env.admin_key)
+        } else {
+            req.header("X-Admin-Key", &env.admin_key)
+        };
+        let r = req.send().await.unwrap();
+        let rid = request_id(&r);
+        let (s, admin) = spec.check("/v1/openapi.json", "GET", r).await;
+        assert_eq!(s, 200);
+        assert_eq!(admin["paths"], local["paths"]);
+        assert_eq!(admin["components"], local["components"]);
+        let url = admin["servers"][0]["url"].as_str().unwrap();
+        assert!(url.starts_with('/'), "{url}");
+        let e = env.event_for(&rid, "openapi_read").await;
+        assert_eq!(e["ferrowarden"]["details"]["variant"], "admin");
+    }
+}

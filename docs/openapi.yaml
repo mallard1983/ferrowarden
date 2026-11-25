@@ -1,0 +1,1329 @@
+openapi: 3.1.0
+info:
+  title: Ferrowarden API
+  version: 0.1.0
+  summary: HTTP API of Ferrowarden, the credential boundary for AI agents.
+  description: |
+    Ferrowarden lets AI agents make API requests with named credentials without exposing credential values to the agent.
+
+    An agent sends the request it wants to make, with `{{vault:name}}` placeholders wherever a credential belongs. Ferrowarden looks the credential up in the vault, substitutes the value, forwards the request, and returns the response with known credential values scrubbed. See the `ProxyRequest` schema for the placeholder grammar and `ProxyResponse` for what scrubbing covers and where it stops.
+
+    Ferrowarden is a sidecar to Vaultwarden, not a fork or replacement vault. It is an independent project and is not affiliated with or endorsed by the Vaultwarden or Bitwarden projects.
+
+    Operations are grouped by who calls them. Agent operations authenticate with an agent key (`X-Agent-Key`). Request bodies are parsed strictly: duplicate object keys, unknown fields, trailing data, a body nested deeper than 64 levels, and a content type other than `application/json` are rejected with `400`. The key is checked before the body or query string is read, so a request without a valid key gets `401` whatever it contains.
+  license:
+    name: MIT
+    identifier: MIT
+  contact:
+    name: Ferrowarden on GitHub
+    url: https://github.com/mallard1983/ferrowarden
+externalDocs:
+  description: Ferrowarden documentation
+  url: https://github.com/mallard1983/ferrowarden/blob/main/docs/api-reference.md
+servers:
+  - url: /
+    description: |
+      The base URL of the Ferrowarden instance you are talking to. If the operator has set `api_prefix` (for example `/k7f3q9`), that prefix goes in front of every path in this document except `/health`. The copy served by `GET /v1/openapi.json` has this entry filled in.
+tags:
+  - name: agent
+    description: Operations for AI agents. Authenticate with an agent key. Requests count against the per-IP agent rate limit.
+  - name: admin
+    description: "Operations for the operator. Authenticate with the admin key, in `X-Admin-Key` or as `Authorization: Bearer`. Requests count against the per-IP admin rate limit, which is stricter than the agent limit."
+  - name: meta
+    description: Health and API description.
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [meta]
+      summary: Health check
+      description: |
+        Returns `200` while the HTTP server is accepting connections. It needs no key, is not rate limited, and is never moved under `api_prefix`. It does not report whether the vault is unlocked.
+      security: []
+      servers:
+        - url: /
+          description: Never prefixed, whatever `api_prefix` is set to.
+      responses:
+        "200":
+          description: The server is up. The body is empty.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+        "405":
+          description: The method is not GET. The answer is the framework's own and has an empty body. It is the only error this operation returns.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+  /v1/openapi.json:
+    get:
+      operationId: getOpenApiSpec
+      tags: [meta]
+      summary: Fetch this API description
+      description: |
+        Returns this OpenAPI document as JSON, with `servers[0].url` set to the configured `api_prefix` (or `/` when none is set), so a client can use it from the same base URL it fetched it from.
+
+        The document describes the operations the presented key can call, so what you receive depends on the key. A request without a valid key gets `401`.
+
+        Calls count against the agent rate limit, whichever key is used. The query string must be empty.
+      security:
+        - agentKey: []
+        - adminKey: []
+        - adminBearer: []
+      parameters: []
+      responses:
+        "200":
+          description: The OpenAPI 3.1 document.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              description: Always `no-store`.
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenApiDocument"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/credentials:
+    get:
+      operationId: listCredentials
+      tags: [agent]
+      summary: List the credentials this key may use
+      description: |
+        Lists the vault items (logins and secure notes) that the agent key's policy allows, by name. Credential values are not part of the response. This is how an agent finds out which names it can put in a `{{vault:name}}` placeholder.
+
+        With `detail=true` each entry is an object with ready-made placeholders (copy them as they are rather than building your own), the hosts the credential is bound to, and the reason for anything that is unavailable. Credentials the key's policy does not allow are left out entirely. A key with `credentials: []` gets `[]`.
+
+        The query string is parsed strictly: an unknown parameter, or `detail` given more than once, is a `400` (after the key has been accepted).
+      security:
+        - agentKey: []
+      parameters:
+        - name: detail
+          in: query
+          required: false
+          description: |
+            Return objects with placeholders instead of plain names. The server treats an empty value, `1`, `true` and `yes` (any letter case) as true, and any other value as false. Send `true` or leave the parameter out.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: |
+            An array of credential names, or with `detail=true` an array of credential objects. An empty array when the key may use no credentials or the vault holds none.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - type: array
+                    items:
+                      $ref: "#/components/schemas/CredentialName"
+                  - type: array
+                    items:
+                      $ref: "#/components/schemas/CredentialDetail"
+              examples:
+                names:
+                  summary: Plain names
+                  value:
+                    - grafana_service_account
+                    - Example Service (prod)
+                detail:
+                  summary: With detail=true
+                  value:
+                    - name: Example Service (prod)
+                      type: login
+                      placeholder: "{{vault:'Example Service (prod)'}}"
+                      username: "{{vault:'Example Service (prod)':username}}"
+                      fields:
+                        api secret: "{{vault:'Example Service (prod)':field:'api secret'}}"
+                      bound_to:
+                        - https://api.example.com
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/VaultLocked"
+  /v1/forward:
+    post:
+      operationId: forwardRequest
+      tags: [agent]
+      summary: Forward a request with credentials substituted
+      description: |
+        Sends the request in `request` to its target and returns the target's response. Placeholders in the URL, headers and body are replaced with credential values from the vault before the request leaves Ferrowarden, and known credential values are scrubbed from the response. See `ProxyRequest` for the placeholder grammar.
+
+        A `200` means Ferrowarden forwarded the request and got an answer. The target's own status, including a `404` or `500` from the target, is in the `status` field of the body. Redirects are not followed.
+
+        Checks run before anything is sent, and a failure stops the request with no outbound call. In order: the body is well formed and every placeholder parses (`400`, `422`); the key's method policy allows the method (`403`); the key's credential scope covers every placeholder (`403`, the same answer whether or not the credential exists); every placeholder names one usable vault item (`422`, `409`, `403` for a re-prompt item); each credential is bound to the target host (`403`); the target passes the outbound policy (`403`).
+
+        A target that times out, refuses the connection or returns more than the operator's response limit is reported as `502`. A request body larger than 2 MiB is reported as `400`.
+      security:
+        - agentKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForwardPayload"
+            examples:
+              getWithHeader:
+                summary: GET with a credential in a header
+                value:
+                  request:
+                    method: GET
+                    url: https://api.example.com/v1/items
+                    headers:
+                      Authorization: "Bearer {{vault:example_api_token}}"
+              postJson:
+                summary: POST with a JSON body
+                value:
+                  request:
+                    method: POST
+                    url: https://api.example.com/v1/items
+                    headers:
+                      X-Api-Key: "{{vault:'Example Service (prod)':field:'api secret'}}"
+                    body:
+                      name: example
+      responses:
+        "200":
+          description: The target answered. See `status` for the target's status code.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProxyResponse"
+              examples:
+                json:
+                  summary: A JSON response from the target
+                  value:
+                    status: 200
+                    headers:
+                      content-type: application/json
+                    body: '{"items":[]}'
+                    body_encoding: utf8
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            The request was refused on policy grounds. The message says which check: the method is not allowed for this key, the credential is not available to this key, the credential is not bound to the target host, the item has master password re-prompt enabled, or the target is not allowed by the outbound policy.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                outOfScope:
+                  value:
+                    error: Credential example_api_token is not available to this agent key
+        "404":
+          description: A credential that passed the earlier checks was not found in the vault when its value was fetched.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: A placeholder name matches more than one vault item, or the named field appears more than once on the item.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: A placeholder is malformed, or names a credential or field the vault does not have.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                unknown:
+                  value:
+                    error: "Placeholder references an unknown credential or field: no_such_credential"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          description: The target could not be reached, timed out, or returned a response larger than the configured limit, or the vault backend failed. The message does not include the target URL.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/VaultLocked"
+  /v1/unlock:
+    post:
+      operationId: unlockVault
+      tags: [admin]
+      summary: Unlock the vault (manual unlock mode)
+      description: |
+        Sends the vault master password to the vault backend (`bw serve`) and, on success, reloads the credential list. Only available when Ferrowarden runs with `unlock_mode = manual`; with `file` mode the vault unlocks at startup and this endpoint returns `404`.
+
+        The password is not stored or logged. The body is read only after the admin key has been accepted.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnlockRequest"
+            examples:
+              unlock:
+                value:
+                  password: example-master-password
+      responses:
+        "200":
+          description: The vault is unlocked and the credential list is loaded.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnlockResponse"
+              examples:
+                unlocked:
+                  value:
+                    status: unlocked
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: The admin key is missing or invalid, or the vault backend rejected the master password.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: The instance runs in `file` unlock mode, so this endpoint is disabled.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          description: The vault backend failed while the credential list was being loaded.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/VaultLocked"
+  /v1/admin/keys:
+    get:
+      operationId: listKeys
+      tags: [admin]
+      summary: List agent keys
+      description: |
+        Lists every active agent key with its policy. Token values are not included. A key created with 0.1.0 and without a policy shows `policy_set: false` and is deny-all until a policy is set. The query string is ignored.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      responses:
+        "200":
+          description: The agent keys, in no particular order.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KeySummary"
+              examples:
+                keys:
+                  value:
+                    - id: 3f2b8c1e-7a4d-4e5f-9b0a-1c2d3e4f5a6b
+                      name: homelab-agent
+                      created_at: "2026-01-15T12:00:00Z"
+                      credentials:
+                        - grafana_*
+                      methods:
+                        - GET
+                        - HEAD
+                      policy_set: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    post:
+      operationId: createKey
+      tags: [admin]
+      summary: Create an agent key
+      description: |
+        Creates an agent key with an explicit policy. Both `credentials` and `methods` are required: there is no default access. Use `["*"]` to allow everything and `[]` to allow nothing.
+
+        The token is returned in this response only. Ferrowarden keeps a SHA-256 hash of it, so it cannot be shown again.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateKeyRequest"
+            examples:
+              readOnly:
+                summary: Read-only access to Grafana credentials
+                value:
+                  name: homelab-agent
+                  credentials:
+                    - grafana_*
+                  methods:
+                    - GET
+                    - HEAD
+      responses:
+        "201":
+          description: The key was created. This is the only response that contains its token.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateKeyResponse"
+              examples:
+                created:
+                  value:
+                    id: 3f2b8c1e-7a4d-4e5f-9b0a-1c2d3e4f5a6b
+                    name: homelab-agent
+                    token: ExampleTokenNotRealExampleTokenNotRealExample
+                    created_at: "2026-01-15T12:00:00Z"
+                    credentials:
+                      - grafana_*
+                    methods:
+                      - GET
+                      - HEAD
+                    policy_set: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/keys/{id}:
+    parameters:
+      - $ref: "#/components/parameters/KeyId"
+    patch:
+      operationId: updateKeyPolicy
+      tags: [admin]
+      summary: Change an agent key's policy
+      description: |
+        Replaces the policy fields present in the body. A field that is left out is unchanged, a field that is present replaces the old value, and `null` is rejected. `{}` is rejected (nothing to change). To lift a restriction send `["*"]`.
+
+        The change applies to the next request made with that key, and the token stays the same. It is written to the key file, when persistence is configured, before it takes effect. On a key without a policy (`policy_set: false`) a field you leave out stays deny-all, so send both fields to make it usable.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchKeyRequest"
+            examples:
+              widen:
+                value:
+                  credentials:
+                    - grafana_*
+                    - uptime_*
+      responses:
+        "200":
+          description: The updated key.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeySummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/KeyNotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: revokeKey
+      tags: [admin]
+      summary: Revoke an agent key
+      description: |
+        Removes the key from memory and, when persistence is configured, from the key file. Requests made with its token are refused from the next request on.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      responses:
+        "200":
+          description: The key was revoked.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokeKeyResponse"
+              examples:
+                revoked:
+                  value:
+                    status: revoked
+                    id: 3f2b8c1e-7a4d-4e5f-9b0a-1c2d3e4f5a6b
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/KeyNotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/keys/{id}/preview:
+    parameters:
+      - $ref: "#/components/parameters/KeyId"
+    post:
+      operationId: previewKeyPolicy
+      tags: [admin]
+      summary: Preview a draft policy for an agent key
+      description: |
+        Shows what a draft policy would allow for an existing key, without saving it, reading any credential value, or sending anything. `credentials` and `methods` are the draft; a field that is left out means the key's saved value, and `null` is rejected. `request`, if given, has the same shape as the `request` of `forwardRequest` and is checked against the draft policy.
+
+        The check runs the same validations as a real forward, in the same order and with the same statuses, reasons and messages. It does not connect to anything: the outbound policy is applied to the host name and IP literals only, and the private-address check on a resolved DNS name happens when a request is really forwarded. While the vault is locked the answer comes from the cached credential list.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PreviewRequest"
+            examples:
+              narrow:
+                value:
+                  credentials:
+                    - grafana_*
+                  methods:
+                    - GET
+                  request:
+                    method: GET
+                    url: https://grafana.example.com/api/health
+                    headers:
+                      Authorization: "Bearer {{vault:grafana_token}}"
+      responses:
+        "200":
+          description: The preview.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreviewResponse"
+              examples:
+                denied:
+                  value:
+                    key:
+                      id: 3f2b8c1e-7a4d-4e5f-9b0a-1c2d3e4f5a6b
+                      name: homelab-agent
+                      policy_set: true
+                    saved_policy:
+                      credentials:
+                        - "*"
+                      methods:
+                        - "*"
+                    draft_policy:
+                      credentials:
+                        - grafana_*
+                      methods:
+                        - GET
+                    credentials:
+                      - name: grafana_token
+                        type: login
+                        placeholder: "{{vault:grafana_token}}"
+                        bound_to:
+                          - https://grafana.example.com
+                    gained: []
+                    lost:
+                      - uptime_token
+                    request_check:
+                      allowed: true
+                      note: The target host is checked against the outbound policy by name and IP literal only; private-address checks on resolved DNS names happen when a request is actually forwarded.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/KeyNotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/VaultLocked"
+  /v1/admin/audit:
+    get:
+      operationId: listAuditEvents
+      tags: [admin]
+      summary: Read recent security events
+      description: |
+        Returns the newest security events, newest first, from the in-memory buffer. The buffer holds `events.buffer_size` events (default 1000) and is emptied on restart, so use an event sink for history that has to last.
+
+        The query string is parsed strictly: an unknown or repeated parameter, or a `limit` outside the range, is a `400`.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: How many events to return, from 1 up to the buffer size (`events.buffer_size`, default 1000). The default is 100, or the buffer size if that is smaller.
+          schema:
+            type: integer
+            minimum: 1
+            default: 100
+      responses:
+        "200":
+          description: Security events, newest first.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SecurityEvent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/admin/status:
+    get:
+      operationId: getStatus
+      tags: [admin]
+      summary: Read operational status
+      description: |
+        Returns whether the vault is locked, how many credentials are cached, and how many agent keys exist. The query string is ignored.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      responses:
+        "200":
+          description: Current status.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+              examples:
+                unlocked:
+                  value:
+                    locked: false
+                    credential_count: 12
+                    agent_key_count: 2
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+components:
+  securitySchemes:
+    agentKey:
+      type: apiKey
+      in: header
+      name: X-Agent-Key
+      description: An agent key issued by the operator. Scoped to the agent operations and to the key's own policy.
+    adminKey:
+      type: apiKey
+      in: header
+      name: X-Admin-Key
+      description: The operator's admin key (`FERROWARDEN_ADMIN_KEY`).
+    adminBearer:
+      type: http
+      scheme: bearer
+      description: The admin key as a bearer token. Accepted wherever `adminKey` is, and kept for compatibility with earlier releases of `unlockVault`. If both headers are sent, `X-Admin-Key` is the one that is checked.
+  headers:
+    XRequestId:
+      description: An identifier Ferrowarden generates for the request (UUID v7). A value sent by the client is ignored. The same id appears in the security events the request produced, so quote it when you report a problem.
+      schema:
+        type: string
+        format: uuid
+    RetryAfter:
+      description: Seconds to wait before the next request is likely to be accepted.
+      schema:
+        type: integer
+        minimum: 1
+  parameters:
+    KeyId:
+      name: id
+      in: path
+      required: true
+      description: The id of an agent key, as returned by `createKey` and `listKeys`.
+      schema:
+        type: string
+  responses:
+    BadRequest:
+      description: |
+        The request is not acceptable. Returned only after authentication succeeded. Typical causes: a body that is not strict JSON (duplicate key, unknown field, trailing data, nesting deeper than 64 levels, wrong content type, larger than 2 MiB), a missing or wrongly typed field, an unknown or repeated query parameter, or a value outside its allowed range. The message names the offending field and the position, and does not repeat values from the body.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            unknownField:
+              value:
+                error: "Invalid JSON: unknown field `extra`, expected one of `method`, `url`, `headers`, `body` (line 1, column 42)"
+    Unauthorized:
+      description: The key is missing or invalid. This is the answer to every unauthenticated request, whatever its body or query string contains.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            missing:
+              value:
+                error: Missing or invalid agent API key
+    KeyNotFound:
+      description: No agent key has that id.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            unknown:
+              value:
+                error: Agent key not found
+    RateLimited:
+      description: The per-IP rate limit was exceeded. The body is plain text, not JSON.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Rate limit exceeded. See the Retry-After header.
+    VaultLocked:
+      description: The vault is locked, or the vault backend (`bw serve`) cannot be reached. Credentials cannot be read until the vault is unlocked.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            locked:
+              value:
+                error: Vault is locked
+    InternalError:
+      description: An internal error, for example the key file could not be read or written. The message is generic.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            internal:
+              value:
+                error: Internal server error
+  schemas:
+    Error:
+      type: object
+      description: The error body of every JSON error response. The message is fixed text plus, in some cases, a placeholder label, a key name or a position in the body. It does not contain credential values or the target URL.
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: A human-readable description.
+    OpenApiDocument:
+      type: object
+      description: An OpenAPI 3.1 document.
+      required: [openapi, info, paths]
+      properties:
+        openapi:
+          type: string
+        info:
+          type: object
+        externalDocs:
+          type: object
+        servers:
+          type: array
+          items:
+            type: object
+        tags:
+          type: array
+          items:
+            type: object
+        paths:
+          type: object
+        components:
+          type: object
+    CredentialName:
+      type: string
+      description: The name of a vault item (login or secure note), as it is written in a placeholder after unquoting.
+      examples:
+        - grafana_service_account
+    CredentialDetail:
+      type: object
+      description: |
+        One credential as returned by `listCredentials` with `detail=true`. Every key other than `name` is present only when that value exists on the item. Placeholder strings are ready to paste into a request. They never contain the credential value.
+      required: [name]
+      properties:
+        name:
+          $ref: "#/components/schemas/CredentialName"
+        type:
+          type: string
+          enum: [login, secure_note]
+          description: The kind of vault item. Absent when the name is ambiguous.
+        placeholder:
+          type: string
+          description: Placeholder for the item's password.
+        username:
+          type: string
+          description: Placeholder for the login username.
+        totp:
+          type: string
+          description: Placeholder for the current TOTP code.
+        notes:
+          type: string
+          description: Placeholder for the item's notes.
+        fields:
+          type: object
+          description: Placeholders for custom fields, keyed by field name.
+          additionalProperties:
+            type: string
+        unavailable_fields:
+          type: object
+          description: Custom fields that cannot be used, keyed by field name, with the reason.
+          additionalProperties:
+            type: string
+        bound_to:
+          type: array
+          description: The URIs the credential may be sent to. A request to any other host is refused with `403`.
+          items:
+            type: string
+        unavailable:
+          type: string
+          description: Present when the item cannot be used at all (for example, two vault items share the name, or master password re-prompt is enabled), with the reason.
+    ForwardPayload:
+      type: object
+      description: The body of `forwardRequest`.
+      additionalProperties: false
+      required: [request]
+      properties:
+        request:
+          $ref: "#/components/schemas/ProxyRequest"
+    ProxyRequest:
+      type: object
+      additionalProperties: false
+      required: [method, url]
+      description: |
+        The request Ferrowarden should make for the agent, with placeholders where credentials belong.
+
+        **Placeholder grammar.** A placeholder is `{{vault:NAME}}` or `{{vault:NAME:SELECTOR}}`:
+
+        | Placeholder | Substitutes |
+        |---|---|
+        | `{{vault:NAME}}` | the item's password |
+        | `{{vault:NAME:password}}` | the password, written out |
+        | `{{vault:NAME:username}}` | the login username |
+        | `{{vault:NAME:totp}}` | the current TOTP code |
+        | `{{vault:NAME:notes}}` | the item's notes |
+        | `{{vault:NAME:field:FIELD}}` | a custom field (text, hidden, boolean, or linked to the username or password) |
+
+        `NAME` and `FIELD` are either a plain word of letters, digits, `_`, `-` and `.`, or a single-quoted string that can hold any characters, such as spaces and colons. Inside quotes write `\'` for a quote and `\\` for a backslash. An empty name is not valid. Names are case-sensitive and must match the vault item exactly. Examples: `{{vault:example_api_token}}`, `{{vault:'Example Service (prod)':username}}`, `{{vault:'Example Service (prod)':field:'api secret'}}`. `listCredentials` with `detail=true` returns ready-made placeholders, so you rarely need to write the quoting yourself.
+
+        **Where placeholders may appear.** In the URL's path, query string or user info (not its scheme, host or port); in any header value; and in the body, inside string values and object keys of a JSON body or anywhere in a string body. A placeholder that would change the URL's scheme, host or port is rejected with `400`. The same placeholder may appear several times, and different placeholders may be mixed in one request.
+
+        **Malformed placeholders.** Anything that starts with `{{vault:` and does not parse is rejected with `422`, and the request is not forwarded. A placeholder that parses but names a credential or field that does not exist is also `422`.
+
+        **Policy.** The agent key's policy decides which credentials a placeholder may name and which methods may be used. Each credential can be sent only to the hosts it is bound to in the vault.
+      properties:
+        method:
+          type: string
+          enum: [GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS]
+          description: The HTTP method. The server accepts any letter case and normalises it to upper case. Other methods, including `TRACE` and `CONNECT`, are rejected with `400` for every key.
+        url:
+          type: string
+          description: The target URL. Only `http` and `https` are accepted. Placeholders are allowed in the path, query and user info.
+        headers:
+          type: object
+          description: Headers to send to the target. Names that differ only by letter case count as duplicates and are rejected. Headers whose names start with `x-fw-` are dropped before the request is sent.
+          additionalProperties:
+            type: string
+        body:
+          description: |
+            The request body. A JSON string is sent as it is (a raw text body, such as form data). Any other JSON value (object, array, number or boolean) is serialised and sent as JSON, with `Content-Type: application/json` added if you did not set that header. `null` or leaving it out sends no body.
+    ProxyResponse:
+      type: object
+      required: [status, headers, body, body_encoding]
+      description: |
+        The target's response, after scrubbing.
+
+        **Scrubbing.** Ferrowarden replaces the credential values it substituted into this request with `[REDACTED]`, wherever they appear in the response body or in header values, in their raw, JSON-escaped, URL-encoded and four common base64 forms. Usernames, TOTP codes and boolean fields are not matched by value, and neither is a value shorter than 4 characters. Ferrowarden also redacts common credential shapes: bearer tokens, JSON fields named like `api_key`, `secret` or `password`, PEM private key blocks, passwords in `http(s)://user:pass@` URLs and Proxmox API tokens. Scrubbing is best effort. A target that transforms a value in some other way before echoing it back is not covered, and the patterns can redact text that is not a credential.
+
+        Hop-by-hop headers and `content-length` are left out of `headers`, and so are header values that are not valid text. A response larger than the operator's limit (`max_response_bytes`, 10 MiB by default) is refused with `502` instead.
+      properties:
+        status:
+          type: integer
+          minimum: 100
+          maximum: 599
+          description: The HTTP status code the target returned.
+        headers:
+          type: object
+          description: The target's response headers, with lower-case names and scrubbed values.
+          additionalProperties:
+            type: string
+        body:
+          type: string
+          description: The target's response body, scrubbed. JSON from the target stays a string and is not parsed. See `body_encoding`.
+        body_encoding:
+          type: string
+          enum: [utf8, base64]
+          description: "`utf8` when `body` is the response text. `base64` when the response was not valid UTF-8 and `body` is its base64 encoding (scrubbed before encoding)."
+    CredentialPatterns:
+      type: array
+      maxItems: 256
+      description: |
+        Credential name patterns, matched against the item name (after unquoting a placeholder). `*` is the only wildcard and matches any run of characters, including none. A pattern must match the whole name, and matching is case-sensitive. There is no escaping: `?`, `[` and `.` are literal. `["*"]` allows every credential and `[]` allows none. `null` is rejected. A list that contains `*` is stored as `["*"]`, and duplicates are removed.
+      items:
+        type: string
+        minLength: 1
+        maxLength: 256
+        description: A pattern, without control characters.
+    MethodList:
+      type: array
+      maxItems: 256
+      description: |
+        Allowed HTTP methods. `["*"]` allows all seven and `[]` allows none. `*` together with other entries is rejected as ambiguous. `null` is rejected. Input is case-insensitive. Responses list the methods in upper case, in the order `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`.
+      items:
+        type: string
+        enum: ["*", GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS]
+    KeyPolicy:
+      type: object
+      description: |
+        What an agent key may do. A policy has no default: a key must be given both lists, and a key without a policy (created with 0.1.0) is deny-all until one is set. `["*"]` means everything and `[]` means nothing in both lists. `null` is never accepted.
+      required: [credentials, methods]
+      properties:
+        credentials:
+          $ref: "#/components/schemas/CredentialPatterns"
+        methods:
+          $ref: "#/components/schemas/MethodList"
+    CreateKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [name, credentials, methods]
+      description: The body of `createKey`. Both policy fields are required.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: A name for the agent, for example `homelab-claude`. Surrounding whitespace is removed, and the server limits the trimmed name to 128 bytes.
+        credentials:
+          $ref: "#/components/schemas/CredentialPatterns"
+        methods:
+          $ref: "#/components/schemas/MethodList"
+    CreateKeyResponse:
+      type: object
+      required: [id, name, token, created_at, credentials, methods, policy_set]
+      description: The new key. `token` appears here and nowhere else.
+      properties:
+        id:
+          type: string
+          description: The key id, used in the other key operations and in security events.
+        name:
+          type: string
+        token:
+          type: string
+          description: The agent key value to put in `X-Agent-Key`. Store it now. It cannot be retrieved later.
+        created_at:
+          type: string
+          format: date-time
+        credentials:
+          $ref: "#/components/schemas/CredentialPatterns"
+        methods:
+          $ref: "#/components/schemas/MethodList"
+        policy_set:
+          type: boolean
+          description: Always `true` for a key created through the API.
+    KeySummary:
+      type: object
+      required: [id, name, created_at, credentials, methods, policy_set]
+      description: An agent key without its token.
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        credentials:
+          $ref: "#/components/schemas/CredentialPatterns"
+        methods:
+          $ref: "#/components/schemas/MethodList"
+        policy_set:
+          type: boolean
+          description: "`false` for a key created with 0.1.0 that has no policy yet. It is deny-all (`[]` and `[]`) until a policy is set with `updateKeyPolicy`."
+    PatchKeyRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: The body of `updateKeyPolicy`. At least one field is required. A field that is left out is unchanged, and `null` is rejected.
+      properties:
+        credentials:
+          $ref: "#/components/schemas/CredentialPatterns"
+        methods:
+          $ref: "#/components/schemas/MethodList"
+    PreviewRequest:
+      type: object
+      additionalProperties: false
+      description: The body of `previewKeyPolicy`. Every field is optional. A policy field that is left out means the key's saved value, and `null` is rejected.
+      properties:
+        credentials:
+          $ref: "#/components/schemas/CredentialPatterns"
+        methods:
+          $ref: "#/components/schemas/MethodList"
+        request:
+          $ref: "#/components/schemas/ProxyRequest"
+    PreviewResponse:
+      type: object
+      required: [key, saved_policy, draft_policy, credentials, gained, lost]
+      description: What a draft policy would allow. Nothing is saved, no credential value is read and nothing is sent.
+      properties:
+        key:
+          type: object
+          required: [id, name, policy_set]
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+            policy_set:
+              type: boolean
+        saved_policy:
+          $ref: "#/components/schemas/KeyPolicy"
+        draft_policy:
+          $ref: "#/components/schemas/KeyPolicy"
+        credentials:
+          type: array
+          description: The credentials the draft policy reaches, in the format of `listCredentials` with `detail=true`.
+          items:
+            $ref: "#/components/schemas/CredentialDetail"
+        gained:
+          type: array
+          description: Credential names the draft reaches and the saved policy does not.
+          items:
+            $ref: "#/components/schemas/CredentialName"
+        lost:
+          type: array
+          description: Credential names the saved policy reaches and the draft does not.
+          items:
+            $ref: "#/components/schemas/CredentialName"
+        request_check:
+          $ref: "#/components/schemas/RequestCheck"
+    RequestCheck:
+      description: |
+        The verdict on the `request` of a preview, present only when a request was supplied. It runs the checks of `forwardRequest` in the same order: request validation, placeholder parsing, method policy, credential scope, the outbound target policy (by name and IP literal only), then unknown, ambiguous and re-prompt items, missing values or fields, and host binding.
+      oneOf:
+        - type: object
+          title: Allowed
+          required: [allowed, note]
+          properties:
+            allowed:
+              const: true
+            note:
+              $ref: "#/components/schemas/RequestCheckNote"
+        - type: object
+          title: Refused
+          required: [allowed, status, reason, message, note]
+          properties:
+            allowed:
+              const: false
+            status:
+              type: integer
+              description: The HTTP status `forwardRequest` would answer with.
+            reason:
+              $ref: "#/components/schemas/ReasonCode"
+            message:
+              type: string
+              description: The error message `forwardRequest` would return.
+            note:
+              $ref: "#/components/schemas/RequestCheckNote"
+    RequestCheckNote:
+      type: string
+      description: A fixed reminder that the target host is checked by name and IP literal only. The private-address check on a resolved DNS name happens only when a request is really forwarded.
+    UnlockRequest:
+      type: object
+      additionalProperties: false
+      required: [password]
+      description: The body of `unlockVault`.
+      properties:
+        password:
+          type: string
+          format: password
+          description: The vault master password. It is used once to unlock the vault backend and is cleared from memory afterwards.
+    UnlockResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: unlocked
+    RevokeKeyResponse:
+      type: object
+      required: [status, id]
+      properties:
+        status:
+          type: string
+          const: revoked
+        id:
+          type: string
+          description: The id of the revoked key.
+    Status:
+      type: object
+      required: [locked, credential_count, agent_key_count]
+      description: Operational status.
+      properties:
+        locked:
+          type: boolean
+          description: Whether the vault is locked.
+        credential_count:
+          type: integer
+          minimum: 0
+          description: The number of credential names in the cache. Distinct names, not vault items.
+        agent_key_count:
+          type: integer
+          minimum: 0
+          description: The number of active agent keys.
+    ReasonCode:
+      type: string
+      description: A fixed code that explains a failure. New codes may be added over time, so treat an unknown value as a generic failure.
+      enum:
+        - missing_key
+        - invalid_key
+        - missing_admin_key
+        - invalid_admin_key
+        - rate_limited
+        - invalid_json
+        - invalid_request
+        - target_blocked
+        - invalid_target_url
+        - credential_host_not_allowed
+        - credential_out_of_scope
+        - method_not_allowed
+        - reprompt_required
+        - unknown_credential
+        - ambiguous_credential
+        - ambiguous_field
+        - malformed_placeholder
+        - vault_locked
+        - upstream_error
+        - response_too_large
+        - key_not_found
+        - unlock_failed
+        - sync_failed
+        - internal_error
+        - invalid_credentials
+        - two_factor_required
+        - two_factor_failed
+        - login_locked_out
+        - upstream_rate_limited
+        - insecure_transport
+    SecurityEvent:
+      type: object
+      description: |
+        One security event (`schema_version` 1), with ECS-style field names. Fields that do not apply are omitted rather than set to `null`. No field holds a credential value, a token or the master password. New fields, actions and reason codes may be added within a schema version, so parse tolerantly. See `docs/events.md`.
+      required: ["@timestamp", message, event, service, ferrowarden]
+      properties:
+        "@timestamp":
+          type: string
+          format: date-time
+          description: UTC, RFC 3339 with milliseconds.
+        message:
+          type: string
+          description: A short summary built from fixed text.
+        event:
+          type: object
+          required: [kind, dataset, action, category, type, outcome]
+          properties:
+            kind:
+              type: string
+              const: event
+            dataset:
+              type: string
+              const: ferrowarden.security
+            action:
+              type: string
+              description: What happened.
+              enum:
+                - forward
+                - credentials_list
+                - agent_auth
+                - admin_auth
+                - rate_limited
+                - request_rejected
+                - key_create
+                - key_revoke
+                - key_list
+                - key_policy_change
+                - policy_preview
+                - audit_read
+                - status_read
+                - openapi_read
+                - vault_unlock
+                - vault_lock
+                - vault_sync
+                - startup
+                - shutdown
+                - events_dropped
+                - ui_login
+                - ui_logout
+                - ui_session_expired
+                - ui_two_factor_email_sent
+            category:
+              type: array
+              items:
+                type: string
+                enum: [web, authentication, network, iam, configuration]
+            type:
+              type: array
+              items:
+                type: string
+                enum: [access, denied, start, end, change, creation, deletion, info]
+            outcome:
+              type: string
+              enum: [success, failure, unknown]
+            reason:
+              $ref: "#/components/schemas/ReasonCode"
+            duration:
+              type: integer
+              minimum: 0
+              description: Nanoseconds. Only on `forward` events.
+        source:
+          type: object
+          required: [ip]
+          properties:
+            ip:
+              type: string
+              description: The client IP address.
+        http:
+          type: object
+          properties:
+            request:
+              type: object
+              required: [method]
+              properties:
+                method:
+                  type: string
+            response:
+              type: object
+              required: [status_code]
+              properties:
+                status_code:
+                  type: integer
+        url:
+          type: object
+          required: [original]
+          properties:
+            original:
+              type: string
+              description: The URL as the agent sent it, before substitution (placeholders, not values), truncated to 2048 characters.
+            domain:
+              type: string
+        service:
+          type: object
+          required: [name, version]
+          properties:
+            name:
+              type: string
+              const: ferrowarden
+            version:
+              type: string
+        ferrowarden:
+          type: object
+          required: [schema_version]
+          properties:
+            schema_version:
+              type: integer
+              const: 1
+            request_id:
+              type: string
+              description: The `X-Request-Id` of the request that produced the event.
+            key:
+              type: object
+              required: [id, name]
+              properties:
+                id:
+                  type: string
+                name:
+                  type: string
+            credentials:
+              type: array
+              description: Labels of the placeholders the request used. Not values.
+              items:
+                type: string
+            details:
+              type: object
+              description: A small object that depends on the action. Its keys are listed in `docs/events.md`.
+              additionalProperties: true

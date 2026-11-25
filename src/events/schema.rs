@@ -58,6 +58,7 @@ pub enum Action {
     PolicyPreview,
     AuditRead,
     StatusRead,
+    OpenapiRead,
     VaultUnlock,
     VaultLock,
     VaultSync,
@@ -73,7 +74,7 @@ pub enum Action {
 impl Action {
     /// Every action, in the order the audit view lists them. Keep in step
     /// with the enum: the `all_actions_are_listed` test counts the variants.
-    pub const ALL: [Action; 23] = [
+    pub const ALL: [Action; 24] = [
         Action::Forward,
         Action::CredentialsList,
         Action::AgentAuth,
@@ -87,6 +88,7 @@ impl Action {
         Action::PolicyPreview,
         Action::AuditRead,
         Action::StatusRead,
+        Action::OpenapiRead,
         Action::VaultUnlock,
         Action::VaultLock,
         Action::VaultSync,
@@ -119,6 +121,7 @@ impl Action {
             Action::PolicyPreview => "policy_preview",
             Action::AuditRead => "audit_read",
             Action::StatusRead => "status_read",
+            Action::OpenapiRead => "openapi_read",
             Action::VaultUnlock => "vault_unlock",
             Action::VaultLock => "vault_lock",
             Action::VaultSync => "vault_sync",
@@ -139,7 +142,8 @@ impl Action {
             | Action::CredentialsList
             | Action::RequestRejected
             | Action::AuditRead
-            | Action::StatusRead => "web",
+            | Action::StatusRead
+            | Action::OpenapiRead => "web",
             Action::AgentAuth
             | Action::AdminAuth
             | Action::VaultUnlock
@@ -184,6 +188,7 @@ impl Action {
             Action::PolicyPreview => "policy preview",
             Action::AuditRead => "audit read",
             Action::StatusRead => "status read",
+            Action::OpenapiRead => "OpenAPI read",
             Action::VaultUnlock => "vault unlock",
             Action::VaultLock => "vault lock",
             Action::VaultSync => "vault sync",
@@ -213,6 +218,7 @@ impl Action {
             Action::PolicyPreview => "policy previewed",
             Action::AuditRead => "audit log read",
             Action::StatusRead => "status read",
+            Action::OpenapiRead => "OpenAPI document read",
             Action::VaultUnlock => "vault unlocked",
             Action::VaultLock => "vault locked",
             Action::VaultSync => "credential cache refreshed",
@@ -539,7 +545,8 @@ impl SecurityEvent {
             | Action::KeyList
             | Action::PolicyPreview
             | Action::AuditRead
-            | Action::StatusRead => vec!["access"],
+            | Action::StatusRead
+            | Action::OpenapiRead => vec!["access"],
             Action::KeyPolicyChange => vec!["change"],
             Action::AgentAuth | Action::AdminAuth | Action::VaultUnlock => vec!["start"],
             Action::UiLogin => {
@@ -714,16 +721,17 @@ mod tests {
                 Action::PolicyPreview => 10,
                 Action::AuditRead => 11,
                 Action::StatusRead => 12,
-                Action::VaultUnlock => 13,
-                Action::VaultLock => 14,
-                Action::VaultSync => 15,
-                Action::Startup => 16,
-                Action::Shutdown => 17,
-                Action::EventsDropped => 18,
-                Action::UiLogin => 19,
-                Action::UiLogout => 20,
-                Action::UiSessionExpired => 21,
-                Action::UiTwoFactorEmailSent => 22,
+                Action::OpenapiRead => 13,
+                Action::VaultUnlock => 14,
+                Action::VaultLock => 15,
+                Action::VaultSync => 16,
+                Action::Startup => 17,
+                Action::Shutdown => 18,
+                Action::EventsDropped => 19,
+                Action::UiLogin => 20,
+                Action::UiLogout => 21,
+                Action::UiSessionExpired => 22,
+                Action::UiTwoFactorEmailSent => 23,
             }
         }
         for (i, a) in Action::ALL.into_iter().enumerate() {
@@ -822,6 +830,7 @@ mod tests {
             (Action::PolicyPreview, "iam", vec!["access"]),
             (Action::AuditRead, "web", vec!["access"]),
             (Action::StatusRead, "web", vec!["access"]),
+            (Action::OpenapiRead, "web", vec!["access"]),
             (Action::VaultUnlock, "authentication", vec!["start"]),
             (Action::VaultLock, "configuration", vec!["change"]),
             (Action::VaultSync, "configuration", vec!["info"]),
@@ -877,6 +886,7 @@ mod tests {
             Action::PolicyPreview,
             Action::AuditRead,
             Action::StatusRead,
+            Action::OpenapiRead,
             Action::VaultUnlock,
             Action::VaultLock,
             Action::VaultSync,
