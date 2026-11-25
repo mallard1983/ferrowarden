@@ -43,6 +43,14 @@ Substitutes placeholders, forwards the request, and returns the scrubbed respons
 
 ---
 
+### GET /v1/openapi.json
+
+Returns the OpenAPI 3.1 description of the operations your key can call, as JSON. Use it if your framework can read OpenAPI or you want the exact request and response schemas. `servers[0].url` is the base URL to use.
+
+**Headers:** `X-Agent-Key: <token>`
+
+---
+
 ### GET /health
 
 Returns `200 OK` with no body. No authentication required. Used by health checks.

@@ -23,6 +23,9 @@ RUN rm src/main.rs
 COPY src ./src
 # Admin UI page templates (compiled into the binary by askama).
 COPY templates ./templates
+# The OpenAPI description, embedded in the binary (include_str!) and served
+# at GET /v1/openapi.json. Only this one file of docs/ is needed.
+COPY docs/openapi.yaml ./docs/openapi.yaml
 # Touch main.rs so cargo knows to recompile (the dummy above changed mtime)
 RUN touch src/main.rs
 RUN cargo build --release

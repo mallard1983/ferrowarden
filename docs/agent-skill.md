@@ -236,4 +236,6 @@ When you need to make an API call that requires credentials:
 3. Call `POST /v1/forward` with the appropriate `{{vault:name}}` placeholder.
 4. Use the returned `status`, `headers`, and `body` as you would use any HTTP response.
 
+A machine-readable description of this API is available too: `GET /v1/openapi.json` with your `X-Agent-Key` returns an OpenAPI 3.1 document listing the operations you can call.
+
 If the credential you need is not in the list, do not guess names or attempt to call the target directly. Tell the user which credential name you need added to the vault.

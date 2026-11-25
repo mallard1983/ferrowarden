@@ -53,6 +53,12 @@ jobs:
       - name: Run unit tests
         run: cargo test --bins
 
+      # docs/openapi.yaml is hand-written. Lint it with the recommended
+      # Redocly ruleset (redocly.yaml). The CLI is pinned to an exact version;
+      # npx and Node come with the ubuntu runner image.
+      - name: Lint the OpenAPI specification
+        run: npx --yes @redocly/cli@2.83.0 lint docs/openapi.yaml
+
   # ── Integration tests ─────────────────────────────────────────────────────────
   # Requires Docker Compose. Runs on pull requests and the default branch.
   #

@@ -2,9 +2,11 @@
 
 # API Reference
 
+This page is the narrative reference. The machine-readable description of the same API is the [OpenAPI 3.1 specification](openapi.yaml), which Ferrowarden also serves at [`GET /v1/openapi.json`](#get-v1openapijson). Where the two ever disagree, the running server is the authority: please open an issue.
+
 All requests require an authentication header. The header name depends on the endpoint:
 
-- **Agent endpoints** (`/v1/credentials`, `/v1/forward`): `X-Agent-Key: <token>`
+- **Agent endpoints** (`/v1/credentials`, `/v1/forward`, `/v1/openapi.json`): `X-Agent-Key: <token>`
 - **Admin endpoints** (`/v1/admin/*`, `/v1/unlock`): `X-Admin-Key: <key>`
 
 `GET /health` needs no authentication.
@@ -80,6 +82,37 @@ Each key is present only when that value exists on the item. `bound_to` lists th
 | `400 Bad Request` | Unknown query parameter (only `detail` is accepted), or `detail` given more than once (authenticated requests only) |
 | `401 Unauthorized` | Missing or invalid agent key |
 | `503 Service Unavailable` | Vault is locked |
+
+---
+
+### `GET /v1/openapi.json`
+
+<a id="openapi-description"></a>
+
+The [OpenAPI 3.1 description](openapi.yaml) of this API, as JSON. Use it to generate a client, to import the API into a tool that reads OpenAPI, or to let an agent framework discover the operations.
+
+**Headers**
+- `X-Agent-Key: <token>`, or the admin key (`X-Admin-Key: <key>` or `Authorization: Bearer <key>`). Required.
+
+What you get depends on the key:
+
+- **An agent key** gets the agent operations and the meta operations (`/health`, this endpoint). The operator API, and the schemas only it uses, are left out.
+- **The admin key** gets the full document.
+
+In both, `servers[0].url` is set to the configured `api_prefix` (`/` when there is none), so a client can use the document from the same base URL it fetched it from. The prefix appears only in this authenticated response. A request without a valid key gets `401` and the same events as any other agent route (`agent_auth` or `admin_auth`).
+
+The query string must be empty (an unknown parameter is a `400`). The response is `application/json` with `Cache-Control: no-store`. It counts against the agent rate limit, also when the admin key is used. Each successful read is recorded as an `openapi_read` event with `details.variant` set to `agent` or `admin`.
+
+**Response `200 OK`**: the OpenAPI document.
+
+**Errors**
+| Status | Condition |
+|---|---|
+| `400 Bad Request` | A query parameter was sent |
+| `401 Unauthorized` | Missing or invalid key |
+| `429 Too Many Requests` | Agent rate limit exceeded |
+
+Every operation has a stable `operationId` (`listCredentials`, `forwardRequest`, `createKey`, ...), so generated clients and tool definitions keep the same names between releases.
 
 ---
 

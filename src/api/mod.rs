@@ -3,12 +3,13 @@ pub mod credentials;
 pub mod forward;
 pub mod health;
 pub mod key_service;
+pub mod openapi;
 pub mod strict_json;
 pub mod unlock;
 
 use axum::{
     middleware,
-    routing::{delete, get, post},
+    routing::{on, MethodFilter, MethodRouter},
     Extension, Router,
 };
 use std::sync::Arc;
@@ -18,6 +19,106 @@ use crate::middleware::rate_limit::{rate_limit, LimitState};
 use crate::middleware::request_context::{request_context, TrustedProxies};
 use crate::net::Cidr;
 use crate::state::AppState;
+
+/// Who calls a route, which decides its rate limiter and whether it moves
+/// under `api_prefix`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    /// Public, no authentication, no rate limit, never prefixed.
+    Public,
+    /// Agent endpoints (and the OpenAPI document): the agent rate limiter.
+    Agent,
+    /// Operator endpoints: the admin rate limiter.
+    Admin,
+}
+
+/// The handler behind a route. [`handler`] maps each one to its axum handler
+/// with an exhaustive `match`, so a route cannot be listed without one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Op {
+    Health,
+    OpenApi,
+    ListCredentials,
+    Forward,
+    Unlock,
+    ListKeys,
+    CreateKey,
+    UpdateKeyPolicy,
+    RevokeKey,
+    PreviewKeyPolicy,
+    ListAuditEvents,
+    GetStatus,
+}
+
+/// One route of the HTTP API.
+#[derive(Debug, Clone, Copy)]
+pub struct Route {
+    /// Upper-case HTTP method.
+    pub method: &'static str,
+    /// Path template in the form OpenAPI and axum share (`{id}`), without
+    /// `api_prefix`.
+    pub path: &'static str,
+    pub group: Group,
+    op: Op,
+}
+
+/// Every route Ferrowarden serves, declared once. [`router`] builds the axum
+/// router from this table, and a unit test compares it with `docs/openapi.yaml`,
+/// so a route cannot be added without being described there.
+#[rustfmt::skip]
+pub const ROUTES: [Route; 12] = [
+    Route { method: "GET", path: "/health", group: Group::Public, op: Op::Health },
+    Route { method: "GET", path: "/v1/openapi.json", group: Group::Agent, op: Op::OpenApi },
+    Route { method: "GET", path: "/v1/credentials", group: Group::Agent, op: Op::ListCredentials },
+    Route { method: "POST", path: "/v1/forward", group: Group::Agent, op: Op::Forward },
+    Route { method: "POST", path: "/v1/unlock", group: Group::Admin, op: Op::Unlock },
+    Route { method: "GET", path: "/v1/admin/keys", group: Group::Admin, op: Op::ListKeys },
+    Route { method: "POST", path: "/v1/admin/keys", group: Group::Admin, op: Op::CreateKey },
+    Route { method: "PATCH", path: "/v1/admin/keys/{id}", group: Group::Admin, op: Op::UpdateKeyPolicy },
+    Route { method: "DELETE", path: "/v1/admin/keys/{id}", group: Group::Admin, op: Op::RevokeKey },
+    Route { method: "POST", path: "/v1/admin/keys/{id}/preview", group: Group::Admin, op: Op::PreviewKeyPolicy },
+    Route { method: "GET", path: "/v1/admin/audit", group: Group::Admin, op: Op::ListAuditEvents },
+    Route { method: "GET", path: "/v1/admin/status", group: Group::Admin, op: Op::GetStatus },
+];
+
+/// The axum method filter for a table entry's method.
+fn filter(method: &str) -> MethodFilter {
+    match method {
+        "GET" => MethodFilter::GET,
+        "POST" => MethodFilter::POST,
+        "PATCH" => MethodFilter::PATCH,
+        "DELETE" => MethodFilter::DELETE,
+        other => panic!("route table lists unsupported method {other}"),
+    }
+}
+
+/// The axum handler for a route, bound to the method the table gives it.
+fn handler(route: &Route) -> MethodRouter<Arc<AppState>> {
+    let f = filter(route.method);
+    match route.op {
+        Op::Health => on(f, health::health),
+        Op::OpenApi => on(f, openapi::get_openapi),
+        Op::ListCredentials => on(f, credentials::list_credentials),
+        Op::Forward => on(f, forward::forward),
+        Op::Unlock => on(f, unlock::unlock),
+        Op::ListKeys => on(f, admin::list_keys),
+        Op::CreateKey => on(f, admin::create_key),
+        Op::UpdateKeyPolicy => on(f, admin::patch_key),
+        Op::RevokeKey => on(f, admin::revoke_key),
+        Op::PreviewKeyPolicy => on(f, admin::preview_key),
+        Op::ListAuditEvents => on(f, admin::get_audit),
+        Op::GetStatus => on(f, admin::get_status),
+    }
+}
+
+/// The routes of one group as a router. Routes that share a path (the method
+/// routers are merged by axum) end up on one path entry.
+fn group_router(group: Group) -> Router<Arc<AppState>> {
+    ROUTES
+        .iter()
+        .filter(|r| r.group == group)
+        .fold(Router::new(), |router, r| router.route(r.path, handler(r)))
+}
 
 pub fn router(state: Arc<AppState>) -> Router {
     // Agent endpoints: configurable, default 120 requests/min sustained with a
@@ -48,37 +149,38 @@ pub fn router(state: Arc<AppState>) -> Router {
             .collect(),
     ));
 
+    let prefix = state.config.api_prefix.clone();
+
+    // The OpenAPI document is parsed once, here. The YAML is part of the
+    // binary, so a failure is a bug and must stop startup, not leave the
+    // endpoint broken (a unit test keeps it from shipping).
+    let openapi_docs = Arc::new(
+        openapi::OpenApiDocs::build(&prefix)
+            .unwrap_or_else(|e| panic!("embedded OpenAPI document is invalid: {e}")),
+    );
+
     // Layer ordering: Axum runs the last-added layer first.
     // Extension (outer, added second) adds the limiter to request extensions.
     // rate_limit middleware (inner, added first) reads it from extensions.
     // The client IP it keys on comes from the request-context middleware,
     // which wraps the whole router (see the end of this function).
-    let agent_routes = Router::new()
-        .route("/v1/forward", post(forward::forward))
-        .route("/v1/credentials", get(credentials::list_credentials))
+    //
+    // The OpenAPI document counts against the agent limiter, also when it is
+    // fetched with the admin key.
+    let agent_routes = group_router(Group::Agent)
         .layer(middleware::from_fn(rate_limit))
-        .layer(Extension(agent_limiter));
+        .layer(Extension(agent_limiter))
+        .layer(Extension(openapi_docs));
 
-    let admin_routes = Router::new()
-        .route("/v1/unlock", post(unlock::unlock))
-        .route("/v1/admin/keys", post(admin::create_key))
-        .route("/v1/admin/keys", get(admin::list_keys))
-        .route(
-            "/v1/admin/keys/{id}",
-            delete(admin::revoke_key).patch(admin::patch_key),
-        )
-        .route("/v1/admin/keys/{id}/preview", post(admin::preview_key))
-        .route("/v1/admin/audit", get(admin::get_audit))
-        .route("/v1/admin/status", get(admin::get_status))
+    let admin_routes = group_router(Group::Admin)
         .layer(middleware::from_fn(rate_limit))
         .layer(Extension(admin_limiter));
 
     let api = agent_routes.merge(admin_routes);
-    let prefix = state.config.api_prefix.clone();
 
     // Health check: public, no auth, no rate limit, never prefixed.
     // Used by Docker healthcheck and reverse proxies.
-    let router = Router::new().route("/health", get(health::health));
+    let router = group_router(Group::Public);
     let router = if prefix.is_empty() {
         router.merge(api)
     } else {
@@ -649,6 +751,49 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["ferrowarden"]["details"]["limiter"], "admin");
         assert_eq!(events[0]["event"]["category"][0], "network");
+    }
+
+    /// The 429 the spec describes: plain text, `Retry-After` in whole seconds
+    /// (at least 1) and an `X-Request-Id`.
+    #[tokio::test]
+    async fn the_429_response_matches_the_spec() {
+        let spec = openapi::parse_spec().unwrap();
+        let documented = &spec["components"]["responses"]["RateLimited"];
+        assert!(documented["content"]["text/plain"].is_object());
+        assert!(documented["headers"]["Retry-After"].is_object());
+        assert!(documented["headers"]["X-Request-Id"].is_object());
+        assert_eq!(
+            spec["components"]["headers"]["RetryAfter"]["schema"]["minimum"],
+            1
+        );
+
+        let app = build("", 2).0;
+        let mut seen = None;
+        for _ in 0..6 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::get("/v1/admin/status")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                seen = Some(resp);
+                break;
+            }
+        }
+        let resp = seen.expect("the admin limiter answers 429");
+        let content_type = resp.headers()["content-type"].to_str().unwrap().to_string();
+        assert!(content_type.starts_with("text/plain"), "{content_type}");
+        let retry: u64 = resp.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(retry >= 1);
+        assert!(resp.headers().contains_key("x-request-id"));
     }
 
     // ── Per-key policy ────────────────────────────────────────────────────────
@@ -1302,5 +1447,217 @@ mod tests {
         let e = serde_json::to_value(crate::startup_event(&state.config, 3, 2)).unwrap();
         assert_eq!(e["ferrowarden"]["details"]["keys_without_policy"], 2);
         assert_eq!(e["ferrowarden"]["details"]["agent_key_count"], 3);
+    }
+    // ── The route table and docs/openapi.yaml ─────────────────────────────────
+
+    #[test]
+    fn the_route_table_and_the_spec_describe_the_same_routes() {
+        let table: std::collections::BTreeSet<(String, String)> = ROUTES
+            .iter()
+            .map(|r| (r.method.to_string(), r.path.to_string()))
+            .collect();
+        assert_eq!(table.len(), ROUTES.len(), "a route is listed twice");
+
+        let spec = openapi::parse_spec().unwrap();
+        let documented = openapi::operations(&spec);
+
+        let undocumented: Vec<_> = table.difference(&documented).collect();
+        let unserved: Vec<_> = documented.difference(&table).collect();
+        assert!(
+            undocumented.is_empty() && unserved.is_empty(),
+            "routes missing from docs/openapi.yaml: {undocumented:?}; \
+             operations in docs/openapi.yaml that are not routes: {unserved:?}"
+        );
+    }
+
+    /// The table drives the router: every entry answers with its own method
+    /// (not 404 or 405), with and without a prefix, and /health is never
+    /// prefixed. Methods the table does not list for a path are 405.
+    #[tokio::test]
+    async fn every_route_in_the_table_is_served_with_its_method() {
+        for prefix in ["", "/k7f3q9"] {
+            let app = app(prefix);
+            for r in ROUTES {
+                let path = r.path.replace("{id}", "some-id");
+                let full = if r.group == Group::Public {
+                    path.clone()
+                } else {
+                    format!("{prefix}{path}")
+                };
+                let (s, _, _) = call(&app, r.method, &full, &[], None).await;
+                assert!(
+                    s != StatusCode::NOT_FOUND && s != StatusCode::METHOD_NOT_ALLOWED,
+                    "{} {full} -> {s}",
+                    r.method
+                );
+                for other in ["GET", "POST", "PATCH", "DELETE"] {
+                    let listed = ROUTES.iter().any(|o| o.path == r.path && o.method == other);
+                    if !listed {
+                        let (s, _, _) = call(&app, other, &full, &[], None).await;
+                        assert_eq!(s, StatusCode::METHOD_NOT_ALLOWED, "{other} {full}");
+                    }
+                }
+            }
+        }
+    }
+
+    // ── GET /v1/openapi.json ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn openapi_needs_a_key() {
+        let (app, state) = app_with_state("/k7f3q9");
+        for (headers, action, reason) in [
+            (vec![], "agent_auth", "missing_key"),
+            (vec![("x-agent-key", "nope")], "agent_auth", "invalid_key"),
+            (
+                vec![("x-admin-key", "wrong-admin-key-wrong-admin-key-xx")],
+                "admin_auth",
+                "invalid_admin_key",
+            ),
+            (
+                vec![("authorization", "Bearer wrong")],
+                "admin_auth",
+                "invalid_admin_key",
+            ),
+        ] {
+            let (s, h, body) = call(&app, "GET", "/k7f3q9/v1/openapi.json", &headers, None).await;
+            assert_eq!(s, StatusCode::UNAUTHORIZED);
+            // Nothing of the document, and no prefix, in an unauthenticated answer.
+            assert_eq!(body.as_object().map(|o| o.len()), Some(1));
+            assert!(!body.to_string().contains("k7f3q9"));
+            assert!(h.get("x-request-id").is_some());
+            let e = &events_of(&state, action)[0];
+            assert_eq!(e["event"]["reason"], reason);
+            assert_eq!(e["ferrowarden"]["details"]["endpoint"], "/v1/openapi.json");
+        }
+        assert!(events_of(&state, "openapi_read").is_empty());
+        assert!(!all_events_text(&state).contains("k7f3q9"));
+    }
+
+    #[tokio::test]
+    async fn openapi_gives_each_key_its_own_view() {
+        let (app, state) = app_with_state("/k7f3q9");
+        let (s, _, created) = call(
+            &app,
+            "POST",
+            "/k7f3q9/v1/admin/keys",
+            &[("x-admin-key", ADMIN_KEY)],
+            Some(r#"{"name":"reader","credentials":["*"],"methods":["*"]}"#),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+        let token = created["token"].as_str().unwrap().to_string();
+
+        let path = "/k7f3q9/v1/openapi.json";
+        let (s, h, agent) = call(&app, "GET", path, &[("x-agent-key", &token)], None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(h["content-type"], "application/json");
+        assert_eq!(h["cache-control"], "no-store");
+        assert_eq!(agent["servers"][0]["url"], "/k7f3q9");
+        assert!(agent["paths"]["/v1/forward"].is_object());
+        assert!(agent["paths"].get("/v1/admin/keys").is_none());
+        assert!(agent["paths"].get("/v1/unlock").is_none());
+
+        for headers in [
+            vec![("x-admin-key", ADMIN_KEY)],
+            vec![("authorization", "Bearer aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")],
+        ] {
+            let (s, _, admin) = call(&app, "GET", path, &headers, None).await;
+            assert_eq!(s, StatusCode::OK);
+            assert_eq!(admin["servers"][0]["url"], "/k7f3q9");
+            assert!(admin["paths"]["/v1/admin/keys"].is_object());
+            assert!(admin["paths"]["/v1/unlock"].is_object());
+            assert!(admin["components"]["schemas"]["SecurityEvent"].is_object());
+        }
+
+        // Recorded with the variant, and the agent's key on the agent read.
+        let reads = events_of(&state, "openapi_read");
+        assert_eq!(reads.len(), 3);
+        let variants: Vec<_> = reads
+            .iter()
+            .map(|e| e["ferrowarden"]["details"]["variant"].as_str().unwrap())
+            .collect();
+        assert_eq!(variants, ["admin", "admin", "agent"]);
+        assert_eq!(reads[2]["ferrowarden"]["key"]["name"], "reader");
+        assert!(reads[0]["ferrowarden"].get("key").is_none());
+        assert_eq!(reads[2]["event"]["category"][0], "web");
+        assert_eq!(reads[2]["event"]["type"][0], "access");
+        assert_eq!(reads[2]["http"]["response"]["status_code"], 200);
+        let text = all_events_text(&state);
+        assert!(!text.contains("k7f3q9"), "the prefix is not logged");
+        assert!(!text.contains(&token));
+    }
+
+    #[tokio::test]
+    async fn openapi_without_a_prefix_serves_slash() {
+        let app = app("");
+        let (s, _, doc) = call(
+            &app,
+            "GET",
+            "/v1/openapi.json",
+            &[("x-admin-key", ADMIN_KEY)],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(doc["servers"][0]["url"], "/");
+        assert_eq!(doc["openapi"], "3.1.0");
+    }
+
+    #[tokio::test]
+    async fn openapi_query_is_strict_after_authentication() {
+        let (app, state) = app_with_state("");
+        let (_, token) = make_agent(&app, "reader").await;
+        // Unauthenticated: 401, not 400.
+        let (s, _, _) = call(&app, "GET", "/v1/openapi.json?x=1", &[], None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        for q in ["?x=1", "?pretty", "?a=1&a=2"] {
+            let uri = format!("/v1/openapi.json{q}");
+            let (s, _, _) = call(&app, "GET", &uri, &[("x-agent-key", &token)], None).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{q}");
+            let (s, _, _) = call(&app, "GET", &uri, &[("x-admin-key", ADMIN_KEY)], None).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{q}");
+        }
+        let rejected = events_of(&state, "request_rejected");
+        assert_eq!(rejected.len(), 6);
+        assert_eq!(
+            rejected[0]["ferrowarden"]["details"]["endpoint"],
+            "/v1/openapi.json"
+        );
+        assert!(events_of(&state, "openapi_read").is_empty());
+    }
+
+    #[tokio::test]
+    async fn openapi_shares_the_agent_rate_limit_even_for_the_admin_key() {
+        let burst = 20; // the agent burst in `build_with`
+        let app = app("");
+        let mut limited = None;
+        for i in 0..(burst + 5) {
+            let (s, h, _) = call(
+                &app,
+                "GET",
+                "/v1/openapi.json",
+                &[("x-admin-key", ADMIN_KEY)],
+                None,
+            )
+            .await;
+            if s == StatusCode::TOO_MANY_REQUESTS {
+                limited = Some((i, h));
+                break;
+            }
+        }
+        let (i, h) = limited.expect("the agent limiter applies");
+        assert_eq!(i, burst, "burst of the agent limiter");
+        assert!(h.get("retry-after").is_some());
+        // The admin limiter is a separate bucket and still has room.
+        let (s, _, _) = call(
+            &app,
+            "GET",
+            "/v1/admin/status",
+            &[("x-admin-key", ADMIN_KEY)],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
     }
 }
