@@ -138,6 +138,15 @@ rmcp = { version = "3.11", default-features = false, features = ["server", "tran
 # itoa, parking_lot) are MIT and/or Apache-2.0 as well.
 prometheus-client = "0.26"
 
+# ── Internal PKI (ferrowarden internal-certs, docs/tls.md) ─────────────────────
+# rcgen (MIT OR Apache-2.0) issues the CA and Vaultwarden certificates with the
+# ring backend (no aws-lc). rustls-webpki (ISC) is already in the tree through
+# rustls; it decides whether an existing certificate is still good.
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+rustls-webpki = { version = "0.103.17", default-features = false, features = ["ring", "std"] }
+# Calendar arithmetic for certificate validity (already in the tree through rcgen).
+time = { version = "0.3", default-features = false }
+
 # Process hardening of the native vault backend (PR_SET_DUMPABLE, RLIMIT_CORE).
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
@@ -152,3 +161,5 @@ tower = { version = "0.5", features = ["util"] }
 # Integration tests validate real responses against docs/openapi.yaml. No HTTP
 # or file `$ref` resolvers and no TLS stack: the spec is one local document.
 jsonschema = { version = "0.63", default-features = false }
+# Reads the issued certificates back in the internal-certs tests (extensions, validity).
+x509-parser = "0.18.1"

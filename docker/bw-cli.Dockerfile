@@ -1,14 +1,14 @@
 FROM node:26-slim
 
-# The entrypoint scripts use curl and wget for Vaultwarden health checks;
-# openssl generates the internal CA and Vaultwarden certificate
-# (gen-internal-certs.sh). The slim image ships with none of these. (The
-# account setup and the seeders are Node.js scripts: no Python.)
+# The entrypoint scripts use curl and wget for Vaultwarden health checks; the
+# slim image ships with neither. (The account setup and the seeders are
+# Node.js scripts: no Python. This image is only for the test setup scripts and
+# the deprecated bw-serve: the default deployment runs no Node at all, and the
+# internal CA is made by `ferrowarden internal-certs`.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         wget \
-        openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Install the Bitwarden CLI globally. Pinned: bump deliberately and re-run the
@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # minor uses the CLI of its time (docs/cicd.md).
 # The CLI requires Node 22+ and refuses plain-HTTP server URLs, which is why
 # Vaultwarden is served over HTTPS on the internal network (see
-# gen-internal-certs.sh and docker-compose.yml).
+# docs/tls.md and docker-compose.yml).
 ARG BW_CLI_VERSION=2026.11.0
 RUN npm install -g @bitwarden/cli@${BW_CLI_VERSION} \
     && bw --version
@@ -53,9 +53,6 @@ COPY bw-seed.js /usr/local/share/ferrowarden/bw-seed.js
 # bw-seed-hidden.js: an item whose collection hides passwords from the test
 # account (viewPassword = false), owned by a second account.
 COPY bw-seed-hidden.js /usr/local/share/ferrowarden/bw-seed-hidden.js
-
-# Internal certificate generator, run by the one-shot internal-certs service.
-COPY gen-internal-certs.sh /usr/local/bin/gen-internal-certs.sh
 
 # node:*-slim images ship with a non-root "node" user (UID 1000).
 # bw stores its config in ~/.config/Bitwarden CLI. Create that directory now

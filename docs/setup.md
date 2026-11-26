@@ -145,7 +145,7 @@ VAULTWARDEN_SIGNUPS_ALLOWED=true docker compose up -d vaultwarden
 $env:VAULTWARDEN_SIGNUPS_ALLOWED = 'true'; docker compose up -d vaultwarden; Remove-Item env:VAULTWARDEN_SIGNUPS_ALLOWED
 ```
 
-This first runs the one-shot `internal-certs` service, which creates a private CA and Vaultwarden's certificate in the `internal-pki` volume. Vaultwarden serves **HTTPS** on the internal network, and Ferrowarden, which refuses plain-HTTP vault URLs, trusts that CA (`vault.ca_file`).
+This first runs the one-shot `internal-certs` service (`ferrowarden internal-certs`, from the Ferrowarden image: no Node.js, shell or openssl), which creates a private CA and Vaultwarden's certificate in the `internal-pki` volume, or keeps the ones already there. Vaultwarden serves **HTTPS** on the internal network, and Ferrowarden, which refuses plain-HTTP vault URLs, trusts that CA (`vault.ca_file`).
 
 Browse to **https://127.0.0.1:8443** (or your `VAULTWARDEN_DOMAIN`). Browsing directly, the browser warns about the certificate because it is issued by the internal CA; accept it, or install `ca.crt` from the `internal-pki` volume as a trusted CA (`docker compose cp internal-certs:/pki/ca.crt .` after a run). Behind a reverse proxy with its own certificate there is no warning.
 

@@ -46,6 +46,8 @@ If you point `FERROWARDEN_EVENTS__FILE` somewhere else, mount a volume there tha
 
 The default stack has two long-running containers, Ferrowarden and Vaultwarden. There is no `bw-serve` container: the largest attack surface of 0.1.0 (Node.js and the Bitwarden CLI's npm dependency tree, holding the decrypted vault while unlocked) is gone from the default deployment. The Vaultwarden container is a third-party image that binds port 443 as root; it gets `no-new-privileges` and nothing more.
 
+The `internal-certs` one-shot that makes Vaultwarden's certificate also runs the Ferrowarden image (`ferrowarden internal-certs`), so the default deployment holds no Node.js, no shell and no openssl. It exits when it is done and is hardened like Ferrowarden: `network_mode: none`, `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges`, `restart: "no"`. It runs as root (`user: "0"`) because the `internal-pki` volume is root-owned with mode-0600 keys and Vaultwarden runs as root; with no capabilities it can still write the files it owns ([tls.md](tls.md#the-internal-ca-how-it-is-made)).
+
 If you stay on the deprecated `bw-serve` backend (`docker-compose.bw-serve.yml`), that container keeps its hardening: `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges`, `pids_limit: 128`, `mem_limit: 1g`, and one writable path, the CLI's data directory, on the `bw-data` volume. Be clear about the limit: it is a stock Node image with a shell, `curl` and a Debian userland; the restrictions contain it, not the absence of tools.
 
 ### What Standard protects against, and what it does not

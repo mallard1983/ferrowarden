@@ -569,7 +569,7 @@ Current Bitwarden clients raise an account's PBKDF2 iterations (e.g. 100,000 →
 
 ### Internal certificate renewal
 
-`internal-certs` runs on every `docker compose up` and re-issues Vaultwarden's certificate when it is within 30 days of expiry (it is valid for 825 days). Vaultwarden only loads the certificate at start, so restart it after a renewal: `docker compose restart vaultwarden`.
+`internal-certs` (`ferrowarden internal-certs`, from the Ferrowarden image) runs on every `docker compose up` and re-issues Vaultwarden's certificate when it is within 30 days of expiry (it is valid for 825 days), when it is missing, when its names no longer match `VAULTWARDEN_CERT_SANS`, or when it was not signed by the current CA. The CA is kept. To renew without restarting the stack, run `docker compose up internal-certs` (or `docker compose run --rm internal-certs`). Vaultwarden only loads the certificate at start, so restart it after a renewal: `docker compose restart vaultwarden`. The output says what it did (`Internal CA exists`, `Vaultwarden certificate is valid`, or the reason it issued a new one). See [tls.md](tls.md#the-internal-ca-how-it-is-made).
 
 Common causes:
 - Vaultwarden is not fully started when the login is attempted (bw-serve or Ferrowarden) — check Vaultwarden is healthy

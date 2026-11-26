@@ -181,7 +181,7 @@ The 11 integration tests share mock-api state and must run serially. Without thi
 The dev-setup script has a sleep and health-check loop. In CI the Docker network round-trip may be slower. If tests fail with "vault locked" or connection refused on the first few runs, increase the wait time in `scripts/dev-setup.sh`.
 
 **bw-cli version is pinned (currently 2026.11.0; 2026.5.0 for the Vaultwarden 1.36.0 job).**
-It requires HTTPS to Vaultwarden (provided by the `internal-certs` service) and checks the `Host` header on `bw serve`. Bump it deliberately and re-run the integration tests: the `bw serve` API is part of ferrowarden's contract.
+It requires HTTPS to Vaultwarden (provided by the `internal-certs` service, which is `ferrowarden internal-certs` from the Ferrowarden image, not the CLI image) and checks the `Host` header on `bw serve`. Bump it deliberately and re-run the integration tests: the `bw serve` API is part of ferrowarden's contract.
 
 **Cargo build toolchain on Windows runners.**
 If running on a Windows GitHub Actions runner, use the MSVC toolchain:

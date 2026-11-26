@@ -22,24 +22,28 @@ services:
 
   # ── Internal PKI (one-shot) ──────────────────────────────────────────────────
   # Creates a private CA and a certificate for "vaultwarden" in the
-  # internal-pki volume. The Bitwarden CLI refuses plain-HTTP servers, so
-  # Vaultwarden serves HTTPS on the internal network and bw serve trusts this
-  # CA. Idempotent: re-issues the server cert only when missing or expiring.
+  # internal-pki volume. Vaultwarden serves HTTPS on the internal network, and
+  # Ferrowarden (and, in the deprecated bw-serve setup, the Bitwarden CLI)
+  # trust this CA. Idempotent: re-issues the server cert only when missing or
+  # expiring. Runs `ferrowarden internal-certs` from the Ferrowarden image
+  # (docker-compose.yml explains the user and hardening).
   internal-certs:
-    build:
-      context: ./docker
-      dockerfile: bw-cli.Dockerfile
-      args:
-        BW_CLI_VERSION: "${BW_CLI_VERSION:-2026.11.0}"
+    image: ferrowarden:test
+    build: .
+    entrypoint: ["/app/ferrowarden", "internal-certs"]
     user: "0"
-    entrypoint: ["/bin/sh", "/usr/local/bin/gen-internal-certs.sh"]
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
     volumes:
       - internal-pki:/pki
       # Receives a copy of ca.crt only (never the key), for ferrowarden.
       - internal-ca-public:/ca-public
     environment:
       VW_HOSTNAME: "vaultwarden"
-    network_mode: none
     restart: "no"
 
   # ── Vaultwarden (test override) ──────────────────────────────────────────────
@@ -126,6 +130,7 @@ services:
 
   # ── Ferrowarden ─────────────────────────────────────────────────────────────
   ferrowarden:
+    image: ferrowarden:test
     build: .
     restart: unless-stopped
     # Hardened exactly like production (docker-compose.yml): scratch image,
@@ -237,6 +242,7 @@ services:
   # compare the two. Its own key volume: agent keys are not shared.
   #   ports 3003 (API), 3004 (admin UI) and 9096 (metrics); bw-serve is not involved.
   ferrowarden-native:
+    image: ferrowarden:test
     build: .
     restart: unless-stopped
     read_only: true

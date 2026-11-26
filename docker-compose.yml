@@ -27,13 +27,29 @@ services:
   # Creates a private CA and a certificate for "vaultwarden" in the
   # internal-pki volume. Ferrowarden refuses plain-HTTP vault URLs, so
   # Vaultwarden serves HTTPS on the internal network and ferrowarden trusts this
-  # CA. Idempotent: re-issues the server cert only when missing or expiring.
+  # CA. Idempotent: re-issues the server cert only when missing or expiring,
+  # and keeps an existing CA (including one an older release made with openssl).
+  #
+  # It runs `ferrowarden internal-certs`: the same static binary as the proxy,
+  # from the same image (no Node, no shell, no openssl; docs/tls.md). Both
+  # services name the same `image:` and `build:`, so one build serves both.
   internal-certs:
-    build:
-      context: ./docker
-      dockerfile: bw-cli.Dockerfile
+    image: ferrowarden:local
+    build: .
+    entrypoint: ["/app/ferrowarden", "internal-certs"]
+    # Root, because the internal-pki volume (made by earlier releases too) is
+    # root-owned with mode-0600 keys, and Vaultwarden runs as root. Root with no
+    # capabilities: it writes only files it owns, so it needs neither
+    # CAP_DAC_OVERRIDE nor CAP_CHOWN.
     user: "0"
-    entrypoint: ["/bin/sh", "/usr/local/bin/gen-internal-certs.sh"]
+    # Hardening: no network, a read-only root filesystem (it writes only the two
+    # volumes), no capabilities, no privilege escalation.
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
     volumes:
       - internal-pki:/pki
       # Receives a copy of ca.crt only (never the key), for ferrowarden.
@@ -44,7 +60,6 @@ services:
       # directly (e.g. "vault.lan,192.168.1.20"). Not needed behind a reverse
       # proxy that has its own certificate (e.g. Pangolin + Let's Encrypt).
       VW_EXTRA_SANS: "${VAULTWARDEN_CERT_SANS:-localhost,127.0.0.1}"
-    network_mode: none
     restart: "no"
 
   # ── Vaultwarden ─────────────────────────────────────────────────────────────
@@ -100,6 +115,7 @@ services:
   # placeholders; ferrowarden substitutes real values, forwards the call,
   # and returns the scrubbed response. Credential values never reach the agent.
   ferrowarden:
+    image: ferrowarden:local
     build: .
     restart: unless-stopped
     # Hardening (docs/deployment-profiles.md, "Standard"). The image is a
