@@ -28,6 +28,7 @@ fn test_config() -> Config {
         ui: Default::default(),
         notify: Default::default(),
         vault: Default::default(),
+        metrics: Default::default(),
     }
 }
 

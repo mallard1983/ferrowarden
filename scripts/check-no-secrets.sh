@@ -12,6 +12,7 @@
 #   - the vault master password from secrets/bw_master_password (if present)
 #   - the Vaultwarden API key (secrets/bw_client_id, secrets/bw_client_secret):
 #     the native backend holds it, so it must never reach a log or an event
+#   - the metrics bearer token (secrets/metrics_token)
 #   - agent tokens the integration tests created during the run, from
 #     target/integration-secrets.txt (or $FERROWARDEN_GATE_EXTRA_SECRETS_FILE)
 # then greps (fixed-string) for each of them in
@@ -21,6 +22,9 @@
 #     /data/events/events.jsonl)
 # for both Ferrowarden instances: `ferrowarden` (bw serve) and
 # `ferrowarden-native` (the native vault backend).
+#   - a scrape of each instance's Prometheus `/metrics` (docs/metrics.md),
+#     fetched with the metrics token from the host ports the compose file
+#     publishes (9095 and 9096)
 #   - any extra files given as arguments
 # and exits non-zero if any value appears. Secret values are never printed:
 # a hit is reported by its label (e.g. "test_api_token: value") only.
@@ -33,6 +37,8 @@
 #   FERROWARDEN_GATE_SKIP_DOCKER=1  scan only the extra files (self-test)
 #   FERROWARDEN_GATE_SERVICES="a b" the compose services to scan (default:
 #                                   "ferrowarden ferrowarden-native")
+#   FERROWARDEN_GATE_METRICS_HOST   host the metrics ports are published on
+#                                   (default: localhost)
 
 set -euo pipefail
 # Git Bash on Windows would otherwise rewrite the container path below.
@@ -47,6 +53,17 @@ MASTER_PW_FILE="secrets/bw_master_password"
 NATIVE_ENV_FILE=".env.test.native"
 SERVICES="${FERROWARDEN_GATE_SERVICES:-ferrowarden ferrowarden-native}"
 CONTAINER_EVENTS_DIR="/data/events"
+METRICS_TOKEN_FILE="secrets/metrics_token"
+METRICS_HOST="${FERROWARDEN_GATE_METRICS_HOST:-localhost}"
+
+# The published metrics port of a compose service (empty: not scraped).
+metrics_port_for() {
+    case "$1" in
+        ferrowarden) echo 9095 ;;
+        ferrowarden-native) echo 9096 ;;
+        *) echo "" ;;
+    esac
+}
 
 work="$(mktemp -d)"
 chmod 700 "$work"
@@ -115,7 +132,7 @@ if [ -f "$NATIVE_ENV_FILE" ]; then
     v="$(sed -n 's/^FERROWARDEN_TEST_AGENT_KEY=//p' "$NATIVE_ENV_FILE" | head -n 1 | tr -d '\r')"
     [ -z "$v" ] || printf 'native_agent_key\t%s\n' "$v" >> "$secrets"
 fi
-for f in bw_client_id bw_client_secret; do
+for f in bw_client_id bw_client_secret metrics_token; do
     if [ -f "secrets/$f" ]; then
         v="$(tr -d '\r\n' < "secrets/$f")"
         [ -z "$v" ] || printf '%s\t%s\n' "$f" "$v" >> "$secrets"
@@ -166,6 +183,23 @@ if [ "${FERROWARDEN_GATE_SKIP_DOCKER:-}" != "1" ]; then
         grep -qF 'ferrowarden.security' "$work/events-$service/events.jsonl" \
             || fail "$service: events.jsonl contains no security events"
         for f in "$work/events-$service"/*; do scan_files+=("$f"); done
+
+        # A scrape of the Prometheus endpoint. The token goes to curl in a
+        # header file (never on the command line, where `ps` would show it).
+        port="$(metrics_port_for "$service")"
+        if [ -n "$port" ]; then
+            [ -s "$METRICS_TOKEN_FILE" ] || fail "$METRICS_TOKEN_FILE not found (run scripts/dev-setup.sh first)"
+            ( umask 077; printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' < "$METRICS_TOKEN_FILE")" > "$work/metrics-header" )
+            curl -sf --max-time 20 -H "@$(native_path "$work/metrics-header")" \
+                "http://$METRICS_HOST:$port/metrics" > "$work/metrics-$service.txt" \
+                || fail "could not scrape the $service metrics endpoint on port $port (is the test stack up?)"
+            # The gate must not pass vacuously: this must be a real scrape.
+            grep -qF 'ferrowarden_build_info' "$work/metrics-$service.txt" \
+                || fail "the $service scrape contains no ferrowarden metrics; nothing meaningful to scan"
+            grep -qF 'ferrowarden_forward_requests_total{' "$work/metrics-$service.txt" \
+                || fail "the $service scrape has no forward requests; run the integration tests first"
+            scan_files+=("$work/metrics-$service.txt")
+        fi
     done
 fi
 for f in "$@"; do

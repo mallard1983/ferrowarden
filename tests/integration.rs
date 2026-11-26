@@ -34,6 +34,8 @@
 //! | `FERROWARDEN_TEST_ADMIN_KEY` | *(required)* | Admin key |
 //! | `FERROWARDEN_TEST_AGENT_KEY` | *(required)* | Pre-created agent key |
 //! | `MOCK_API_URL` | `http://localhost:7777` | Mock API base URL |
+//! | `FERROWARDEN_TEST_METRICS_URL` | *(required)* | The instance's metrics listener (`http://localhost:9095`, or 9096 for the native one) |
+//! | `FERROWARDEN_TEST_METRICS_TOKEN` | *(required)* | Its bearer token (`secrets/metrics_token`) |
 
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -4065,6 +4067,604 @@ async fn test_notify_hosts_are_denied_to_agents_while_the_mock_api_stays_reachab
     assert_eq!(resp.status(), 200);
     let captured = env.last_captured_request().await;
     assert_eq!(captured["path"], "/mock-api/api/check");
+}
+
+// ── Prometheus metrics (#13) ──────────────────────────────────────────────────
+//
+// Both test instances run the metrics listener (docker-compose.test.yml) with a
+// bearer token from `secrets/metrics_token`: `ferrowarden` on 9095 and
+// `ferrowarden-native` on 9096, whichever one the suite targets through
+// `FERROWARDEN_TEST_METRICS_URL`.
+
+/// Where the metrics listener is and the token it wants.
+struct MetricsEnv {
+    url: String,
+    token: String,
+}
+
+fn metrics_env() -> MetricsEnv {
+    MetricsEnv {
+        url: env::var("FERROWARDEN_TEST_METRICS_URL")
+            .expect("FERROWARDEN_TEST_METRICS_URL must be set (run scripts/dev-setup again)")
+            .trim_end_matches('/')
+            .to_string(),
+        token: env::var("FERROWARDEN_TEST_METRICS_TOKEN")
+            .expect("FERROWARDEN_TEST_METRICS_TOKEN must be set (run scripts/dev-setup again)"),
+    }
+}
+
+/// One scrape of `/metrics`, parsed just enough to ask for series.
+struct Scrape {
+    text: String,
+}
+
+impl Scrape {
+    /// `(label body, value)` of every sample named exactly `name`.
+    fn series(&self, name: &str) -> Vec<(String, f64)> {
+        self.text
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| {
+                let rest = l.strip_prefix(name)?;
+                let (labels, value) = match rest.strip_prefix('{') {
+                    Some(r) => {
+                        let (labels, tail) = r.rsplit_once("} ")?;
+                        (labels.to_string(), tail)
+                    }
+                    None => (String::new(), rest.strip_prefix(' ')?),
+                };
+                Some((labels, value.trim().parse().ok()?))
+            })
+            .collect()
+    }
+
+    /// The sum of the samples of `name` that carry all of `labels`.
+    fn sum(&self, name: &str, labels: &[(&str, &str)]) -> f64 {
+        self.series(name)
+            .into_iter()
+            .filter(|(body, _)| {
+                labels
+                    .iter()
+                    .all(|(k, v)| body.contains(&format!("{k}=\"{v}\"")))
+            })
+            .map(|(_, v)| v)
+            .sum()
+    }
+
+    /// The one sample of `name` without labels.
+    fn gauge(&self, name: &str) -> f64 {
+        let all = self.series(name);
+        assert_eq!(
+            all.len(),
+            1,
+            "expected one `{name}` sample in:\n{}",
+            self.text
+        );
+        all[0].1
+    }
+}
+
+impl MetricsEnv {
+    async fn get(&self, env: &TestEnv, auth: Option<&str>) -> reqwest::Response {
+        let mut req = env.client.get(format!("{}/metrics", self.url));
+        if let Some(token) = auth {
+            req = req.bearer_auth(token);
+        }
+        req.send().await.expect("metrics request failed")
+    }
+
+    async fn scrape(&self, env: &TestEnv) -> Scrape {
+        let resp = self.get(env, Some(&self.token)).await;
+        assert_eq!(resp.status(), 200, "scrape with the right token");
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            content_type,
+            "application/openmetrics-text; version=1.0.0; charset=utf-8"
+        );
+        let text = resp.text().await.unwrap();
+        assert!(
+            text.ends_with("# EOF\n"),
+            "an OpenMetrics scrape ends with # EOF"
+        );
+        Scrape { text }
+    }
+}
+
+/// Everything that must never appear in a scrape: seeded secret values, every
+/// token the stack knows, and every vault item name (credential names are not
+/// labels unless `metrics.credential_labels` is on, and the stack leaves it off).
+fn metrics_forbidden(env: &TestEnv, m: &MetricsEnv) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = seeded_secrets()
+        .into_iter()
+        .map(|s| ("a seeded secret value".to_string(), s))
+        .collect();
+    out.push(("the agent key".into(), env.agent_key.clone()));
+    out.push(("the admin key".into(), env.admin_key.clone()));
+    out.push(("the metrics token".into(), m.token.clone()));
+    out.push(("the notifier token".into(), notify_token()));
+    // Tokens and wrong guesses this run created (the file the gate reads).
+    if let Ok(extra) = std::fs::read_to_string(extra_secrets_file()) {
+        for line in extra.lines().map(str::trim).filter(|l| l.len() >= 6) {
+            out.push(("a token created during the run".into(), line.to_string()));
+        }
+    }
+    let seed: Vec<Value> = serde_json::from_str(include_str!("seed/credentials.json")).unwrap();
+    for item in &seed {
+        if let Some(name) = item["name"].as_str() {
+            out.push(("a vault item name".into(), name.to_string()));
+        }
+    }
+    out
+}
+
+/// What a scrape must not contain, whatever the traffic was: the values and
+/// tokens above; the hosts the stack forwards to, fetches the vault from and
+/// notifies; and any IP address.
+fn assert_scrape_is_clean(env: &TestEnv, m: &MetricsEnv, scrape: &Scrape) {
+    for (what, value) in metrics_forbidden(env, m) {
+        assert!(
+            !scrape.text.contains(&value),
+            "a scrape contains {what} ({} chars)",
+            value.len()
+        );
+    }
+    // `build_info` names the backend (`vault_backend="bw-serve"`), which is
+    // not a host of any request.
+    let samples: String = scrape
+        .text
+        .lines()
+        .filter(|l| !l.starts_with("ferrowarden_build_info"))
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+    for host in [
+        "mock-api",
+        "notify-sink",
+        "bw-serve",
+        "vaultwarden",
+        "localhost",
+    ] {
+        assert!(!samples.contains(host), "a scrape contains the host {host}");
+    }
+    let ip = regex::Regex::new(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b").unwrap();
+    assert!(
+        !ip.is_match(&scrape.text),
+        "a scrape contains an IP address"
+    );
+    assert!(
+        !scrape.text.contains("{{vault:"),
+        "a scrape contains a placeholder"
+    );
+}
+
+/// Security: the metrics listener asks for the bearer token, answers anything
+/// but `GET /metrics` with 404 or 405, and shares nothing with the API port.
+/// Every failed attempt is counted, one event per source address per minute
+/// reports it, and neither token (the right one, or the one presented) is in
+/// that event.
+#[tokio::test]
+async fn test_metrics_listener_needs_the_bearer_token_and_serves_nothing_else() {
+    let Some(env) = TestEnv::load() else { return };
+    let m = metrics_env();
+
+    // Without a token, with the wrong one, with a prefix of the right one.
+    let wrong = format!("wrong-metrics-token-{}", unique_suffix());
+    record_secret_for_gate(&wrong);
+    let before = m
+        .scrape(&env)
+        .await
+        .sum("ferrowarden_auth_failures_total", &[("kind", "metrics")]);
+    let none = m.get(&env, None).await;
+    assert_eq!(none.status(), 401);
+    assert_eq!(none.headers()["www-authenticate"], "Bearer");
+    assert_eq!(m.get(&env, Some(&wrong)).await.status(), 401);
+    assert_eq!(
+        m.get(&env, Some(&m.token[..m.token.len() - 1]))
+            .await
+            .status(),
+        401
+    );
+    // The token in the URL is not a token.
+    let in_url = env
+        .client
+        .get(format!("{}/metrics?token={}", m.url, m.token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(in_url.status(), 401);
+    let after = m
+        .scrape(&env)
+        .await
+        .sum("ferrowarden_auth_failures_total", &[("kind", "metrics")]);
+    assert_eq!(after - before, 4.0, "every failed attempt is counted");
+
+    // The right token.
+    let scrape = m.scrape(&env).await;
+    assert!(scrape.text.contains("ferrowarden_build_info"));
+
+    // Only GET /metrics.
+    for path in [
+        "/",
+        "/health",
+        "/v1/credentials",
+        "/v1/admin/status",
+        "/metrics/",
+        "/ui/",
+    ] {
+        let r = env
+            .client
+            .get(format!("{}{path}", m.url))
+            .bearer_auth(&m.token)
+            .header("X-Agent-Key", &env.agent_key)
+            .header("X-Admin-Key", &env.admin_key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404, "{path} on the metrics port");
+        assert_eq!(r.text().await.unwrap(), "", "{path}");
+    }
+    for method in ["POST", "PUT", "DELETE", "PATCH"] {
+        let r = env
+            .client
+            .request(method.parse().unwrap(), format!("{}/metrics", m.url))
+            .bearer_auth(&m.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 405, "{method}");
+        assert_eq!(r.headers()["allow"], "GET");
+    }
+
+    // And no metrics on the API port, with or without keys.
+    for path in ["/metrics", "/v1/metrics"] {
+        let r = env
+            .client
+            .get(format!("{}{path}", env.fw_url))
+            .bearer_auth(&m.token)
+            .header("X-Agent-Key", &env.agent_key)
+            .header("X-Admin-Key", &env.admin_key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404, "{path} on the API port");
+    }
+
+    // The event: at most one per source address per minute, so if an earlier
+    // run's failure is still inside the window, wait it out and fail again.
+    let mut found = None;
+    for attempt in 0..2 {
+        let r = m.get(&env, Some(&wrong)).await;
+        assert_eq!(r.status(), 401);
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        found = env
+            .events(1000)
+            .await
+            .into_iter()
+            .find(|e| e["event"]["action"] == "metrics_auth");
+        if found.is_some() {
+            break;
+        }
+        if attempt == 0 {
+            eprintln!("a metrics_auth event was reported less than a minute ago; waiting");
+            tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+        }
+    }
+    let event = found.expect("no metrics_auth event in the audit buffer");
+    assert_eq!(event["event"]["outcome"], "failure");
+    assert!(
+        ["missing_metrics_token", "invalid_metrics_token"]
+            .contains(&event["event"]["reason"].as_str().unwrap()),
+        "{event}"
+    );
+    assert_eq!(event["http"]["response"]["status_code"], 401);
+    assert!(event["source"]["ip"].is_string());
+    assert!(event["ferrowarden"]["details"]["suppressed"].is_u64());
+    let all = serde_json::to_string(&env.events(1000).await).unwrap();
+    assert!(!all.contains(&m.token), "the metrics token is in an event");
+    assert!(!all.contains(&wrong), "a presented token is in an event");
+}
+
+/// Correctness: after real traffic, a scrape shows it. Outcomes and reasons of
+/// forwards, durations, response sizes, the vault gauges against what the API
+/// reports, and the keys without a policy against the key list.
+#[tokio::test]
+async fn test_metrics_show_the_traffic_and_the_state() {
+    let Some(env) = TestEnv::load() else { return };
+    let m = metrics_env();
+    env.reset_mock().await;
+    let spec_series = "ferrowarden_forward_requests_total";
+    let before = m.scrape(&env).await;
+
+    // A success, a policy block, an unknown credential, a bad agent key.
+    let ok = env
+        .forward(
+            "GET",
+            "/metrics-traffic",
+            json!({ "Authorization": "Bearer {{vault:test_api_token}}" }),
+            None,
+        )
+        .await;
+    assert_eq!(ok.status(), 200);
+    let ok_id = request_id(&ok);
+    let blocked = env
+        .forward_url("GET", "http://bw-serve:8087/status", json!({}), None)
+        .await;
+    assert_eq!(blocked.status(), 403);
+    let unknown = env
+        .forward(
+            "GET",
+            "/metrics-traffic",
+            json!({ "X": "{{vault:this_credential_does_not_exist}}" }),
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status(), 422);
+    let bad_key = env
+        .client
+        .get(format!("{}/v1/credentials", env.fw_url))
+        .header("X-Agent-Key", "not-a-key-0123456789")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_key.status(), 401);
+
+    // The forward event carries the size of what came back from the target.
+    let e = env.event_for(&ok_id, "forward").await;
+    let bytes = e["http"]["response"]["body"]["bytes"]
+        .as_u64()
+        .expect("http.response.body.bytes on a successful forward");
+
+    // The consumer is another task: give it a moment.
+    let mut after = m.scrape(&env).await;
+    for _ in 0..40 {
+        if after.sum(
+            spec_series,
+            &[("outcome", "failure"), ("reason", "unknown_credential")],
+        ) > before.sum(
+            spec_series,
+            &[("outcome", "failure"), ("reason", "unknown_credential")],
+        ) && after.sum("ferrowarden_auth_failures_total", &[("kind", "agent")])
+            > before.sum("ferrowarden_auth_failures_total", &[("kind", "agent")])
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        after = m.scrape(&env).await;
+    }
+    let delta =
+        |name: &str, labels: &[(&str, &str)]| after.sum(name, labels) - before.sum(name, labels);
+
+    assert!(delta(spec_series, &[("outcome", "success")]) >= 1.0);
+    assert!(
+        delta(
+            spec_series,
+            &[("outcome", "failure"), ("reason", "target_blocked")]
+        ) >= 1.0
+    );
+    assert!(
+        delta(
+            spec_series,
+            &[("outcome", "failure"), ("reason", "unknown_credential")]
+        ) >= 1.0
+    );
+    assert!(delta("ferrowarden_auth_failures_total", &[("kind", "agent")]) >= 1.0);
+    assert!(
+        delta(
+            "ferrowarden_events_total",
+            &[("action", "forward"), ("outcome", "success")]
+        ) >= 1.0
+    );
+    assert!(
+        delta(
+            "ferrowarden_forward_duration_seconds_count",
+            &[("outcome", "success")]
+        ) >= 1.0
+    );
+    assert!(delta("ferrowarden_forward_response_bytes_count", &[]) >= 1.0);
+    assert!(delta("ferrowarden_forward_response_bytes_sum", &[]) >= bytes as f64);
+    // Gauges against what the API says.
+    assert_eq!(after.gauge("ferrowarden_vault_unlocked"), 1.0);
+    let listed: Vec<String> = env
+        .client
+        .get(format!("{}/v1/credentials", env.fw_url))
+        .header("X-Agent-Key", &env.agent_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        after.gauge("ferrowarden_vault_credentials"),
+        listed.len() as f64,
+        "credential count against /v1/credentials"
+    );
+    let status: Value = env
+        .admin_call("GET", "/v1/admin/status", None)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        after.gauge("ferrowarden_vault_credentials"),
+        status["credential_count"].as_f64().unwrap()
+    );
+    let keys: Vec<Value> = env
+        .admin_call("GET", "/v1/admin/keys", None)
+        .await
+        .json()
+        .await
+        .unwrap();
+    // The `key` label is the name an administrator gave a key: one of the
+    // names in the key list (keys revoked since keep their series).
+    let key_names: Vec<&str> = keys.iter().filter_map(|k| k["name"].as_str()).collect();
+    assert!(
+        after.series(spec_series).iter().any(|(labels, v)| *v >= 1.0
+            && key_names
+                .iter()
+                .any(|n| labels.contains(&format!("key=\"{n}\"")))),
+        "no forward series is labelled with the name of a listed key:
+{}",
+        after.text
+    );
+    let without = keys.iter().filter(|k| k["policy_set"] == false).count() as f64;
+    let with = keys.len() as f64 - without;
+    assert_eq!(
+        after.sum("ferrowarden_agent_keys", &[("policy_set", "false")]),
+        without
+    );
+    assert_eq!(
+        after.sum("ferrowarden_agent_keys", &[("policy_set", "true")]),
+        with
+    );
+
+    // The build and the backend the instance runs.
+    let backend = status["vault_backend"].as_str().unwrap();
+    assert!(
+        after.sum(
+            "ferrowarden_build_info",
+            &[
+                ("vault_backend", backend),
+                ("version", env!("CARGO_PKG_VERSION"))
+            ]
+        ) == 1.0,
+        "build_info for {backend}"
+    );
+
+    // The test stack syncs every 30 s: the last sync is recent.
+    let last = after.gauge("ferrowarden_vault_last_sync_timestamp_seconds");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    assert!(
+        last > 0.0 && (now - last).abs() < 600.0,
+        "last sync {last}, now {now}"
+    );
+
+    // The rest exist, with the labels the documentation lists.
+    assert!(after.gauge("ferrowarden_vault_excluded_items") >= 0.0);
+    assert!(after.gauge("ferrowarden_ui_sessions") >= 0.0);
+    assert!(after.gauge("ferrowarden_events_dropped_total") >= 0.0);
+    assert!(after.gauge("ferrowarden_metrics_events_dropped_total") >= 0.0);
+    for limiter in ["agent", "admin", "notify_test"] {
+        assert!(
+            after
+                .series("ferrowarden_rate_limited_total")
+                .iter()
+                .any(|(l, _)| l.contains(&format!("limiter=\"{limiter}\""))),
+            "{limiter}"
+        );
+    }
+    for result in ["sent", "failed"] {
+        assert!(
+            after
+                .series("ferrowarden_notifications_total")
+                .iter()
+                .any(|(l, _)| l.contains("sender=\"webhook\"")
+                    && l.contains(&format!("result=\"{result}\""))),
+            "the webhook notifier's {result} counter"
+        );
+    }
+    assert!(
+        after
+            .series("ferrowarden_notifications_total")
+            .iter()
+            .any(|(l, _)| l.contains("result=\"suppressed\"")),
+        "suppressed notifications"
+    );
+
+    assert_scrape_is_clean(&env, &m, &after);
+}
+
+/// Security (the acceptance criterion "metric output never contains
+/// substituted values", and more): traffic whose URLs, paths, queries, headers
+/// and placeholders are all recognisable must leave none of them in a scrape,
+/// and a scrape holds no secret value, token, vault item name, host or IP.
+#[tokio::test]
+async fn test_metrics_never_contain_values_urls_hosts_or_tokens() {
+    let Some(env) = TestEnv::load() else { return };
+    let m = metrics_env();
+    env.reset_mock().await;
+    let marker = format!("leakmarker{}", unique_suffix());
+
+    // Marked paths, queries and header names, on success and on failure.
+    let path = format!("/{marker}/secret-segment?token={marker}&k=v");
+    let header = format!("X-{marker}");
+    let ok = env
+        .forward(
+            "POST",
+            &path,
+            json!({
+                "Authorization": "Bearer {{vault:test_api_token}}",
+                header.clone(): marker.clone(),
+            }),
+            Some(json!({ "note": marker.clone(), "pw": "{{vault:test_basic_password}}" })),
+        )
+        .await;
+    assert_eq!(ok.status(), 200);
+    let blocked = env
+        .forward_url(
+            "GET",
+            &format!("http://bw-serve:8087/{marker}?token={marker}"),
+            json!({ header.clone(): marker.clone() }),
+            None,
+        )
+        .await;
+    assert_eq!(blocked.status(), 403);
+    let unknown = env
+        .forward(
+            "GET",
+            &path,
+            json!({ "X": format!("{{{{vault:{marker}}}}}") }),
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status(), 422);
+    let bad_key = env
+        .client
+        .post(format!("{}/v1/forward", env.fw_url))
+        .header("X-Agent-Key", format!("bad-{marker}"))
+        .json(&json!({"request": {"method": "GET", "url": format!("http://{marker}.example/")}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_key.status(), 401);
+
+    let scrape = m.scrape(&env).await;
+    for needle in [marker.as_str(), "secret-segment", "this_credential"] {
+        assert!(
+            !scrape.text.contains(needle),
+            "a scrape contains {needle:?}"
+        );
+    }
+    assert_scrape_is_clean(&env, &m, &scrape);
+}
+
+/// The last word, after the rest of the suite (tests run in name order, one at
+/// a time): everything the suite did, the scrape still holds nothing it must
+/// not. The secret gate scans one more scrape of each instance afterwards.
+#[tokio::test]
+async fn test_zz_metrics_scrape_after_the_suite_holds_no_secrets() {
+    let Some(env) = TestEnv::load() else { return };
+    let m = metrics_env();
+    let scrape = m.scrape(&env).await;
+    assert!(
+        scrape.sum("ferrowarden_forward_requests_total", &[]) > 0.0,
+        "the suite made forward requests"
+    );
+    assert!(
+        scrape.sum("ferrowarden_events_total", &[]) > 10.0,
+        "and other events"
+    );
+    assert_scrape_is_clean(&env, &m, &scrape);
 }
 
 // ── Container hardening ───────────────────────────────────────────────────────

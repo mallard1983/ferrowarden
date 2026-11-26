@@ -9,6 +9,7 @@ use crate::keys::hash_token;
 use crate::net::TargetPolicy;
 use crate::notify::NotifyHandle;
 use crate::policy::KeyPolicy;
+use crate::vault::model::SyncStats;
 use crate::vault::{ActiveVault, CredentialMap, Vault};
 
 /// A single agent API key entry.
@@ -76,6 +77,10 @@ pub struct AppState {
     /// The push notifier: what is enabled, its counters and the test
     /// notification. Disabled until `main` starts it.
     pub notify: Arc<NotifyHandle>,
+
+    /// When the vault was last synced and how many items it left out, for the
+    /// metrics endpoint. Numbers only.
+    pub sync_stats: Arc<SyncStats>,
 }
 
 impl AppState {
@@ -105,6 +110,7 @@ impl AppState {
             target_policy,
             events,
             notify,
+            sync_stats: Arc::new(SyncStats::default()),
         })
     }
 

@@ -306,6 +306,7 @@ fn test_config() -> Config {
         ui: Default::default(),
         notify: Default::default(),
         vault: Default::default(),
+        metrics: Default::default(),
     }
 }
 
@@ -745,6 +746,11 @@ async fn refresh_fills_the_credential_map_and_reports_exclusions_in_one_event() 
     // A refresh with nothing new is quiet.
     refresh_credentials(&state).await.unwrap();
     assert_eq!(event_json(&state, "vault_sync").len(), 1);
+
+    // The metrics see the sync, and the exclusion count outlives the
+    // one-time report.
+    assert_eq!(state.sync_stats.excluded(), 2);
+    assert!(state.sync_stats.last_sync_unix() > 1_700_000_000);
 }
 
 #[tokio::test]

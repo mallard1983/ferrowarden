@@ -5,7 +5,9 @@
 //! `GET /v1/admin/audit`) and is queued, with `try_send`, for a single writer
 //! task that serializes it once and writes it to every enabled sink. When the
 //! queue is full the event is counted as dropped instead of waiting; the
-//! writer later reports the loss with an `events_dropped` event.
+//! writer later reports the loss with an `events_dropped` event. The push
+//! notifier and the metrics consumer each get the event through their own
+//! bounded queue with `try_send`, so neither can hold `emit` up.
 
 pub mod schema;
 pub mod sinks;
@@ -44,6 +46,9 @@ struct Shared {
     /// The push notifier's queue, once one is attached. Offering an event to
     /// it is a classification and a `try_send`: it cannot block.
     notify: OnceLock<Feed>,
+    /// The metrics consumer's queue, once metrics are on. `offer` is a
+    /// `try_send`: it cannot block either.
+    metrics: OnceLock<crate::metrics::Feed>,
 }
 
 impl Shared {
@@ -78,6 +83,7 @@ impl EventLog {
                 dropped: AtomicU64::new(0),
                 dropped_total: AtomicU64::new(0),
                 notify: OnceLock::new(),
+                metrics: OnceLock::new(),
             }),
             tx: None,
         }
@@ -108,6 +114,12 @@ impl EventLog {
         let _ = self.shared.notify.set(feed);
     }
 
+    /// Connect the metrics consumer (docs/metrics.md). Only the first call
+    /// has an effect.
+    pub fn attach_metrics(&self, feed: crate::metrics::Feed) {
+        let _ = self.shared.metrics.set(feed);
+    }
+
     /// Record an event. Never blocks, never fails.
     pub fn emit(&self, event: SecurityEvent) {
         let event = Arc::new(event);
@@ -115,6 +127,9 @@ impl EventLog {
         // The notifier has its own queue: a stalled sink cannot hold it up,
         // and it cannot hold up the sinks.
         if let Some(feed) = self.shared.notify.get() {
+            feed.offer(&event);
+        }
+        if let Some(feed) = self.shared.metrics.get() {
             feed.offer(&event);
         }
         let Some(tx) = &self.tx else { return };
@@ -216,6 +231,9 @@ async fn run_writer(mut rx: mpsc::Receiver<Msg>, mut sinks: Vec<Sink>, shared: A
             );
             shared.push(event.clone());
             if let Some(feed) = shared.notify.get() {
+                feed.offer(&event);
+            }
+            if let Some(feed) = shared.metrics.get() {
                 feed.offer(&event);
             }
             write_event(&mut sinks, &event).await;

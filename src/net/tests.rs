@@ -28,6 +28,7 @@ fn cfg(allowed: &str, allow_private: bool) -> Config {
         ui: Default::default(),
         notify: Default::default(),
         vault: Default::default(),
+        metrics: Default::default(),
     }
 }
 

@@ -259,6 +259,15 @@ impl SessionStore {
     pub fn len(&self) -> usize {
         self.sessions.len()
     }
+
+    /// Sessions that have not expired at `now` (expired ones stay stored
+    /// until they are next looked up or a session is created).
+    pub fn live(&self, now: Instant) -> usize {
+        self.sessions
+            .values()
+            .filter(|s| self.is_live(s, now))
+            .count()
+    }
 }
 
 // ── The pending sign-in ───────────────────────────────────────────────────────

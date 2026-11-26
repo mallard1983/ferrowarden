@@ -1,0 +1,27 @@
+# Prometheus scrape configuration for Ferrowarden (docs/metrics.md).
+#
+# The metrics listener asks for a bearer token. Put the token in a file and name
+# it in `credentials_file`: the token stays out of this configuration, and
+# Prometheus re-reads the file. Docker Compose mounts secrets/metrics_token
+# there (see docker-compose.yml next to this file).
+#
+# With tls_enabled = true in Ferrowarden, use scheme: https and give Prometheus
+# the CA that signed the certificate (a self-signed certificate is its own CA):
+#   scheme: https
+#   tls_config:
+#     ca_file: /etc/prometheus/ferrowarden-ca.crt
+# Without TLS the token crosses the network in clear text: keep the port on a
+# network that only Ferrowarden and Prometheus share.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: ferrowarden
+    scheme: http
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/ferrowarden_metrics_token
+    static_configs:
+      - targets: ["ferrowarden:9095"]

@@ -95,9 +95,12 @@ pub async fn forward(
         .method(&req.method)
         .url(&req.url)
         .credentials(&placeholder_names)
+        .items(names.iter().map(|p| p.item.as_str()))
         .duration(ctx.started.elapsed());
     state.events.emit(match &result {
-        Ok(resp) => event.status(resp.status),
+        Ok(resp) => event
+            .response_bytes(resp.upstream_bytes)
+            .status(resp.status),
         Err(e) => event.failed_with(e).status(e.status_code().as_u16()),
     });
 

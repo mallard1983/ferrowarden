@@ -44,6 +44,8 @@ export HOST_UID HOST_GID
 FERROWARDEN_URL="${FERROWARDEN_URL:-http://localhost:3000}"
 FERROWARDEN_NATIVE_URL="${FERROWARDEN_NATIVE_URL:-http://localhost:3003}"
 FERROWARDEN_NATIVE_UI_URL="${FERROWARDEN_NATIVE_UI_URL:-http://localhost:3004}"
+FERROWARDEN_METRICS_URL="${FERROWARDEN_METRICS_URL:-http://localhost:9095}"
+FERROWARDEN_NATIVE_METRICS_URL="${FERROWARDEN_NATIVE_METRICS_URL:-http://localhost:9096}"
 
 echo "=================================================="
 echo " Ferrowarden Dev Environment Setup"
@@ -116,6 +118,25 @@ print(''.join(secrets.choice(chars) for _ in range(40)), end='')
     echo "  Generated: notify_webhook_token"
 else
     echo "  Skipping: notify_webhook_token already exists"
+fi
+
+# Bearer token for the Prometheus metrics listeners of both Ferrowarden
+# instances (docs/metrics.md, docker-compose.test.yml). Test fixture; the
+# secret gate checks for it, and it must never appear in a scrape.
+if [ ! -f "$SECRETS_DIR/metrics_token" ]; then
+    if command -v openssl > /dev/null 2>&1; then
+        openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40 \
+            > "$SECRETS_DIR/metrics_token"
+    else
+        python3 -c "
+import secrets, string
+chars = string.ascii_letters + string.digits
+print(''.join(secrets.choice(chars) for _ in range(40)), end='')
+" > "$SECRETS_DIR/metrics_token"
+    fi
+    echo "  Generated: metrics_token"
+else
+    echo "  Skipping: metrics_token already exists"
 fi
 
 # TEST FIXTURES ONLY: the test stack's containers run as UID 999
@@ -277,6 +298,8 @@ FERROWARDEN_TEST_URL=$FERROWARDEN_URL
 FERROWARDEN_TEST_ADMIN_KEY=$(cat "$SECRETS_DIR/ferrowarden_admin_key")
 FERROWARDEN_TEST_AGENT_KEY=$(cat "$SECRETS_DIR/test_agent_key" 2>/dev/null || echo "")
 FERROWARDEN_TEST_NOTIFY_TOKEN=$(cat "$SECRETS_DIR/notify_webhook_token")
+FERROWARDEN_TEST_METRICS_URL=$FERROWARDEN_METRICS_URL
+FERROWARDEN_TEST_METRICS_TOKEN=$(cat "$SECRETS_DIR/metrics_token")
 MOCK_API_URL=http://localhost:7777
 EOF
 
@@ -292,6 +315,8 @@ FERROWARDEN_TEST_UI_URL=$FERROWARDEN_NATIVE_UI_URL
 FERROWARDEN_TEST_ADMIN_KEY=$(cat "$SECRETS_DIR/ferrowarden_admin_key")
 FERROWARDEN_TEST_AGENT_KEY=$(cat "$SECRETS_DIR/test_agent_key_native" 2>/dev/null || echo "")
 FERROWARDEN_TEST_NOTIFY_TOKEN=$(cat "$SECRETS_DIR/notify_webhook_token")
+FERROWARDEN_TEST_METRICS_URL=$FERROWARDEN_NATIVE_METRICS_URL
+FERROWARDEN_TEST_METRICS_TOKEN=$(cat "$SECRETS_DIR/metrics_token")
 MOCK_API_URL=http://localhost:7777
 FERROWARDEN_NATIVE_URL=$FERROWARDEN_NATIVE_URL
 EOF

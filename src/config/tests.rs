@@ -27,6 +27,7 @@ fn base_config(mode: UnlockMode) -> Config {
         ui: Default::default(),
         notify: Default::default(),
         vault: Default::default(),
+        metrics: Default::default(),
     }
 }
 
@@ -813,4 +814,260 @@ fn deprecated_ui_settings_are_aliases_for_the_vault_settings() {
     let mut ui = UiConfig::default();
     assert!(vault.resolve_aliases(&mut ui).is_empty());
     assert_eq!(ui.vaultwarden_ca_file, "/ca/new.crt");
+}
+
+// ── Metrics ───────────────────────────────────────────────────────────────────
+
+const METRICS_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+fn metrics_cfg(bind: &str, token: Option<&str>, allow: bool) -> MetricsConfig {
+    MetricsConfig {
+        bind: bind.to_string(),
+        allow_unauthenticated: allow,
+        credential_labels: false,
+        token: MetricsToken(token.map(|t| Zeroizing::new(t.to_string()))),
+    }
+}
+
+fn load_metrics_token(env: &[(&str, &str)], files: &[(&str, &[u8])]) -> FerroResult<MetricsToken> {
+    let env: std::collections::HashMap<String, String> = env
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let files: std::collections::HashMap<String, Vec<u8>> = files
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_vec()))
+        .collect();
+    MetricsToken::load(
+        |name| env.get(name).cloned(),
+        |path| {
+            files
+                .get(path.to_str().unwrap())
+                .cloned()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        },
+    )
+}
+
+#[test]
+fn metrics_are_off_by_default() {
+    let m = MetricsConfig::default();
+    assert!(!m.enabled());
+    assert!(!m.allow_unauthenticated && !m.credential_labels);
+    assert_eq!(m.auth(), MetricsAuth::None);
+    assert!(base_config(UnlockMode::Manual).validate().is_ok());
+}
+
+#[test]
+fn metrics_settings_come_from_the_file_and_the_environment() {
+    let from_file: Config = config::Config::builder()
+        .add_source(config::File::from_str(
+            "unlock_mode = \"manual\"
+[metrics]
+bind = \"0.0.0.0:9095\"
+credential_labels = true
+",
+            config::FileFormat::Toml,
+        ))
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+    assert_eq!(from_file.metrics.bind, "0.0.0.0:9095");
+    assert!(from_file.metrics.credential_labels);
+    assert!(!from_file.metrics.allow_unauthenticated);
+
+    // FERROWARDEN_METRICS__BIND, as the server reads it.
+    let env: std::collections::HashMap<String, String> = [
+        ("FERROWARDEN_UNLOCK_MODE", "manual"),
+        ("FERROWARDEN_METRICS__BIND", "127.0.0.1:9095"),
+        ("FERROWARDEN_METRICS__ALLOW_UNAUTHENTICATED", "true"),
+        // The token variables are not settings: they must not be picked up
+        // as one (and the token is never a field of the file or environment).
+        ("FERROWARDEN_METRICS_TOKEN", METRICS_TOKEN),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let from_env: Config = config::Config::builder()
+        .add_source(
+            config::Environment::with_prefix("FERROWARDEN")
+                .prefix_separator("_")
+                .separator("__")
+                .ignore_empty(true)
+                .source(Some(env)),
+        )
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+    assert_eq!(from_env.metrics.bind, "127.0.0.1:9095");
+    assert!(from_env.metrics.allow_unauthenticated);
+    assert_eq!(from_env.metrics.auth(), MetricsAuth::None);
+}
+
+#[test]
+fn a_token_cannot_be_set_in_the_config_file() {
+    let cfg: Config = config::Config::builder()
+        .add_source(config::File::from_str(
+            "unlock_mode = \"manual\"
+[metrics]
+bind = \"127.0.0.1:9095\"
+token = \"from-the-file-0123456789\"
+",
+            config::FileFormat::Toml,
+        ))
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+    assert_eq!(cfg.metrics.auth(), MetricsAuth::None);
+}
+
+#[test]
+fn metrics_startup_rules() {
+    let api = "0.0.0.0:3000";
+    let ui = "";
+    let ok = |c: MetricsConfig| c.validate(api, ui);
+    // Off: nothing is checked.
+    assert!(ok(metrics_cfg("", None, false)).is_ok());
+    // A token: any address.
+    assert!(ok(metrics_cfg("0.0.0.0:9095", Some(METRICS_TOKEN), false)).is_ok());
+    assert!(ok(metrics_cfg("127.0.0.1:9095", Some(METRICS_TOKEN), false)).is_ok());
+    // No token: loopback is fine, anything else is refused ...
+    assert!(ok(metrics_cfg("127.0.0.1:9095", None, false)).is_ok());
+    assert!(ok(metrics_cfg("[::1]:9095", None, false)).is_ok());
+    for bind in [
+        "0.0.0.0:9095",
+        "[::]:9095",
+        "10.1.2.3:9095",
+        "192.168.1.5:9095",
+    ] {
+        let err = ok(metrics_cfg(bind, None, false)).unwrap_err().to_string();
+        assert!(err.contains("no token is set"), "{bind}: {err}");
+        assert!(err.contains("allow_unauthenticated"), "{err}");
+        // ... unless the operator said so.
+        assert!(ok(metrics_cfg(bind, None, true)).is_ok(), "{bind}");
+    }
+    // A token and the flag together are contradictory.
+    assert!(ok(metrics_cfg("127.0.0.1:9095", Some(METRICS_TOKEN), true)).is_err());
+    // Not an address.
+    for bind in ["9095", "localhost:9095", "0.0.0.0", "nonsense"] {
+        assert!(ok(metrics_cfg(bind, None, true)).is_err(), "{bind}");
+    }
+}
+
+#[test]
+fn the_metrics_port_must_be_its_own() {
+    let cfg = metrics_cfg("0.0.0.0:3000", Some(METRICS_TOKEN), false);
+    assert!(cfg
+        .validate("0.0.0.0:3000", "")
+        .unwrap_err()
+        .to_string()
+        .contains("bind_addr"));
+    assert!(cfg
+        .validate("127.0.0.1:3000", "")
+        .unwrap_err()
+        .to_string()
+        .contains("same port"));
+    let cfg = metrics_cfg("127.0.0.1:3001", Some(METRICS_TOKEN), false);
+    assert!(cfg
+        .validate("0.0.0.0:3000", "0.0.0.0:3001")
+        .unwrap_err()
+        .to_string()
+        .contains("ui.bind"));
+    assert!(cfg.validate("0.0.0.0:3000", "0.0.0.0:3002").is_ok());
+}
+
+#[test]
+fn the_full_config_validates_metrics() {
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.metrics = metrics_cfg("0.0.0.0:9095", None, false);
+    assert!(cfg.validate().is_err());
+    cfg.metrics.allow_unauthenticated = true;
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn the_metrics_token_comes_from_the_variable_or_the_file() {
+    let direct = load_metrics_token(&[("FERROWARDEN_METRICS_TOKEN", METRICS_TOKEN)], &[]).unwrap();
+    assert_eq!(direct.0.as_deref().map(String::as_str), Some(METRICS_TOKEN));
+
+    // A file: trailing newlines are removed, nothing else.
+    let file_bytes = format!("{METRICS_TOKEN}\r\n").into_bytes();
+    let from_file = load_metrics_token(
+        &[("FERROWARDEN_METRICS_TOKEN_FILE", "/run/secrets/metrics")],
+        &[("/run/secrets/metrics", &file_bytes)],
+    )
+    .unwrap();
+    assert_eq!(
+        from_file.0.as_deref().map(String::as_str),
+        Some(METRICS_TOKEN)
+    );
+
+    // Neither: no token.
+    assert!(load_metrics_token(&[], &[]).unwrap().0.is_none());
+}
+
+#[test]
+fn metrics_token_errors_never_contain_the_token() {
+    let both = load_metrics_token(
+        &[
+            ("FERROWARDEN_METRICS_TOKEN", METRICS_TOKEN),
+            ("FERROWARDEN_METRICS_TOKEN_FILE", "/run/secrets/metrics"),
+        ],
+        &[("/run/secrets/metrics", METRICS_TOKEN.as_bytes())],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(both.contains("only one of"), "{both}");
+    assert!(!both.contains(METRICS_TOKEN));
+
+    let short = load_metrics_token(&[("FERROWARDEN_METRICS_TOKEN", "short-token")], &[])
+        .unwrap_err()
+        .to_string();
+    assert!(short.contains("at least 16"), "{short}");
+    assert!(!short.contains("short-token"));
+
+    for bad in [
+        "has a space in the middle 1234567890",
+        "tab\tinside-the-token-1234567890",
+        "non-ascii-\u{e9}-0123456789abcdef",
+    ] {
+        let err = load_metrics_token(&[("FERROWARDEN_METRICS_TOKEN", bad)], &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("printable"), "{err}");
+        assert!(!err.contains(bad));
+    }
+
+    // A missing file names the variable, an empty one says so.
+    let missing = load_metrics_token(
+        &[("FERROWARDEN_METRICS_TOKEN_FILE", "/run/secrets/none")],
+        &[],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        missing.contains("FERROWARDEN_METRICS_TOKEN_FILE"),
+        "{missing}"
+    );
+    let empty = load_metrics_token(
+        &[("FERROWARDEN_METRICS_TOKEN_FILE", "/run/secrets/empty")],
+        &[("/run/secrets/empty", b"\n")],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(empty.contains("empty"), "{empty}");
+}
+
+#[test]
+fn the_metrics_token_is_redacted_in_debug_output() {
+    let cfg = metrics_cfg("127.0.0.1:9095", Some(METRICS_TOKEN), false);
+    let shown = format!("{cfg:?}");
+    assert!(!shown.contains(METRICS_TOKEN));
+    assert!(shown.contains("[redacted]"));
+    assert_eq!(cfg.auth(), MetricsAuth::Token);
+    assert_eq!(cfg.auth().as_str(), "token");
+    assert_eq!(MetricsAuth::None.as_str(), "none");
 }

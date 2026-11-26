@@ -50,6 +50,7 @@ fn build_with(
         ui: Default::default(),
         notify: Default::default(),
         vault: Default::default(),
+        metrics: Default::default(),
     };
     let state = Arc::new(AppState::new(cfg, Arc::new(EventLog::buffer_only(100))));
     (router(state.clone()), state)
@@ -1251,6 +1252,44 @@ async fn startup_event_reports_keys_without_policy() {
     let e = serde_json::to_value(crate::startup_event(&state.config, 3, 2)).unwrap();
     assert_eq!(e["ferrowarden"]["details"]["keys_without_policy"], 2);
     assert_eq!(e["ferrowarden"]["details"]["agent_key_count"], 3);
+}
+
+#[tokio::test]
+async fn startup_event_reports_the_metrics_settings() {
+    use crate::config::{MetricsConfig, MetricsToken};
+    let (_app, state) = app_with_state("");
+    let details = |config: &Config| {
+        let e = serde_json::to_value(crate::startup_event(config, 0, 0)).unwrap();
+        e["ferrowarden"]["details"].clone()
+    };
+    // Off (the default).
+    let d = details(&state.config);
+    assert_eq!(d["metrics_enabled"], false);
+    assert_eq!(d["metrics_tls"], false);
+    assert_eq!(d["metrics_credential_labels"], false);
+
+    let mut config = state.config.clone();
+    config.metrics = MetricsConfig {
+        bind: "127.0.0.1:9095".into(),
+        token: MetricsToken(Some("0123456789abcdef0123".to_string().into())),
+        ..Default::default()
+    };
+    let d = details(&config);
+    assert_eq!(d["metrics_enabled"], true);
+    assert_eq!(d["metrics_auth"], "token");
+    assert_eq!(d["metrics_tls"], false);
+    // The token itself is nowhere in it.
+    let all = serde_json::to_string(&crate::startup_event(&config, 0, 0)).unwrap();
+    assert!(!all.contains("0123456789abcdef0123"));
+
+    config.tls_enabled = true;
+    config.metrics.token = MetricsToken(None);
+    config.metrics.allow_unauthenticated = true;
+    config.metrics.credential_labels = true;
+    let d = details(&config);
+    assert_eq!(d["metrics_auth"], "none");
+    assert_eq!(d["metrics_tls"], true);
+    assert_eq!(d["metrics_credential_labels"], true);
 }
 
 #[tokio::test]

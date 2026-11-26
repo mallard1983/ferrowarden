@@ -1257,6 +1257,8 @@ components:
         - login_locked_out
         - upstream_rate_limited
         - insecure_transport
+        - missing_metrics_token
+        - invalid_metrics_token
     SecurityEvent:
       type: object
       description: |
@@ -1309,6 +1311,7 @@ components:
                 - ui_session_expired
                 - ui_two_factor_email_sent
                 - notify_test
+                - metrics_auth
             category:
               type: array
               items:
@@ -1350,6 +1353,15 @@ components:
               properties:
                 status_code:
                   type: integer
+                body:
+                  type: object
+                  description: Only on successful `forward` events.
+                  required: [bytes]
+                  properties:
+                    bytes:
+                      type: integer
+                      minimum: 0
+                      description: Size in bytes of the upstream response body, before scrubbing. A size, never content.
         url:
           type: object
           required: [original]

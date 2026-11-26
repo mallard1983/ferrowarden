@@ -24,4 +24,10 @@ Optional, for [push notifications](../docs/notifications.md): one file per notif
 echo -n "YourGotifyApplicationToken" > gotify_token
 ```
 
+Optional, for [Prometheus metrics](../docs/metrics.md): the bearer token Prometheus presents (at least 16 characters), named in `FERROWARDEN_METRICS_TOKEN_FILE`:
+
+```sh
+openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40 > metrics_token
+```
+
 See [docs/setup.md](../docs/setup.md) for the full setup guide.

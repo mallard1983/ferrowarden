@@ -434,6 +434,16 @@ curl https://<ferrowarden-host>:3000/v1/admin/status \
 
 A `locked: true` response means all proxy requests are failing. Unlock the vault (manual mode) or check startup logs for why file-mode unlock failed.
 
+### Prometheus metrics
+
+Ferrowarden can expose request counts, outcomes, latency, rate limiting, authentication failures and vault state on a separate, token-protected port for Prometheus, with a ready-made Grafana dashboard. Set `metrics.bind` and a token (`FERROWARDEN_METRICS_TOKEN_FILE`), restart, and scrape `/metrics`:
+
+```sh
+curl -H "Authorization: Bearer $(cat secrets/metrics_token)" http://<ferrowarden-host>:9095/metrics
+```
+
+Useful alerts: `ferrowarden_vault_unlocked == 0` (every proxy request is failing), `time() - ferrowarden_vault_last_sync_timestamp_seconds > 600` (the vault copy is stale), `ferrowarden_agent_keys{policy_set="false"} > 0` (keys that deny everything), and a rising `ferrowarden_auth_failures_total`. To rotate the metrics token, write the new secret file, restart Ferrowarden and update the file Prometheus reads (`credentials_file`). Setup, every metric, TLS and the privacy rules are in [metrics.md](metrics.md); the dashboard is in [`examples/grafana`](../examples/grafana/README.md).
+
 ### Push notifications
 
 Ferrowarden can push blocked requests, repeated authentication failures, vault lock and unlock failures, and (opt-in) admin changes to Gotify, ntfy or a generic webhook. Configure a sender (`[notify]`, `FERROWARDEN_NOTIFY__*`), put its token in a secret file (`FERROWARDEN_NOTIFY_*_TOKEN_FILE`), restart, then check it:

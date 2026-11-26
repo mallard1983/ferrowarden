@@ -142,6 +142,12 @@ impl UiState {
         }))
     }
 
+    /// Signed-in sessions that have not expired (the metrics endpoint's
+    /// `ferrowarden_ui_sessions`).
+    pub fn live_sessions(&self) -> usize {
+        lock(&self.sessions).live(self.now())
+    }
+
     pub(crate) fn now(&self) -> Instant {
         #[cfg(test)]
         {

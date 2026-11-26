@@ -212,4 +212,38 @@ pub struct Listing {
     /// Set (once) when the native backend rebuilt its metadata and excluded
     /// items while doing so.
     pub excluded: Option<ExclusionReport>,
+    /// How many items the latest rebuild of the native backend's metadata
+    /// left out (0 for bw serve). Unlike `excluded` it is reported on every
+    /// listing, so a metric can fall back to 0 when the cause is fixed.
+    pub excluded_count: usize,
+}
+
+/// What the refresher learned from the vault, for the metrics endpoint
+/// (`ferrowarden_vault_last_sync_timestamp_seconds`,
+/// `ferrowarden_vault_excluded_items`). Plain numbers, no names, no values.
+#[derive(Debug, Default)]
+pub struct SyncStats {
+    /// Unix time of the last refresh whose sync and listing both succeeded;
+    /// 0 until the first one.
+    last_sync_unix: std::sync::atomic::AtomicI64,
+    excluded: std::sync::atomic::AtomicU64,
+}
+
+impl SyncStats {
+    pub fn record_success(&self, excluded: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.excluded
+            .store(u64::try_from(excluded).unwrap_or(u64::MAX), Relaxed);
+        self.last_sync_unix
+            .store(chrono::Utc::now().timestamp(), Relaxed);
+    }
+
+    pub fn last_sync_unix(&self) -> i64 {
+        self.last_sync_unix
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn excluded(&self) -> u64 {
+        self.excluded.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }

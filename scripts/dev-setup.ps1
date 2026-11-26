@@ -43,6 +43,8 @@ $secretsDir = Join-Path $repoRoot 'secrets'
 $ferroUrl   = if ($env:FERROWARDEN_URL) { $env:FERROWARDEN_URL } else { 'http://localhost:3000' }
 $nativeUrl   = if ($env:FERROWARDEN_NATIVE_URL) { $env:FERROWARDEN_NATIVE_URL } else { 'http://localhost:3003' }
 $nativeUiUrl = if ($env:FERROWARDEN_NATIVE_UI_URL) { $env:FERROWARDEN_NATIVE_UI_URL } else { 'http://localhost:3004' }
+$metricsUrl       = if ($env:FERROWARDEN_METRICS_URL) { $env:FERROWARDEN_METRICS_URL } else { 'http://localhost:9095' }
+$nativeMetricsUrl = if ($env:FERROWARDEN_NATIVE_METRICS_URL) { $env:FERROWARDEN_NATIVE_METRICS_URL } else { 'http://localhost:9096' }
 
 function Write-Step([string]$msg) { Write-Host ""; Write-Host $msg }
 function Write-Sub([string]$msg)  { Write-Host "  $msg" }
@@ -117,6 +119,17 @@ if (-not (Test-Path $notifyTokenFile)) {
     Write-Sub 'Generated: notify_webhook_token'
 } else {
     Write-Sub 'Skipping: notify_webhook_token already exists'
+}
+
+# Bearer token for the Prometheus metrics listeners of both Ferrowarden
+# instances (docs/metrics.md, docker-compose.test.yml). Test fixture; the
+# secret gate checks for it, and it must never appear in a scrape.
+$metricsTokenFile = "$secretsDir\metrics_token"
+if (-not (Test-Path $metricsTokenFile)) {
+    Write-Secret $metricsTokenFile (New-RandomToken 40)
+    Write-Sub 'Generated: metrics_token'
+} else {
+    Write-Sub 'Skipping: metrics_token already exists'
 }
 
 # ── Generate self-signed TLS certificate (if not already present) ────────────
@@ -278,6 +291,8 @@ FERROWARDEN_TEST_URL=$ferroUrl
 FERROWARDEN_TEST_ADMIN_KEY=$($adminKey.Trim())
 FERROWARDEN_TEST_AGENT_KEY=$($agentKeyVal.Trim())
 FERROWARDEN_TEST_NOTIFY_TOKEN=$((Get-Content -Raw $notifyTokenFile).Trim())
+FERROWARDEN_TEST_METRICS_URL=$metricsUrl
+FERROWARDEN_TEST_METRICS_TOKEN=$((Get-Content -Raw $metricsTokenFile).Trim())
 MOCK_API_URL=http://localhost:7777
 "@
 
@@ -299,6 +314,8 @@ FERROWARDEN_TEST_UI_URL=$nativeUiUrl
 FERROWARDEN_TEST_ADMIN_KEY=$($adminKey.Trim())
 FERROWARDEN_TEST_AGENT_KEY=$($nativeAgentKeyVal.Trim())
 FERROWARDEN_TEST_NOTIFY_TOKEN=$((Get-Content -Raw $notifyTokenFile).Trim())
+FERROWARDEN_TEST_METRICS_URL=$nativeMetricsUrl
+FERROWARDEN_TEST_METRICS_TOKEN=$((Get-Content -Raw $metricsTokenFile).Trim())
 MOCK_API_URL=http://localhost:7777
 FERROWARDEN_NATIVE_URL=$nativeUrl
 "@

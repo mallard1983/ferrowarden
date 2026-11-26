@@ -331,6 +331,7 @@ async fn harness(opts: Opts) -> Harness {
         },
         notify: opts.notify.clone().unwrap_or_default(),
         vault: Default::default(),
+        metrics: Default::default(),
     };
     let events = Arc::new(EventLog::buffer_only(1000));
     let mut app = AppState::new(config.clone(), events.clone());

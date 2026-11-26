@@ -1,0 +1,10 @@
+# Loads ferrowarden-dashboard.json from /var/lib/grafana/dashboards.
+apiVersion: 1
+providers:
+  - name: ferrowarden
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /var/lib/grafana/dashboards

@@ -158,6 +158,13 @@ pub struct Config {
     #[serde(default)]
     pub notify: NotifyConfig,
 
+    /// Prometheus metrics: their own listener, bearer token by default.
+    /// `[metrics]` in the TOML file, `FERROWARDEN_METRICS__*` in the
+    /// environment; the token only ever comes from `FERROWARDEN_METRICS_TOKEN`
+    /// (or `_FILE`). Disabled unless `metrics.bind` is set (docs/metrics.md).
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+
     /// Which vault backend Ferrowarden reads credentials from, and how it
     /// reaches Vaultwarden. `[vault]` in the TOML file, `FERROWARDEN_VAULT__*`
     /// in the environment (docs/native-vault.md).
@@ -238,6 +245,149 @@ impl UiConfig {
         }
         validate_vaultwarden_url("ui.vaultwarden_url", &self.vaultwarden_url)?;
         Ok(())
+    }
+}
+
+// ── Metrics ───────────────────────────────────────────────────────────────────
+
+/// Environment variable the metrics bearer token is read from; the `_FILE`
+/// variant names a file holding it.
+pub const ENV_METRICS_TOKEN: &str = "FERROWARDEN_METRICS_TOKEN";
+
+/// The shortest metrics token accepted.
+pub const MIN_METRICS_TOKEN_LEN: usize = 16;
+
+/// The metrics bearer token. Never read from a config file (serde skips the
+/// field), wiped from memory when dropped, `[redacted]` in `Debug` output.
+#[derive(Clone, Default)]
+pub struct MetricsToken(pub Option<Zeroizing<String>>);
+
+impl fmt::Debug for MetricsToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "[redacted]"
+        } else {
+            "none"
+        })
+    }
+}
+
+impl MetricsToken {
+    /// Read the token through [`secrets::load_secret`]: `NAME` or `NAME_FILE`
+    /// (both set is an error), lookups injected for tests. Error messages
+    /// carry names and error kinds, never the value.
+    pub fn load(
+        get: impl Fn(&str) -> Option<String>,
+        read: impl Fn(&std::path::Path) -> std::io::Result<Vec<u8>>,
+    ) -> FerroResult<Self> {
+        let Some(raw) = secrets::load_secret(ENV_METRICS_TOKEN, Both::Error, get, read)? else {
+            return Ok(Self(None));
+        };
+        let token = Zeroizing::new(raw.trim().to_string());
+        if token.len() < MIN_METRICS_TOKEN_LEN {
+            return Err(FerroError::Config(format!(
+                "the token from {ENV_METRICS_TOKEN} (or {ENV_METRICS_TOKEN}_FILE) must be at least {MIN_METRICS_TOKEN_LEN} characters"
+            )));
+        }
+        // It travels in an Authorization header: visible ASCII only.
+        if !token.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(FerroError::Config(format!(
+                "the token from {ENV_METRICS_TOKEN} (or {ENV_METRICS_TOKEN}_FILE) must be printable ASCII without spaces"
+            )));
+        }
+        Ok(Self(Some(token)))
+    }
+}
+
+/// How the metrics listener authenticates scrapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsAuth {
+    Token,
+    None,
+}
+
+impl MetricsAuth {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MetricsAuth::Token => "token",
+            MetricsAuth::None => "none",
+        }
+    }
+}
+
+/// Settings of the Prometheus endpoint (see docs/metrics.md).
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct MetricsConfig {
+    /// Address of the metrics listener, e.g. `0.0.0.0:9095`. Empty (default)
+    /// disables metrics. A separate server: it serves `GET /metrics` and
+    /// nothing else, and the metrics are never reachable on the API or UI port.
+    pub bind: String,
+    /// Serve `/metrics` without a token on a non-loopback address. Off by
+    /// default: such a bind without a token is refused at startup.
+    pub allow_unauthenticated: bool,
+    /// Add `ferrowarden_forward_credential_uses_total{credential=...}`.
+    /// Credential names reveal what the vault holds, so this is opt-in.
+    pub credential_labels: bool,
+    /// The bearer token (`FERROWARDEN_METRICS_TOKEN` / `_FILE`).
+    #[serde(skip)]
+    pub token: MetricsToken,
+}
+
+impl MetricsConfig {
+    pub fn enabled(&self) -> bool {
+        !self.bind.trim().is_empty()
+    }
+
+    pub fn auth(&self) -> MetricsAuth {
+        if self.token.0.is_some() {
+            MetricsAuth::Token
+        } else {
+            MetricsAuth::None
+        }
+    }
+
+    /// The listener address, once validated.
+    pub fn addr(&self) -> Option<std::net::SocketAddr> {
+        self.bind.trim().parse().ok()
+    }
+
+    /// `api_bind` and `ui_bind` are the other listeners' addresses: the
+    /// metrics listener must not share a port with them.
+    fn validate(&self, api_bind: &str, ui_bind: &str) -> FerroResult<()> {
+        if !self.enabled() {
+            return Ok(());
+        }
+        let err = |msg: String| Err(FerroError::Config(msg));
+        let Some(addr) = self.addr() else {
+            return err(format!(
+                "metrics.bind {:?} is not an address:port",
+                self.bind
+            ));
+        };
+        for (name, other) in [("bind_addr", api_bind), ("ui.bind", ui_bind)] {
+            if let Ok(other) = other.trim().parse::<std::net::SocketAddr>() {
+                if other.port() == addr.port()
+                    && (other.ip() == addr.ip()
+                        || other.ip().is_unspecified()
+                        || addr.ip().is_unspecified())
+                {
+                    return err(format!(
+                        "metrics.bind uses the same port as {name}; the metrics listener needs its own"
+                    ));
+                }
+            }
+        }
+        match self.auth() {
+            MetricsAuth::Token if self.allow_unauthenticated => err(format!(
+                "metrics.allow_unauthenticated is set, but {ENV_METRICS_TOKEN} (or {ENV_METRICS_TOKEN}_FILE) is too: use one or the other"
+            )),
+            MetricsAuth::None if !addr.ip().is_loopback() && !self.allow_unauthenticated => err(format!(
+                "metrics.bind {:?} is not a loopback address and no token is set: set {ENV_METRICS_TOKEN} or {ENV_METRICS_TOKEN}_FILE, or metrics.allow_unauthenticated = true to serve the metrics to anyone who can reach that address",
+                self.bind
+            )),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -937,6 +1087,15 @@ impl Config {
 
         cfg.notify.tokens = NotifyTokens::from_env()?;
 
+        // Only when metrics are on: a stale variable must not stop a start
+        // that does not use it.
+        if cfg.metrics.enabled() {
+            cfg.metrics.token = MetricsToken::load(
+                |name| std::env::var(name).ok().filter(|v| !v.is_empty()),
+                |path| std::fs::read(path),
+            )?;
+        }
+
         let notes = cfg.vault.resolve_aliases(&mut cfg.ui);
         for note in &notes {
             tracing::warn!("{note}");
@@ -1006,6 +1165,7 @@ impl Config {
         self.events.validate()?;
         self.ui.validate()?;
         self.notify.validate()?;
+        self.metrics.validate(&self.bind_addr, &self.ui.bind)?;
         let native_vars_set = [ENV_VAULT_CLIENT_ID, ENV_VAULT_CLIENT_SECRET]
             .iter()
             .any(|n| {

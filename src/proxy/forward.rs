@@ -66,6 +66,11 @@ pub struct ProxyResponse {
     /// "utf8" when `body` is the text of the response, "base64" when the
     /// response was not valid UTF-8 and `body` is its base64 encoding.
     pub body_encoding: &'static str,
+    /// Size of the upstream response body before scrubbing and encoding, for
+    /// the `http.response.body.bytes` event field and the response-size
+    /// metric. Never sent to the agent.
+    #[serde(skip)]
+    pub upstream_bytes: usize,
 }
 
 /// Limits applied to one forwarded request.
@@ -184,6 +189,7 @@ pub async fn forward_request(
         headers: resp_headers,
         body,
         body_encoding,
+        upstream_bytes: raw.len(),
     })
 }
 

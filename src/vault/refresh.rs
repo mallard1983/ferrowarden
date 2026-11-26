@@ -27,11 +27,13 @@ use crate::vault::{read_password_file, Vault};
 pub async fn refresh_credentials(state: &AppState) -> FerroResult<()> {
     let vault = &*state.vault;
 
+    let mut synced = true;
     if let Err(e) = vault.sync().await {
         if matches!(e, FerroError::VaultLocked) {
             state.set_locked(vault.lock_cause()).await;
             return Err(e);
         }
+        synced = false;
         tracing::warn!(error = %e, backend = vault.name(), "Vault sync failed; using the cached vault copy");
         emit_sync_failed(state, "sync");
     }
@@ -50,6 +52,11 @@ pub async fn refresh_credentials(state: &AppState) -> FerroResult<()> {
 
     match listed {
         Ok(listing) => {
+            // "Last successful sync" for the metrics: the sync and the listing
+            // both worked, so the cache is as fresh as the server.
+            if synced {
+                state.sync_stats.record_success(listing.excluded_count);
+            }
             let map = listing.map;
             let count = map.len();
             let previous = std::mem::replace(&mut *state.credentials.write().await, map).len();

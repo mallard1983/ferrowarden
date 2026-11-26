@@ -286,6 +286,25 @@ The Ferrowarden image is a static binary on `scratch`, run as UID 999 with a rea
 
 ---
 
+### 19. The Metrics Listener
+
+The optional [Prometheus endpoint](metrics.md) (`metrics.bind`) is a third listener, off by default. It exposes counts and state, not secrets, but it is still an information source about your vault and your agents, so it is built to leak as little as possible and to be hard to misconfigure.
+
+| Risk | Control |
+|---|---|
+| An agent, or anything on the agent network, reading the metrics | A **separate listener** on its own port. `/metrics` does not exist on the API or UI ports, and nothing of the API or UI exists on the metrics port: it serves `GET /metrics` only (other paths `404`, other methods `405`). Do not put its port on an agent network |
+| Anyone who can reach the port reading them | A **bearer token by default** (`FERROWARDEN_METRICS_TOKEN` or `_FILE`, read in Rust into wiped memory like the other secrets, never in the process environment, never in a config file). The check hashes both sides with SHA-256 and compares the digests in constant time, so neither the token nor its length can be probed by timing. Only a digest of the token is kept after start |
+| Running open by accident | A bind address that is **not loopback** with no token is **refused at start**, unless `metrics.allow_unauthenticated = true`, which logs a warning and is recorded in the `startup` event (`metrics_auth: "none"`). A token together with that flag is refused too |
+| Guessing the token | Every failure is a `401` and is counted (`ferrowarden_auth_failures_total{kind="metrics"}`); a `metrics_auth` event is emitted at most once per source address per minute, so a scan cannot flood the event stream, and it never contains the token or the presented value. Use a random token of at least 16 characters (Ferrowarden enforces the minimum; `openssl rand` makes 40) |
+| The token on the wire | With `tls_enabled = true` the listener serves TLS with the API's certificate. Without it the token and the metrics cross the network **in clear text**: Ferrowarden warns, and the port should be internal-only |
+| Secrets, URLs or names in the output | Label values come only from fixed enums and from names the administrator chose (agent key names); no URL, host, IP, header name, placeholder or value can reach a label because the label types have no field for them. Credential names are **not** exported unless `metrics.credential_labels = true`, which is capped at 500 names and logged as a warning. Tested with hostile events, against real traffic on both backends, and by the CI secret gate scanning a scrape |
+| Metrics slowing or breaking the proxy | The event consumer has its own bounded queue read with `try_send` from `emit`: a full queue only loses metrics (and counts the loss). A scrape reads in-memory state and makes no call to Vaultwarden or any other service |
+| Cardinality attacks | Nothing an agent sends becomes a label value, so an agent cannot create series. Key names and credential names are capped (1000 and 500) and overflow to `_other` |
+
+**What the metrics still tell a reader:** how many agents and credentials there are, how much traffic each agent key (by its name) sends and how often it is refused and why, when the vault was last synced and whether it is locked. That is operational intelligence about your setup. Treat the metrics endpoint, Prometheus and Grafana as part of the system you protect, and keep the token out of dashboards and chat.
+
+---
+
 ## Security Event Log
 
 Every security-relevant action produces one structured event with a stable schema (see [events.md](events.md)):
