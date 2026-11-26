@@ -34,6 +34,11 @@ pub struct CreateKeyRequest {
     /// requirement. `null` is rejected.
     #[serde(default, deserialize_with = "policy::required_approval")]
     pub approval: Vec<String>,
+    /// Credential name patterns this key may create in the managed collection
+    /// (docs/managed-credentials.md). Optional: left out it is `[]`, the key
+    /// cannot create credentials. `null` is rejected.
+    #[serde(default, deserialize_with = "policy::required_create")]
+    pub create: Vec<String>,
 }
 
 /// `PATCH /v1/admin/keys/{id}`: a field that is left out is unchanged, one that
@@ -47,6 +52,8 @@ pub struct PatchKeyRequest {
     pub methods: Patch<Vec<String>>,
     #[serde(default, deserialize_with = "policy::patch_approval")]
     pub approval: Patch<Vec<String>>,
+    #[serde(default, deserialize_with = "policy::patch_create")]
+    pub create: Patch<Vec<String>>,
 }
 
 /// `POST /v1/admin/keys/{id}/preview`
@@ -62,6 +69,9 @@ pub struct PreviewRequest {
     /// Draft approval patterns; absent = the saved value.
     #[serde(default, deserialize_with = "policy::patch_approval")]
     pub approval: Patch<Vec<String>>,
+    /// Draft create patterns; absent = the saved value.
+    #[serde(default, deserialize_with = "policy::patch_create")]
+    pub create: Patch<Vec<String>>,
     /// A request to check against the draft policy (same shape as `/v1/forward`).
     #[serde(default, deserialize_with = "policy::some_not_null")]
     pub request: Option<ProxyRequest>,
@@ -100,6 +110,7 @@ pub async fn create_key(
         req.credentials,
         req.methods,
         req.approval,
+        req.create,
     )
     .await?;
     Ok((StatusCode::CREATED, Json(created)))
@@ -174,6 +185,7 @@ pub async fn patch_key(
         req.credentials,
         req.methods,
         req.approval,
+        req.create,
     )
     .await?;
     Ok(Json(change.summary))
@@ -213,6 +225,7 @@ pub async fn preview_key(
         req.credentials,
         req.methods,
         req.approval,
+        req.create,
         req.request.as_ref(),
     )
     .await?;
@@ -310,7 +323,24 @@ pub async fn get_status(
         "vault_backend": state.vault.name(),
         "credential_count": credential_count,
         "agent_key_count": key_count,
+        "managed_collection": managed_status(&state).await,
     })))
+}
+
+/// The managed collection for the status endpoint and the status page: whether
+/// one is configured, and if so its name and id and whether it can be written
+/// to (or why not). A locked vault says so: nothing is known until it is
+/// unlocked.
+pub(crate) async fn managed_status(state: &AppState) -> serde_json::Value {
+    match state.vault.managed_collection().await {
+        Ok(managed) => managed.to_json(),
+        Err(_) => serde_json::json!({
+            "configured": state.config.vault.managed.setting().is_some(),
+            "usable": false,
+            "reason": "vault_locked",
+            "message": "the vault is locked, so the managed collection is not known yet",
+        }),
+    }
 }
 
 /// POST /v1/admin/notify/test

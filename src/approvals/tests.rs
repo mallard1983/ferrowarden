@@ -95,7 +95,8 @@ fn approve(s: &Arc<ApprovalStore>, id: &str, minutes: u32, now: DateTime<Utc>) -
 
 #[test]
 fn either_source_requires_approval_and_neither_can_exempt_the_other() {
-    let mut policy = KeyPolicy::from_raw(vec!["*".into()], vec!["*".into()], vec![]).unwrap();
+    let mut policy =
+        KeyPolicy::from_raw(vec!["*".into()], vec!["*".into()], vec![], vec![]).unwrap();
     let flags: BTreeMap<String, bool> = [
         ("plain".to_string(), false),
         ("field".to_string(), true),
@@ -607,4 +608,282 @@ fn the_debug_output_of_the_store_shows_counts_only() {
         !text.contains("secret_item_name") && !text.contains(&id),
         "{text}"
     );
+}
+
+// ── Create approvals: one operation, once ─────────────────────────────────────
+
+fn detail(name: &str) -> CreateDetail {
+    CreateDetail {
+        name: name.to_string(),
+        username: Some("admin".to_string()),
+        uris: vec!["https://keycloak.example.com".to_string()],
+        charset: "alphanumeric".to_string(),
+        length: 32,
+        approval_required: false,
+        collection: "Ferrowarden managed".to_string(),
+    }
+}
+
+/// A create ask for `key`, whose operation is identified by `fp`.
+fn check_create(
+    s: &Arc<ApprovalStore>,
+    key: &str,
+    fp: &str,
+    cfg: &ApprovalConfig,
+    now: DateTime<Utc>,
+) -> Check {
+    let d = detail("agent_keycloak_admin");
+    let ask = CreateAsk {
+        key_id: key,
+        key_name: "agent",
+        request_id: "req-9",
+        fingerprint: fp,
+        detail: &d,
+    };
+    s.check_create(&ask, cfg, now).unwrap()
+}
+
+fn approve_create(s: &Arc<ApprovalStore>, id: &str, now: DateTime<Utc>) -> PendingView {
+    s.approve_create(id, Duration::from_secs(600), now).unwrap()
+}
+
+#[test]
+fn a_create_opens_an_approval_of_the_create_kind_and_a_repeat_reuses_it() {
+    let s = store();
+    let (id, created, _g) = pending_id(check_create(&s, "k1", "fp-a", &cfg(), t0()));
+    assert!(created);
+    let view = s.get(&id, t0()).unwrap();
+    assert_eq!(view.kind, ApprovalKind::Create);
+    assert_eq!(view.create.as_ref().unwrap().name, "agent_keycloak_admin");
+    assert_eq!(view.items.len(), 1);
+    assert_eq!(view.items[0].item, "agent_keycloak_admin");
+    assert_eq!(s.kind_of(&id, t0()), Some(ApprovalKind::Create));
+    assert_eq!(s.kind_of("nope", t0()), None);
+
+    // The same operation from the same key: the same approval, no new prompt.
+    let (again, created, _g2) = pending_id(check_create(&s, "k1", "fp-a", &cfg(), t0()));
+    assert_eq!(again, id);
+    assert!(!created);
+    assert_eq!(s.counts(t0()).0, 1);
+
+    // Another operation, or another key: its own approval.
+    let (other, created, _g3) = pending_id(check_create(&s, "k1", "fp-b", &cfg(), t0()));
+    assert!(created && other != id);
+    let (other_key, created, _g4) = pending_id(check_create(&s, "k2", "fp-a", &cfg(), t0()));
+    assert!(created && other_key != id);
+}
+
+#[test]
+fn an_approved_create_is_used_up_by_the_first_matching_request() {
+    let s = store();
+    let (id, _, _g) = pending_id(check_create(&s, "k1", "fp-a", &cfg(), t0()));
+    let view = approve_create(&s, &id, t0() + secs(5));
+    assert_eq!(view.kind, ApprovalKind::Create);
+    // No grant, and the approval is gone from the open list.
+    assert_eq!(s.counts(t0() + secs(5)), (0, 0));
+    assert!(s.list(t0() + secs(5)).1.is_empty());
+
+    // Not for another operation or another key.
+    assert!(!s.consume_create("k1", "fp-b", t0() + secs(6)));
+    assert!(!s.consume_create("k2", "fp-a", t0() + secs(6)));
+    // The first matching request uses it; the second needs a new approval.
+    assert!(matches!(
+        check_create(&s, "k1", "fp-a", &cfg(), t0() + secs(7)),
+        Check::Granted
+    ));
+    let (new_id, created, _g) = pending_id(check_create(&s, "k1", "fp-a", &cfg(), t0() + secs(8)));
+    assert!(created);
+    assert_ne!(new_id, id);
+}
+
+#[test]
+fn a_woken_request_and_a_retry_cannot_both_use_one_approval() {
+    let s = store();
+    let (id, _, _g) = pending_id(check_create(&s, "k1", "fp-a", &cfg(), t0()));
+    approve_create(&s, &id, t0());
+    assert!(s.consume_create("k1", "fp-a", t0()), "the first");
+    assert!(!s.consume_create("k1", "fp-a", t0()), "not twice");
+}
+
+#[test]
+fn an_approved_create_that_is_not_used_expires() {
+    let s = store();
+    let (id, _, _g) = pending_id(check_create(&s, "k1", "fp-a", &cfg(), t0()));
+    approve_create(&s, &id, t0());
+    // It is kept for the 600 seconds `approve_create` gives it.
+    assert!(!s.consume_create("k1", "fp-a", t0() + secs(601)));
+
+    // The sweep drops it too.
+    let (id, _, _g) = pending_id(check_create(&s, "k1", "fp-b", &cfg(), t0() + secs(700)));
+    approve_create(&s, &id, t0() + secs(700));
+    s.sweep(t0() + secs(2000));
+    assert!(!s.consume_create("k1", "fp-b", t0() + secs(701)));
+}
+
+#[test]
+fn a_denied_create_is_refused_without_a_new_prompt_for_the_cooldown() {
+    let s = store();
+    let (id, _, _g) = pending_id(check_create(&s, "k1", "fp-a", &cfg(), t0()));
+    s.deny(&id, Duration::from_secs(600), t0() + secs(10))
+        .unwrap();
+    assert!(matches!(
+        check_create(&s, "k1", "fp-a", &cfg(), t0() + secs(20)),
+        Check::Denied
+    ));
+    // Only that operation, and only for that key.
+    let (_, created, _g2) = pending_id(check_create(&s, "k1", "fp-b", &cfg(), t0() + secs(20)));
+    assert!(created);
+    let (_, created, _g3) = pending_id(check_create(&s, "k2", "fp-a", &cfg(), t0() + secs(20)));
+    assert!(created);
+    // After the cooldown it can be asked again.
+    let (_, created, _g4) = pending_id(check_create(&s, "k1", "fp-a", &cfg(), t0() + secs(700)));
+    assert!(created);
+}
+
+#[test]
+fn approving_replaces_a_denial_of_the_same_operation() {
+    let s = store();
+    let (id, _, _g) = pending_id(check_create(&s, "k1", "fp-a", &cfg(), t0()));
+    s.deny(&id, Duration::from_secs(600), t0()).unwrap();
+    // A later approval of the same operation (a new prompt after the
+    // cooldown) clears the denial.
+    let (id2, _, _g) = pending_id(check_create(&s, "k1", "fp-a", &cfg(), t0() + secs(601)));
+    approve_create(&s, &id2, t0() + secs(602));
+    assert!(matches!(
+        check_create(&s, "k1", "fp-a", &cfg(), t0() + secs(603)),
+        Check::Granted
+    ));
+}
+
+#[test]
+fn the_two_kinds_are_decided_with_their_own_calls_only() {
+    let s = store();
+    let (create_id, _, _g) = pending_id(check_create(&s, "k1", "fp-a", &cfg(), t0()));
+    let ask = Ask::new("k1", "https://pve.example.com:8006/x");
+    let (fwd_id, _, _g2) = pending_id(ask.check(&s, &["proxmox_root"], &cfg(), t0()));
+    assert_eq!(s.kind_of(&fwd_id, t0()), Some(ApprovalKind::Forward));
+
+    // A create cannot be given a grant, and a forward cannot be approved as
+    // a create: each call refuses the other kind and changes nothing.
+    assert_eq!(
+        s.approve(&create_id, new_id().unwrap(), 5, "x", t0())
+            .unwrap_err(),
+        NotPending
+    );
+    assert_eq!(
+        s.approve_create(&fwd_id, Duration::from_secs(60), t0())
+            .unwrap_err(),
+        NotPending
+    );
+    assert_eq!(s.counts(t0()).0, 2, "both still open");
+    assert!(s.list(t0()).1.is_empty(), "no grant was made");
+}
+
+#[test]
+fn create_approvals_count_towards_the_per_key_limits_with_forwards() {
+    let s = store();
+    let mut c = cfg();
+    c.max_pending_per_key = 2;
+    let ask = Ask::new("k1", "https://pve.example.com:8006/x");
+    let (_, _, _g1) = pending_id(ask.check(&s, &["a"], &c, t0()));
+    let (_, _, _g2) = pending_id(check_create(&s, "k1", "fp-a", &c, t0()));
+    // Two open (one of each kind): a third of either kind is over the limit.
+    assert!(matches!(
+        check_create(&s, "k1", "fp-b", &c, t0()),
+        Check::LimitReached
+    ));
+    assert!(matches!(
+        ask.check(&s, &["b"], &c, t0()),
+        Check::LimitReached
+    ));
+    // Another key is not affected.
+    let (_, created, _g3) = pending_id(check_create(&s, "k2", "fp-a", &c, t0()));
+    assert!(created);
+
+    // The hourly limit counts both kinds too.
+    let s = store();
+    let mut c = cfg();
+    c.max_requests_per_key_per_hour = 2;
+    c.max_pending_per_key = 10;
+    let (id, _, _g) = pending_id(check_create(&s, "k1", "fp-a", &c, t0()));
+    approve_create(&s, &id, t0());
+    let (_, _, _g) = pending_id(ask.check(&s, &["a"], &c, t0() + secs(1)));
+    assert!(matches!(
+        check_create(&s, "k1", "fp-c", &c, t0() + secs(2)),
+        Check::LimitReached
+    ));
+}
+
+#[test]
+fn waiters_are_limited_per_key_for_creates_too() {
+    let s = store();
+    let mut c = cfg();
+    c.max_waiters_per_key = 1;
+    let first = check_create(&s, "k1", "fp-a", &c, t0());
+    assert!(matches!(first, Check::Wait { .. }));
+    // The same operation again: reused, but not held (over the waiter limit).
+    match check_create(&s, "k1", "fp-a", &c, t0()) {
+        Check::Pending { created, .. } => assert!(!created),
+        _ => panic!("expected pending"),
+    }
+}
+
+#[test]
+fn clearing_a_key_or_the_vault_drops_create_approvals_and_approved_creates() {
+    let s = store();
+    let (a, _, _g) = pending_id(check_create(&s, "k1", "fp-a", &cfg(), t0()));
+    let (b, _, _g2) = pending_id(check_create(&s, "k1", "fp-b", &cfg(), t0()));
+    approve_create(&s, &b, t0());
+    let (_, _, _g3) = pending_id(check_create(&s, "k2", "fp-a", &cfg(), t0()));
+
+    let cleared = s.clear_key("k1");
+    assert_eq!(cleared.pending.len(), 1);
+    assert_eq!(cleared.pending[0].id, a);
+    assert_eq!(cleared.pending[0].kind, ApprovalKind::Create);
+    // The approved-but-unused one of that key went too.
+    assert!(!s.consume_create("k1", "fp-b", t0()));
+    assert_eq!(s.counts(t0()).0, 1, "the other key still has one open");
+
+    let cleared = s.clear_all();
+    assert_eq!(cleared.pending.len(), 1);
+    assert_eq!(s.counts(t0()), (0, 0));
+}
+
+#[test]
+fn the_views_say_what_a_create_asks_for_and_never_a_value() {
+    let s = store();
+    let (id, _, _g) = pending_id(check_create(&s, "k1", "fp-a", &cfg(), t0()));
+    let v = s.get(&id, t0()).unwrap();
+    let j = v.to_json();
+    assert_eq!(j["kind"], "create");
+    assert_eq!(j["create"]["name"], "agent_keycloak_admin");
+    assert_eq!(j["create"]["username"], "admin");
+    assert_eq!(j["create"]["generate"]["length"], 32);
+    assert_eq!(j["create"]["collection"], "Ferrowarden managed");
+    assert!(j.get("method").is_none() && j.get("origin").is_none() && j.get("url").is_none());
+    assert_eq!(j["credentials"][0]["credential"], "agent_keycloak_admin");
+
+    // The prompt event names the kind and what is asked.
+    let ctx = RequestContext::new("127.0.0.1".parse().unwrap());
+    let e = serde_json::to_value(requested_event(
+        &ctx,
+        &v,
+        Some("https://ui/approvals/x".into()),
+    ))
+    .unwrap();
+    let d = &e["ferrowarden"]["details"];
+    assert_eq!(d["kind"], "create");
+    assert_eq!(d["create"]["name"], "agent_keycloak_admin");
+    assert_eq!(d["link"], "https://ui/approvals/x");
+    assert!(d.get("host").is_none() && d.get("path").is_none());
+    assert!(e.get("url").is_none());
+
+    // A forward still says `forward` and has its request.
+    let ask = Ask::new("k1", "https://pve.example.com:8006/x");
+    let (fid, _, _g2) = pending_id(ask.check(&s, &["proxmox_root"], &cfg(), t0()));
+    let fv = s.get(&fid, t0()).unwrap();
+    assert_eq!(fv.to_json()["kind"], "forward");
+    assert_eq!(fv.to_json()["method"], "GET");
+    let e = serde_json::to_value(requested_event(&ctx, &fv, None)).unwrap();
+    assert_eq!(e["ferrowarden"]["details"]["kind"], "forward");
 }

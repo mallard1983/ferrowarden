@@ -41,6 +41,7 @@ fn login(k: &SymKey) -> RawCipher {
         deleted_date: None,
         archived_date: None,
         view_password: None,
+        collection_ids: Vec::new(),
         login: Some(RawLogin {
             username: e(k, "USER"),
             password: e(k, "PASS"),

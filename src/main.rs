@@ -1,8 +1,10 @@
 mod api;
 mod approvals;
 mod config;
+mod create;
 mod error;
 mod events;
+mod generate;
 mod healthcheck;
 mod keys;
 mod metrics;
@@ -75,6 +77,10 @@ fn startup_event(
         .detail(
             "ui_insecure_http",
             config.ui.enabled() && config.ui.insecure_http,
+        )
+        .detail(
+            "managed_collection_set",
+            config.vault.managed.setting().is_some(),
         )
         .detail("sessions_enabled", config.sessions.enabled)
         .detail("approval_wait_secs", config.approval.wait_secs)
@@ -287,6 +293,18 @@ async fn main() -> anyhow::Result<()> {
             // The failure event is already queued; get it out before exiting.
             events.flush().await;
             return Err(e.into());
+        }
+        // A managed collection that was asked for has to be writable now: a
+        // service that was set up to create credentials does not start in a
+        // state where it cannot.
+        let managed = vault::Vault::managed_collection(&*state.vault).await;
+        if let Err(message) = managed
+            .map_err(|e| e.to_string())
+            .and_then(|m| vault::refresh::check_managed_at_startup(&m))
+        {
+            tracing::error!("{message}");
+            events.flush().await;
+            return Err(error::FerroError::Config(message).into());
         }
         tracing::info!("Vault unlocked via file mode");
     } else {

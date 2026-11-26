@@ -2,11 +2,60 @@
 {% block title %}Approval{% endblock %}
 {% block main_class %}wide{% endblock %}
 {% block content %}
-<h1>Approve this request?</h1>
+<h1>{% if d.is_create %}Create this credential?{% else %}Approve this request?{% endif %}</h1>
 {% if let Some(message) = error %}<p class="alert error" role="alert">{{ message }}</p>{% endif %}
 {% include "ui/_sudo.html" %}
+{% if d.is_create %}
+<p class="alert warn" role="note">An agent asks Ferrowarden to <strong>create a new credential</strong>. Nothing has been generated or written yet. If you approve, Ferrowarden generates a random password, stores it in the managed collection, and gives the agent only a placeholder: the agent never sees the password. This approval covers <strong>this one credential</strong> only; it is used up when the credential is created.</p>
+<dl class="facts">
+<dt>Kind</dt>
+<dd><code>{{ d.kind }}</code></dd>
+<dt>Agent key</dt>
+<dd>{{ d.key_name }} <span class="muted">(<code>{{ d.key_id }}</code>)</span></dd>
+<dt>Credential name</dt>
+<dd><code>{{ d.create.name }}</code></dd>
+<dt>Username</dt>
+<dd>{% if d.create.has_username %}<code>{{ d.create.username }}</code>{% else %}<span class="muted">none</span>{% endif %}</dd>
+<dt>For these URLs</dt>
+<dd>{% for u in d.create.uris %}<code>{{ u }}</code><br>{% endfor %}</dd>
+<dt>Password</dt>
+<dd>{{ d.create.length }} characters, <code>{{ d.create.charset }}</code></dd>
+<dt>Using it will need approval</dt>
+<dd>{% if d.create.approval_required %}Yes (it gets a <code>ferrowarden_approval</code> field){% else %}No, not because of this request{% endif %}</dd>
+<dt>Stored in collection</dt>
+<dd><code>{{ d.create.collection }}</code></dd>
+<dt>Request id</dt>
+<dd><code>{{ d.request_id }}</code></dd>
+<dt>Approval id</dt>
+<dd><code>{{ d.id }}</code></dd>
+<dt>Asked</dt>
+<dd>{{ d.created }}</dd>
+<dt>Open until</dt>
+<dd>{{ d.expires }}</dd>
+</dl>
+
+<section aria-labelledby="approve-h">
+<h2 id="approve-h">Approve</h2>
+<form method="post" action="/ui/approvals/{{ d.id }}/approve">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<p class="actions"><button type="submit">Approve and create</button></p>
+</form>
+</section>
+
+<section aria-labelledby="deny-h">
+<h2 id="deny-h">Deny</h2>
+<p class="muted">Nothing is created. The agent is refused this same request for the next few minutes, and asked to tell its human.</p>
+<form method="post" action="/ui/approvals/{{ d.id }}/deny">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<p class="actions"><button type="submit" class="danger">Deny</button>
+<a class="button secondary" href="/ui/approvals">Back to approvals</a></p>
+</form>
+</section>
+{% else %}
 <p class="alert warn" role="note">An agent is waiting to use the credentials below. The request is shown as the agent sent it, with placeholders: Ferrowarden has not read any credential value. Approving lets <strong>this key</strong> use these credentials at <strong>this target</strong> until the grant ends, for any request, not only this one.</p>
 <dl class="facts">
+<dt>Kind</dt>
+<dd><code>{{ d.kind }}</code></dd>
 <dt>Agent key</dt>
 <dd>{{ d.key_name }} <span class="muted">(<code>{{ d.key_id }}</code>)</span></dd>
 <dt>Credentials</dt>
@@ -57,4 +106,5 @@
 <a class="button secondary" href="/ui/approvals">Back to approvals</a></p>
 </form>
 </section>
+{% endif %}
 {% endblock %}

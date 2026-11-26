@@ -155,6 +155,149 @@ paths:
           $ref: "#/components/responses/RateLimited"
         "503":
           $ref: "#/components/responses/VaultLocked"
+    post:
+      operationId: createCredential
+      tags: [agent]
+      summary: Create a credential with a generated password
+      description: |
+        Asks Ferrowarden to create a new login in the operator's **managed collection** (`vault.managed.collection`). Ferrowarden generates the password itself from the operating system's random generator, encrypts it and stores it, and answers with the name and a placeholder. **The generated value is never returned**, here or anywhere an agent can read: use it only through the placeholder (`{{vault:name}}`), for example to set up a new service through a forward request. See `docs/managed-credentials.md`.
+
+        The key needs a `create` pattern that matches the name. That permission is separate from the key's `credentials` and `methods`.
+
+        Checks run in this order, each before the next, and **nothing is generated or written until a human has approved**: the key is valid (`401`); the body is strict JSON and every field is valid (`400`); each URI passes the outbound target policy (`403`); the key's `create` patterns match the name (`403` `credential_create_out_of_scope`); creating is switched on (`403` `credential_create_disabled`) and the managed collection can be written to (`503` `managed_collection_unavailable`, with a `reason`); a fresh sync finds no vault item with that name anywhere (`409` `credential_exists`, before any prompt); a human approves this one operation (below); then the value is generated, encrypted and written (`502` `vault_write_failed` if the vault refuses the write).
+
+        **Approval.** Every create needs a human's approval of exactly this operation (key, name, username, URIs, generation options, approval flag). The request is held for up to the operator's `approval.wait_secs` (60 seconds by default). If a person approves, the credential is created and the answer is `201`. If they deny, the answer is `403` with `code` `approval_denied`: stop, and tell your human. If nobody has decided when the wait ends, the answer is `403` with `code` `approval_pending` and an `approval_id`: ask your human to approve it, then **retry the identical request**. An approval covers one operation once: it is used up by the request it lets through, and never becomes a timed grant. A key with too many open or recent approval requests gets `429` with `code` `approval_limit_reached`. A client of this operation needs a read timeout above the operator's `approval.wait_secs`, up to 300 seconds.
+
+        If the item was written but the credential cache could not be refreshed afterwards, the answer is still `201` with `cache_refreshed: false`: the placeholder works as soon as the next refresh has run.
+      security:
+        - agentKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCredentialRequest"
+            examples:
+              keycloak:
+                summary: A new service account for a service
+                value:
+                  name: agent_keycloak_svc
+                  username: svc-agent
+                  uris:
+                    - https://keycloak.example.com
+                  generate:
+                    length: 32
+                    charset: alphanumeric
+      responses:
+        "201":
+          description: The credential was created. The body has its name and placeholder, never its value.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateCredentialResponse"
+              examples:
+                created:
+                  value:
+                    name: agent_keycloak_svc
+                    placeholder: "{{vault:agent_keycloak_svc}}"
+                    cache_refreshed: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            Refused. `code` says why: `credential_create_out_of_scope` (the key has no `create` pattern for this name), `credential_create_disabled` (the operator has not set `vault.managed.collection`), `approval_denied` (a human said no: stop and tell them), or `approval_pending` (not decided yet: retry the identical request after your human approves, quoting `approval_id`). A URI that the outbound target policy blocks is also `403`, without a `code`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                outOfScope:
+                  value:
+                    error: This agent key may not create a credential called other_name
+                    code: credential_create_out_of_scope
+                disabled:
+                  value:
+                    error: "Creating credentials is switched off: no managed collection is configured (vault.managed.collection)"
+                    code: credential_create_disabled
+                approvalPending:
+                  summary: Waiting for a human; retry the identical request after they approve
+                  value:
+                    error: "Approval required: a human has to approve this request. Ask your human to approve approval 2m3x8Qk0Zr1YtV5pUa9bLw, then retry the same request."
+                    code: approval_pending
+                    approval_id: 2m3x8Qk0Zr1YtV5pUa9bLw
+                approvalDenied:
+                  value:
+                    error: "Approval denied: a human denied this request. Do not retry it; tell your human what was refused."
+                    code: approval_denied
+        "409":
+          description: A vault item with that name already exists (in any collection). Nothing was asked of a human and nothing was written. Choose another name.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                exists:
+                  value:
+                    error: A credential called agent_keycloak_svc already exists; choose another name
+                    code: credential_exists
+        "429":
+          description: |
+            Either the per-IP rate limit was exceeded (a plain-text body, with a `Retry-After` header), or this agent key has too many open or recent approval requests (`code` `approval_limit_reached`, a JSON body).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: Rate limit exceeded. See the Retry-After header.
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: The vault refused or failed the write (`code` `vault_write_failed`). Nothing was created. The generated value is gone; a retry needs a new approval.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                writeFailed:
+                  value:
+                    error: The credential could not be written to the vault; nothing was created. Try again later.
+                    code: vault_write_failed
+        "503":
+          description: |
+            The vault is locked or Vaultwarden cannot be reached, or the managed collection cannot be written to (`code` `managed_collection_unavailable`, with a `reason`: `not_found`, `read_only`, `hides_passwords`, `ambiguous_name` or `no_organization_key`). Nothing falls back to another collection or to the personal vault.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                locked:
+                  value:
+                    error: Vault is locked
+                unavailable:
+                  value:
+                    error: "The managed collection cannot be written to right now: the account has only view access to the managed collection (it needs Can edit)"
+                    code: managed_collection_unavailable
+                    reason: read_only
   /v1/forward:
     post:
       operationId: forwardRequest
@@ -804,6 +947,12 @@ paths:
                     vault_backend: native
                     credential_count: 12
                     agent_key_count: 2
+                    managed_collection:
+                      configured: true
+                      usable: true
+                      id: 6c0d7f0e-52d0-4b5b-8a39-0e8a7f6d5c4b
+                      name: Ferrowarden managed
+                      items: 3
         "401":
           $ref: "#/components/responses/Unauthorized"
         "429":
@@ -898,14 +1047,19 @@ paths:
       tags: [admin]
       summary: Approve a pending approval
       description: |
-        Approves the approval for `minutes` (1 to `approval.max_grant_minutes`). The grant covers the approval's agent key, its credentials and its target origin until it ends. Requests held on the approval proceed at once, and a request retried within the grant passes. The approver is recorded as `admin_api`. An agent key cannot call this: it is refused like any request without the admin key.
+        What the body is depends on the approval's `kind` (see `listApprovals`).
 
-        An approval that is no longer pending (decided, expired or cleared) is `409` and nothing changes.
+        A `forward` approval takes `{ "minutes": N }` (1 to `approval.max_grant_minutes`). The grant covers the approval's agent key, its credentials and its target origin until it ends. Requests held on the approval proceed at once, and a request retried within the grant passes.
+
+        A `create` approval takes **no body** (an empty body, or `{}`): it has no duration. It allows exactly one operation, the one it was opened for. The request held on it proceeds at once, or, if none is held any more, the agent's identical retry within `approval.pending_ttl_secs` uses it up. It never becomes a grant. A body with `minutes` is a `400`.
+
+        The approver is recorded as `admin_api`. An agent key cannot call this: it is refused like any request without the admin key. An approval that is no longer pending (decided, expired or cleared) is `409` and nothing changes.
       security:
         - adminKey: []
         - adminBearer: []
       requestBody:
-        required: true
+        required: false
+        description: "`{ \"minutes\": N }` for a `forward` approval; nothing (or `{}`) for a `create` approval."
         content:
           application/json:
             schema:
@@ -916,7 +1070,7 @@ paths:
                   minutes: 15
       responses:
         "200":
-          description: Approved. The grant is in the body.
+          description: Approved. For a `forward` approval the grant is in the body; a `create` approval has none.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -1157,14 +1311,23 @@ components:
           description: A human-readable description.
         code:
           type: string
-          description: A stable code, present on the answers about a human's approval only. Match on this, not on the message.
+          description: A stable code, present on the answers about a human's approval and on the answers of `createCredential`. Match on this, not on the message.
           enum:
             - approval_pending
             - approval_denied
             - approval_limit_reached
+            - credential_create_disabled
+            - credential_create_out_of_scope
+            - credential_exists
+            - managed_collection_unavailable
+            - vault_write_failed
         approval_id:
           type: string
           description: With `approval_pending`, the id of the approval the human has to decide. Quote it when you ask them.
+        reason:
+          type: string
+          description: With `managed_collection_unavailable`, why the managed collection cannot be written to.
+          enum: [not_found, read_only, hides_passwords, ambiguous_name, no_organization_key]
     OpenApiDocument:
       type: object
       description: An OpenAPI 3.1 document.
@@ -1404,6 +1567,76 @@ components:
         minLength: 1
         maxLength: 256
         description: A pattern, without control characters.
+    CreatePatterns:
+      type: array
+      maxItems: 256
+      description: |
+        Credential name patterns this key may ask Ferrowarden to **create** in the managed collection, with the same syntax, limits and matching as `credentials`. `["*"]` allows any name and `[]` allows none (the default, and what a key from before creating existed has). It is its own permission: it is independent of `credentials` and `methods`. `null` is rejected. Adding or broadening a pattern gives the key more access, so the admin UI asks for confirmation.
+      items:
+        type: string
+        minLength: 1
+        maxLength: 256
+        description: A pattern, without control characters.
+    CreateCredentialRequest:
+      type: object
+      additionalProperties: false
+      required: [name, uris, generate]
+      description: The body of `createCredential`. `null` is rejected for every field.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: The credential's name, as it will be written in a placeholder. No control characters, and the key's `create` patterns must match it.
+        username:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: The login username, if the service has one.
+        uris:
+          type: array
+          minItems: 1
+          maxItems: 16
+          description: The URLs the credential is for (its host bindings). Each must be an absolute `http` or `https` URL without a username or password, and must pass the outbound target policy, so a credential can only be created for places Ferrowarden may reach anyway.
+          items:
+            type: string
+            maxLength: 2048
+        generate:
+          $ref: "#/components/schemas/GenerateOptions"
+        approval_required:
+          type: boolean
+          default: false
+          description: When true the new item carries a `ferrowarden_approval` field, so every later use of it needs a human's approval too.
+    GenerateOptions:
+      type: object
+      additionalProperties: false
+      description: How the password is generated.
+      properties:
+        length:
+          type: integer
+          minimum: 16
+          maximum: 128
+          default: 32
+          description: Characters in the password.
+        charset:
+          type: string
+          enum: [alphanumeric, ascii, hex, base64url]
+          default: alphanumeric
+          description: |
+            `alphanumeric` is `A-Z a-z 0-9`. `ascii` is letters, digits and `-_.~!@#%^*+=:,`, a set without the characters that most often need quoting (quotes, backslash, `$`, backtick, space, `&`, `;`, `|`, `<`, `>`); the value still has to be quoted or encoded where `*`, `!`, `#` or `%` matter. `hex` is `0-9 a-f`. `base64url` is `A-Z a-z 0-9 - _` (without padding). Every character is chosen uniformly at random.
+    CreateCredentialResponse:
+      type: object
+      required: [name, placeholder, cache_refreshed]
+      description: The new credential. There is no value in it.
+      properties:
+        name:
+          type: string
+        placeholder:
+          type: string
+          description: The placeholder for the password, quoted when the name needs it. Paste it into a request as it is.
+        cache_refreshed:
+          type: boolean
+          description: "`false` when the item was written but the credential cache could not be refreshed afterwards: the placeholder works once the next refresh has run."
     MethodList:
       type: array
       maxItems: 256
@@ -1416,7 +1649,7 @@ components:
       type: object
       description: |
         What an agent key may do. A policy has no default: a key must be given both lists, and a key without a policy (created with 0.1.0) is deny-all until one is set. `["*"]` means everything and `[]` means nothing in both lists. `null` is never accepted.
-      required: [credentials, methods, approval]
+      required: [credentials, methods, approval, create]
       properties:
         credentials:
           $ref: "#/components/schemas/CredentialPatterns"
@@ -1424,11 +1657,13 @@ components:
           $ref: "#/components/schemas/MethodList"
         approval:
           $ref: "#/components/schemas/ApprovalPatterns"
+        create:
+          $ref: "#/components/schemas/CreatePatterns"
     CreateKeyRequest:
       type: object
       additionalProperties: false
       required: [name, credentials, methods]
-      description: The body of `createKey`. `credentials` and `methods` are required; `approval` is optional and defaults to `[]`.
+      description: The body of `createKey`. `credentials` and `methods` are required; `approval` and `create` are optional and default to `[]`.
       properties:
         name:
           type: string
@@ -1441,9 +1676,11 @@ components:
           $ref: "#/components/schemas/MethodList"
         approval:
           $ref: "#/components/schemas/ApprovalPatterns"
+        create:
+          $ref: "#/components/schemas/CreatePatterns"
     CreateKeyResponse:
       type: object
-      required: [id, name, token, created_at, credentials, methods, approval, policy_set]
+      required: [id, name, token, created_at, credentials, methods, approval, create, policy_set]
       description: The new key. `token` appears here and nowhere else.
       properties:
         id:
@@ -1463,12 +1700,14 @@ components:
           $ref: "#/components/schemas/MethodList"
         approval:
           $ref: "#/components/schemas/ApprovalPatterns"
+        create:
+          $ref: "#/components/schemas/CreatePatterns"
         policy_set:
           type: boolean
           description: Always `true` for a key created through the API.
     KeySummary:
       type: object
-      required: [id, name, created_at, credentials, methods, approval, policy_set]
+      required: [id, name, created_at, credentials, methods, approval, create, policy_set]
       description: An agent key without its token.
       properties:
         id:
@@ -1484,6 +1723,8 @@ components:
           $ref: "#/components/schemas/MethodList"
         approval:
           $ref: "#/components/schemas/ApprovalPatterns"
+        create:
+          $ref: "#/components/schemas/CreatePatterns"
         policy_set:
           type: boolean
           description: "`false` for a key created with 0.1.0 that has no policy yet. It is deny-all (`[]` and `[]`) until a policy is set with `updateKeyPolicy`."
@@ -1499,6 +1740,8 @@ components:
           $ref: "#/components/schemas/MethodList"
         approval:
           $ref: "#/components/schemas/ApprovalPatterns"
+        create:
+          $ref: "#/components/schemas/CreatePatterns"
     PreviewRequest:
       type: object
       additionalProperties: false
@@ -1510,6 +1753,8 @@ components:
           $ref: "#/components/schemas/MethodList"
         approval:
           $ref: "#/components/schemas/ApprovalPatterns"
+        create:
+          $ref: "#/components/schemas/CreatePatterns"
         request:
           $ref: "#/components/schemas/ProxyRequest"
     ApprovalNeed:
@@ -1604,12 +1849,19 @@ components:
       description: A fixed reminder that the target host is checked by name and IP literal only. The private-address check on a resolved DNS name happens only when a request is really forwarded.
     PendingApproval:
       type: object
-      required: [id, key, credentials, method, origin, url, request_id, created_at, expires_at]
-      description: An approval waiting for a decision. It shows the request as the agent sent it (placeholders, never values).
+      required: [id, kind, key, credentials, request_id, created_at, expires_at]
+      description: |
+        An approval waiting for a decision. A `forward` approval shows the request as the agent sent it (placeholders, never values), has `method`, `origin` and `url`, and approving it gives a grant. A `create` approval shows what the agent asked to have created, in `create`, has no method, origin or URL, and allows exactly one operation. There is never a value in either: a create's password has not been generated yet.
       properties:
         id:
           type: string
           description: "An unguessable id. It is not a capability, so knowing it decides nothing: deciding needs the admin key here, or a signed-in session in the UI."
+        kind:
+          type: string
+          enum: [forward, create]
+          description: "`forward`: use credentials that need approval (approving gives a grant for a chosen duration). `create`: create a credential (approving allows that one operation, once, and has no duration)."
+        create:
+          $ref: "#/components/schemas/CreateApproval"
         key:
           type: object
           required: [id, name]
@@ -1648,6 +1900,35 @@ components:
           type: string
           format: date-time
           description: When the approval stops being open if nobody decides. A denial stands for the same length of time.
+    CreateApproval:
+      type: object
+      required: [name, uris, generate, approval_required, collection]
+      description: What a `create` approval is for. Present on `create` approvals only.
+      properties:
+        name:
+          type: string
+        username:
+          type: [string, "null"]
+        uris:
+          type: array
+          description: The URLs, sorted.
+          items:
+            type: string
+        generate:
+          type: object
+          required: [charset, length]
+          properties:
+            charset:
+              type: string
+              enum: [alphanumeric, ascii, hex, base64url]
+            length:
+              type: integer
+        approval_required:
+          type: boolean
+          description: The new item will need approval on every use.
+        collection:
+          type: string
+          description: The name of the managed collection the item will be written to.
     ApprovalOrigin:
       type: object
       required: [scheme, host, port]
@@ -1710,7 +1991,7 @@ components:
       type: object
       additionalProperties: false
       required: [minutes]
-      description: The body of `approveApproval`. There is no default length.
+      description: The body of `approveApproval` for a `forward` approval. There is no default length. A `create` approval takes no body (an empty body or `{}`); a `minutes` there is a `400`.
       properties:
         minutes:
           type: integer
@@ -1718,11 +1999,15 @@ components:
           description: How long the grant lasts, from 1 to the operator's `approval.max_grant_minutes` (480 by default).
     ApproveResponse:
       type: object
-      required: [status, grant]
+      required: [status, kind]
+      description: The answer of `approveApproval`. A `forward` approval answers with its grant; a `create` approval has none.
       properties:
         status:
           type: string
           const: approved
+        kind:
+          type: string
+          enum: [forward, create]
         grant:
           $ref: "#/components/schemas/ApprovalGrant"
     DecisionResponse:
@@ -1763,9 +2048,37 @@ components:
           description: The id of the revoked key.
     Status:
       type: object
-      required: [locked, vault_backend, credential_count, agent_key_count]
+      required: [locked, vault_backend, credential_count, agent_key_count, managed_collection]
       description: Operational status.
       properties:
+        managed_collection:
+          type: object
+          required: [configured, usable]
+          description: "The managed collection (`vault.managed.collection`), where agents may create credentials. No secrets."
+          properties:
+            configured:
+              type: boolean
+              description: "`vault.managed.collection` is set. When it is not, creating credentials is off."
+            usable:
+              type: boolean
+              description: The collection can be written to (it exists, the account has Can edit and does not have Hide passwords, and its organisation key is available).
+            id:
+              type: string
+              description: The collection's id, when usable.
+            name:
+              type: string
+              description: The collection's name, when usable.
+            items:
+              type: integer
+              description: How many readable vault items are in it, when usable.
+            setting:
+              type: string
+              description: What the operator configured, when it is not usable.
+            reason:
+              type: string
+              description: Why it is not usable (`not_found`, `read_only`, `hides_passwords`, `ambiguous_name`, `no_organization_key`, or `vault_locked`).
+            message:
+              type: string
         locked:
           type: boolean
           description: Whether the vault is locked.
@@ -1850,6 +2163,11 @@ components:
         - approval_pending
         - approval_denied
         - approval_limit_reached
+        - credential_exists
+        - managed_collection_unavailable
+        - credential_create_disabled
+        - credential_create_out_of_scope
+        - vault_write_failed
     SecurityEvent:
       type: object
       description: |

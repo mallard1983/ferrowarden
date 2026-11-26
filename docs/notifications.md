@@ -28,7 +28,7 @@ handler -> EventLog::emit -> ring buffer, event writer -> stdout / file / syslog
 | `blocked` | A forward refused with reason `credential_host_not_allowed`, `target_blocked`, `credential_out_of_scope`, `method_not_allowed` or `reprompt_required` | high |
 | `auth_failure` | **Repeated** failed `agent_auth`, `admin_auth` or admin UI sign-ins from one source IP: at least `auth_failure_threshold` (default 5) within `auth_failure_window_secs` (default 300). Also immediately when the admin UI locks sign-ins out (`login_locked_out`) | high |
 | `vault` | The vault locked; an unlock or a sync failed; and a recovery notice when the vault unlocks again after a lock was notified | high, recovery normal |
-| `admin` | A key was created, revoked or had its policy changed; a successful admin UI sign-in | normal |
+| `admin` | A key was created, revoked or had its policy changed; a successful admin UI sign-in; an agent **created a credential** ([managed-credentials.md](managed-credentials.md): the name and the key, never the password) | normal |
 | `system` | Security events were dropped (`events_dropped`); notifications were dropped; notifications paused by the hourly cap | high |
 | `approval` | A request is waiting for a person to approve or deny it: **one** prompt per new approval ([approvals.md](approvals.md)). Decisions and expiry are events, not prompts | high |
 
@@ -206,7 +206,12 @@ Still never in it: credential values (none has been read yet), the query string,
 > **Ferrowarden: approval needed**
 > Key "homelab-agent" (id 3f2b8c1e) wants to use proxmox_root for GET pve.example.com:8006/api2/json/nodes. Approve or deny: https://ferrowarden-admin.example.com/approvals/2m3x8Qk0Zr1YtV5pUa9bLw Approval 2m3x8Qk0Zr1YtV5pUa9bLw, open until 12:10 UTC.
 
-In the webhook body the event object has an `approval` member with `id`, `method`, `target`, `path`, `expires_at` and `link` (when set). If an approval is opened and no notifier is configured, Ferrowarden logs a warning once; the admin UI and the admin API still work.
+In the webhook body the event object has an `approval` member with `id`, `kind`, `method`, `target`, `path`, `expires_at` and `link` (when set).
+
+A request to **create a credential** ([managed-credentials.md](managed-credentials.md)) sends the same prompt, in the same category, with what the agent asked for instead of a request: the key, the credential name, the username, the URLs, the length and character set of the password, whether the new item will need approval too, and the collection it goes to. There is no method, target or path (`kind` is `create` and the `approval` member has a `create` object), and no value: none has been generated yet. The names and URLs are chosen by the agent, so they are cleaned like every other field.
+
+> **Ferrowarden: approval needed**
+> Key "homelab-claude" (id 3f2b8c1e) wants to create the credential agent_keycloak_admin with username admin for https://keycloak.example.com in the collection Ferrowarden managed: a 32-character alphanumeric password that Ferrowarden generates and the agent never sees. Approve or deny: https://ferrowarden-admin.example.com/approvals/2m3x8Qk0Zr1YtV5pUa9bLw Approval 2m3x8Qk0Zr1YtV5pUa9bLw, open until 12:10 UTC. If an approval is opened and no notifier is configured, Ferrowarden logs a warning once; the admin UI and the admin API still work.
 
 ## Notifier hosts are off-limits to agents
 

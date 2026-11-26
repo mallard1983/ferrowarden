@@ -785,6 +785,9 @@ pub struct VaultConfig {
     /// because Ferrowarden would hand the password to an agent that the
     /// collection's owner meant to keep from it. `FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS`.
     pub allow_hidden_passwords: bool,
+    /// The one collection Ferrowarden may create items in
+    /// (`[vault.managed]`, docs/managed-credentials.md).
+    pub managed: ManagedConfig,
     /// The native backend's API key (`FERROWARDEN_VAULT_CLIENT_ID[_FILE]`,
     /// `FERROWARDEN_VAULT_CLIENT_SECRET[_FILE]`).
     #[serde(skip)]
@@ -800,8 +803,44 @@ impl Default for VaultConfig {
             url: DEFAULT_VAULT_URL.to_string(),
             ca_file: String::new(),
             allow_hidden_passwords: false,
+            managed: ManagedConfig::default(),
             credentials: VaultCredentials::default(),
         }
+    }
+}
+
+/// The longest `vault.managed.collection` accepted, in characters.
+pub const MAX_MANAGED_COLLECTION_CHARS: usize = 256;
+
+/// `[vault.managed]`: the managed collection (docs/managed-credentials.md).
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct ManagedConfig {
+    /// An organisation collection, by **id** (a UUID) or by **name**: the only
+    /// place Ferrowarden creates items. Unset (the default): creating
+    /// credentials is off. When it is set but the collection cannot be
+    /// written to (missing, "View only", "Hide passwords", an ambiguous
+    /// name), Ferrowarden refuses to start with the vault unlocked from a
+    /// file, and answers create requests `503` otherwise.
+    /// `FERROWARDEN_VAULT__MANAGED__COLLECTION`.
+    pub collection: String,
+}
+
+impl ManagedConfig {
+    /// The collection to use, trimmed; `None` when unset or blank.
+    pub fn setting(&self) -> Option<&str> {
+        Some(self.collection.trim()).filter(|c| !c.is_empty())
+    }
+
+    fn validate(&self) -> FerroResult<()> {
+        let c = self.collection.trim();
+        if c.chars().count() > MAX_MANAGED_COLLECTION_CHARS || c.chars().any(char::is_control) {
+            return Err(FerroError::Config(format!(
+                "vault.managed.collection must be a collection id or name of at most \
+                 {MAX_MANAGED_COLLECTION_CHARS} characters, without control characters"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -880,6 +919,7 @@ impl VaultConfig {
     /// are set but ignored.
     pub(crate) fn validate(&self, bw_serve_url_set: bool) -> FerroResult<Vec<String>> {
         let mut warnings = Vec::new();
+        self.managed.validate()?;
         match self.backend {
             VaultBackend::Native => {
                 validate_vaultwarden_url("vault.url", &self.url)?;

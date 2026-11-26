@@ -132,6 +132,21 @@ const ALL_SENDERS: &str = "all";
 const SESSION_USE_OUTCOMES: [&str; 3] = ["success", "unknown_session", "session_host_not_allowed"];
 /// The values of `ferrowarden_approval_requests_total{outcome}`.
 const APPROVAL_OUTCOMES: [&str; 4] = ["granted", "denied", "expired", "limit_reached"];
+/// The values of `ferrowarden_credential_creates_total{outcome}`: `created`,
+/// or the reason a create request was refused or failed (`other`: any other
+/// reason).
+const CREATE_OUTCOMES: [&str; 10] = [
+    "created",
+    "approval_denied",
+    "approval_pending",
+    "approval_limit_reached",
+    "credential_exists",
+    "managed_collection_unavailable",
+    "credential_create_disabled",
+    "credential_create_out_of_scope",
+    "vault_write_failed",
+    "other",
+];
 /// The values of `ferrowarden_forward_approval_total{result}`: how a request
 /// that needed approval ended at the gate.
 const FORWARD_APPROVAL_RESULTS: [&str; 4] = [
@@ -170,6 +185,7 @@ pub struct Metrics {
     sessions_active: Gauge,
     approval_requests: Family<OutcomeLabels, Counter>,
     forward_approval: Family<ResultLabels, Counter>,
+    credential_creates: Family<OutcomeLabels, Counter>,
     approvals_pending: Gauge,
     approval_grants_active: Gauge,
     /// Only with `metrics.credential_labels = true`.
@@ -220,6 +236,7 @@ impl Metrics {
             sessions_active: Gauge::default(),
             approval_requests: Family::default(),
             forward_approval: Family::default(),
+            credential_creates: Family::default(),
             approvals_pending: Gauge::default(),
             approval_grants_active: Gauge::default(),
             credential_uses: credential_labels.then(Family::default),
@@ -330,6 +347,11 @@ impl Metrics {
             m.forward_approval.clone(),
         );
         registry.register(
+            "credential_creates",
+            "Requests to create a credential, by outcome (created, or the reason it was refused or failed; the generated value is never exported)",
+            m.credential_creates.clone(),
+        );
+        registry.register(
             "approvals_pending",
             "Approvals waiting for a human's decision now (names and ids are never exported)",
             m.approvals_pending.clone(),
@@ -379,6 +401,11 @@ impl Metrics {
         }
         for result in FORWARD_APPROVAL_RESULTS {
             let _ = m.forward_approval.get_or_create(&ResultLabels { result });
+        }
+        for outcome in CREATE_OUTCOMES {
+            let _ = m
+                .credential_creates
+                .get_or_create(&OutcomeLabels { outcome });
         }
 
         Arc::new(Self { registry, ..m })
@@ -626,6 +653,20 @@ impl Consumer {
             Action::ApprovalGranted if !failed => self.approval_outcome("granted"),
             Action::ApprovalDenied if !failed => self.approval_outcome("denied"),
             Action::ApprovalExpired => self.approval_outcome("expired"),
+            Action::CredentialCreate => {
+                let outcome = if failed {
+                    CREATE_OUTCOMES
+                        .into_iter()
+                        .find(|o| *o != "created" && !reason.is_empty() && *o == reason)
+                        .unwrap_or("other")
+                } else {
+                    "created"
+                };
+                self.m
+                    .credential_creates
+                    .get_or_create(&OutcomeLabels { outcome })
+                    .inc();
+            }
             // `metrics_auth` failures are counted where they happen
             // ([`Metrics::count_metrics_auth_failure`]), all of them.
             _ => {}

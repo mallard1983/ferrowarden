@@ -22,7 +22,7 @@
 
 use aes::Aes256;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use cbc::cipher::{block_padding::Pkcs7, BlockModeDecrypt, KeyIvInit};
+use cbc::cipher::{block_padding::Pkcs7, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use hmac::{Hmac, KeyInit, Mac};
 use rsa::{Oaep, PrivateKey};
 use sha2::Sha256;
@@ -63,6 +63,8 @@ pub enum EncError {
     RsaFailure,
     /// The decrypted bytes are not valid UTF-8.
     NotUtf8,
+    /// The operating system's random generator failed (encryption only).
+    Random,
 }
 
 impl EncError {
@@ -77,6 +79,7 @@ impl EncError {
             EncError::MacFailure => "mac_failure",
             EncError::BadPadding | EncError::RsaFailure => "decrypt_failure",
             EncError::NotUtf8 => "invalid_utf8",
+            EncError::Random => "random_failure",
         }
     }
 }
@@ -117,6 +120,23 @@ impl SymKey {
     /// Build a key from the two halves.
     pub fn from_parts(enc: Zeroizing<[u8; 32]>, mac: Zeroizing<[u8; 32]>) -> Self {
         Self { enc, mac }
+    }
+
+    /// A new key: 64 bytes from the operating system's random generator.
+    /// `Err` only if the generator fails; the caller then writes nothing.
+    pub fn generate() -> Result<Self, EncError> {
+        let mut bytes = Zeroizing::new([0u8; 64]);
+        getrandom::fill(&mut *bytes).map_err(|_| EncError::Random)?;
+        Self::from_slice(&*bytes)
+    }
+
+    /// The key as the 64 bytes that are wrapped when it is stored (AES half
+    /// first). In a buffer that is wiped on drop.
+    pub(super) fn to_bytes(&self) -> Zeroizing<[u8; 64]> {
+        let mut out = Zeroizing::new([0u8; 64]);
+        out[..32].copy_from_slice(&*self.enc);
+        out[32..].copy_from_slice(&*self.mac);
+        out
     }
 }
 
@@ -269,6 +289,53 @@ impl EncString {
         };
         out.map(Zeroizing::new).map_err(|_| EncError::RsaFailure)
     }
+}
+
+/// Encrypt `plain` as a type 2 EncString: a fresh random 16-byte IV,
+/// AES-256-CBC with PKCS#7 padding, then HMAC-SHA256 over `iv || ciphertext`
+/// with the MAC key, written as `2.<b64 iv>|<b64 ct>|<b64 mac>`.
+///
+/// This is the only place Ferrowarden encrypts (the write path, see
+/// docs/native-vault.md). Known-answer tests pin it to the outputs of the
+/// independent Node implementation.
+pub fn encrypt(key: &SymKey, plain: &[u8]) -> Result<String, EncError> {
+    let mut iv = [0u8; IV_LEN];
+    getrandom::fill(&mut iv).map_err(|_| EncError::Random)?;
+    encrypt_with_iv(key, iv, plain)
+}
+
+/// [`encrypt`] for text.
+pub fn encrypt_str(key: &SymKey, plain: &str) -> Result<String, EncError> {
+    encrypt(key, plain.as_bytes())
+}
+
+/// [`encrypt`] with the IV given: for known-answer tests. An IV must never be
+/// reused with a key, so nothing outside the tests calls this.
+pub(crate) fn encrypt_with_iv(
+    key: &SymKey,
+    iv: [u8; IV_LEN],
+    plain: &[u8],
+) -> Result<String, EncError> {
+    // The plaintext may be a secret: padded in a buffer that is wiped on drop.
+    let mut buf = Zeroizing::new(vec![0u8; plain.len() + AES_BLOCK]);
+    buf[..plain.len()].copy_from_slice(plain);
+    // The buffer has a whole block of room, which is all PKCS#7 needs.
+    let len = cbc::Encryptor::<Aes256>::new(&(*key.enc).into(), &iv.into())
+        .encrypt_padded::<Pkcs7>(&mut buf, plain.len())
+        .map_err(|_| EncError::BadLength)?
+        .len();
+    let ct = &buf[..len];
+    let mut mac =
+        <Hmac<Sha256> as KeyInit>::new_from_slice(&*key.mac).map_err(|_| EncError::KeyLength)?;
+    mac.update(&iv);
+    mac.update(ct);
+    let mac = mac.finalize().into_bytes();
+    Ok(format!(
+        "2.{}|{}|{}",
+        STANDARD.encode(iv),
+        STANDARD.encode(ct),
+        STANDARD.encode(mac)
+    ))
 }
 
 /// Convert decrypted bytes to text without leaving a copy behind.

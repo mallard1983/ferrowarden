@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 use crate::config::{Config, VaultBackend};
 use crate::error::FerroResult;
 
-pub use model::{Builtin, CredentialMap, Listing, VaultStatus};
+pub use model::{Builtin, CredentialMap, Listing, ManagedState, NewLogin, VaultStatus};
 pub use unlock::read_password_file;
 
 /// What a vault backend offers the rest of Ferrowarden.
@@ -65,6 +65,17 @@ pub trait Vault: Send + Sync {
     /// login username or password they point at.
     async fn get_field(&self, id: &str, field: &str, label: &str)
         -> FerroResult<Zeroizing<String>>;
+
+    /// Where `vault.managed.collection` stands as of the last sync: off,
+    /// writable, or unavailable with the reason. `Err(VaultLocked)` when the
+    /// vault is locked.
+    async fn managed_collection(&self) -> FerroResult<ManagedState>;
+
+    /// Create one login item in the managed collection and return the id the
+    /// server gave it. Refuses (without writing) when the vault is locked or
+    /// the managed collection is not usable: it never falls back to another
+    /// collection or the personal vault. The caller syncs afterwards.
+    async fn create_login(&self, new: NewLogin) -> FerroResult<String>;
 }
 
 /// The backend chosen at startup by `vault.backend`.
@@ -74,7 +85,7 @@ pub enum ActiveVault {
     /// Vaultwarden. Compiled only into the test build; no configuration value
     /// selects it, and [`ActiveVault::from_config`] never builds it.
     #[cfg(test)]
-    Fake(fake::FakeVault),
+    Fake(Box<fake::FakeVault>),
 }
 
 impl ActiveVault {
@@ -97,7 +108,10 @@ macro_rules! delegate {
                 $call
             }
             #[cfg(test)]
-            ActiveVault::Fake($v) => $call,
+            ActiveVault::Fake(boxed) => {
+                let $v: &fake::FakeVault = boxed;
+                $call
+            }
         }
     };
 }
@@ -147,5 +161,13 @@ impl Vault for ActiveVault {
         label: &str,
     ) -> FerroResult<Zeroizing<String>> {
         delegate!(self, v => Vault::get_field(v, id, field, label).await)
+    }
+
+    async fn managed_collection(&self) -> FerroResult<ManagedState> {
+        delegate!(self, v => Vault::managed_collection(v).await)
+    }
+
+    async fn create_login(&self, new: NewLogin) -> FerroResult<String> {
+        delegate!(self, v => Vault::create_login(v, new).await)
     }
 }

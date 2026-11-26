@@ -77,6 +77,8 @@ pub struct CreateKeyResponse {
     pub methods: Vec<String>,
     /// Credential patterns that need a human's approval for this key.
     pub approval: Vec<String>,
+    /// Credential name patterns the key may create in the managed collection.
+    pub create: Vec<String>,
     pub policy_set: bool,
 }
 
@@ -92,6 +94,9 @@ pub struct KeySummary {
     /// Credential patterns that need a human's approval for this key
     /// (`["*"]` = every credential, `[]` = no extra requirement).
     pub approval: Vec<String>,
+    /// Credential name patterns the key may create in the managed collection
+    /// (`["*"]` = any name, `[]` = none).
+    pub create: Vec<String>,
     /// False for a key created with 0.1.0 that has no policy yet: it is
     /// deny-all until one is set with PATCH.
     pub policy_set: bool,
@@ -106,6 +111,7 @@ impl KeySummary {
             credentials: k.policy.credentials.clone(),
             methods: k.policy.methods.clone(),
             approval: k.policy.approval.clone(),
+            create: k.policy.create.clone(),
             policy_set: k.policy_set,
         }
     }
@@ -205,8 +211,9 @@ pub async fn create_key(
     credentials: Vec<String>,
     methods: Vec<String>,
     approval: Vec<String>,
+    create: Vec<String>,
 ) -> FerroResult<CreateKeyResponse> {
-    match create_key_inner(state, name, credentials, methods, approval).await {
+    match create_key_inner(state, name, credentials, methods, approval, create).await {
         Ok(created) => {
             // The token itself never leaves the response: only id + name.
             state.events.emit(
@@ -217,7 +224,8 @@ pub async fn create_key(
                     .detail_str("key_name", &created.name)
                     .detail("credentials", created.credentials.clone())
                     .detail("methods", created.methods.clone())
-                    .detail("approval", created.approval.clone()),
+                    .detail("approval", created.approval.clone())
+                    .detail("create", created.create.clone()),
             );
             Ok(created)
         }
@@ -239,6 +247,7 @@ async fn create_key_inner(
     credentials: Vec<String>,
     methods: Vec<String>,
     approval: Vec<String>,
+    create: Vec<String>,
 ) -> FerroResult<CreateKeyResponse> {
     let id = Uuid::new_v4().to_string();
     let token = generate_token();
@@ -252,7 +261,7 @@ async fn create_key_inner(
         ));
     }
 
-    let policy = KeyPolicy::from_raw(credentials, methods, approval)?;
+    let policy = KeyPolicy::from_raw(credentials, methods, approval, create)?;
 
     // Serialize key-file updates: without this, two concurrent creates (or a
     // create and a revoke) can each read the old file and drop the other's change.
@@ -297,6 +306,7 @@ async fn create_key_inner(
         credentials: policy.credentials,
         methods: policy.methods,
         approval: policy.approval,
+        create: policy.create,
         policy_set: true,
     })
 }
@@ -407,8 +417,9 @@ pub async fn patch_key(
     credentials: Patch<Vec<String>>,
     methods: Patch<Vec<String>>,
     approval: Patch<Vec<String>>,
+    create: Patch<Vec<String>>,
 ) -> FerroResult<PolicyChange> {
-    match patch_key_inner(state, id, credentials, methods, approval).await {
+    match patch_key_inner(state, id, credentials, methods, approval, create).await {
         Ok(change) => {
             state.events.emit(
                 caller
@@ -440,10 +451,13 @@ async fn patch_key_inner(
     credentials: Patch<Vec<String>>,
     methods: Patch<Vec<String>>,
     approval: Patch<Vec<String>>,
+    create: Patch<Vec<String>>,
 ) -> FerroResult<PolicyChange> {
-    if credentials.is_absent() && methods.is_absent() && approval.is_absent() {
+    if credentials.is_absent() && methods.is_absent() && approval.is_absent() && create.is_absent()
+    {
         return Err(FerroError::InvalidRequest(
-            "nothing to change: send `credentials`, `methods` and/or `approval`".to_string(),
+            "nothing to change: send `credentials`, `methods`, `approval` and/or `create`"
+                .to_string(),
         ));
     }
 
@@ -458,7 +472,7 @@ async fn patch_key_inner(
         .map(|k| (k.name.clone(), k.policy.clone()))
         .ok_or(FerroError::AgentKeyNotFound)?;
     // Absent fields keep the current value; on a legacy key that is deny-all.
-    let after = before.patched(credentials, methods, approval)?;
+    let after = before.patched(credentials, methods, approval, create)?;
 
     // Persist first, so a failed write leaves memory and disk consistent. The
     // entry is saved with both fields explicit, which also marks a legacy key
@@ -509,6 +523,7 @@ async fn patch_key_inner(
 
 /// Show what a draft policy would allow, without saving anything, reading any
 /// credential value or sending anything. Emits `policy_preview`.
+#[allow(clippy::too_many_arguments)] // the id, the four policy lists and the request
 pub async fn preview_key(
     state: &Arc<AppState>,
     caller: Caller<'_>,
@@ -516,9 +531,10 @@ pub async fn preview_key(
     credentials: Patch<Vec<String>>,
     methods: Patch<Vec<String>>,
     approval: Patch<Vec<String>>,
+    create: Patch<Vec<String>>,
     request: Option<&ProxyRequest>,
 ) -> FerroResult<Preview> {
-    match compute_preview(state, id, credentials, methods, approval, request).await {
+    match compute_preview(state, id, credentials, methods, approval, create, request).await {
         Ok(preview) => {
             state.events.emit(
                 caller
@@ -551,6 +567,7 @@ pub async fn compute_preview(
     credentials: Patch<Vec<String>>,
     methods: Patch<Vec<String>>,
     approval: Patch<Vec<String>>,
+    create: Patch<Vec<String>>,
     request: Option<&ProxyRequest>,
 ) -> FerroResult<Preview> {
     let key = state
@@ -563,7 +580,7 @@ pub async fn compute_preview(
         .ok_or(FerroError::AgentKeyNotFound)?;
     let saved = key.policy.clone();
     // Absent fields fall back to the saved value.
-    let draft = saved.patched(credentials, methods, approval)?;
+    let draft = saved.patched(credentials, methods, approval, create)?;
 
     // Like GET /v1/credentials, but a locked vault is fine while a credential
     // cache exists: only names and metadata are used, never values.

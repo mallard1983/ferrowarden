@@ -149,6 +149,7 @@ fn expected_class(action: Action, outcome: Outcome, reason: Option<Reason>) -> O
         KeyCreate if ok => Some(Class::KeyCreate),
         KeyRevoke if ok => Some(Class::KeyRevoke),
         KeyPolicyChange if ok => Some(Class::KeyPolicyChange),
+        CredentialCreate if ok => Some(Class::CredentialCreated),
         EventsDropped => Some(Class::EventsDropped),
         ApprovalRequested if ok => Some(Class::ApprovalRequested),
         _ => None,
@@ -1728,6 +1729,8 @@ fn pending_view(url: &str) -> crate::approvals::PendingView {
         .with_timezone(&chrono::Utc);
     PendingView {
         id: "Zm9vYmFyMTIzNDU2Nzg5MA".into(),
+        kind: crate::approvals::ApprovalKind::Forward,
+        create: None,
         key_id: "11111111-1111-1111-1111-111111111111".into(),
         key_name: "monitoring-agent".into(),
         items: vec![
@@ -1963,4 +1966,158 @@ fn an_approval_id_keeps_its_url_safe_characters() {
     let ev = crate::approvals::requested_event(&ctx_from("172.20.0.5"), &v, None);
     let f = EventFields::from_event(Category::Approval, &ev, 1);
     assert_eq!(f.approval.unwrap().id, "Ab-_9zZ-_Q0123456789abcd");
+}
+
+// ── Create prompts and the creation notice ────────────────────────────────────
+
+fn create_view() -> crate::approvals::PendingView {
+    use crate::approvals::{ApprovalKind, ApprovalNeed, CreateDetail, PendingView, Reasons};
+    let now = chrono::DateTime::parse_from_rfc3339("2026-11-26T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    PendingView {
+        id: "Y3JlYXRlYXBwcm92YWwxMg".into(),
+        kind: ApprovalKind::Create,
+        key_id: "11111111-1111-1111-1111-111111111111".into(),
+        key_name: "homelab-claude".into(),
+        items: vec![ApprovalNeed {
+            item: "agent_keycloak_admin".into(),
+            reasons: Reasons::default(),
+        }],
+        create: Some(CreateDetail {
+            name: "agent_keycloak_admin".into(),
+            username: Some("admin".into()),
+            uris: vec![
+                "https://keycloak.example.com".into(),
+                "https://sso.example.com:8443".into(),
+            ],
+            charset: "ascii".into(),
+            length: 48,
+            approval_required: true,
+            collection: "Ferrowarden managed".into(),
+        }),
+        method: String::new(),
+        scheme: String::new(),
+        host: String::new(),
+        port: 0,
+        url: String::new(),
+        request_id: "0193abcd-0000-7000-8000-000000000002".into(),
+        created: now,
+        expires: now + chrono::Duration::minutes(10),
+    }
+}
+
+fn create_prompt(view: &crate::approvals::PendingView, link: Option<&str>) -> Notification {
+    let ev =
+        crate::approvals::requested_event(&ctx_from("172.20.0.5"), view, link.map(str::to_string));
+    let (mut e, _) = engine();
+    let mut out = e.process(Instant::now(), &ev);
+    assert_eq!(out.len(), 1, "one prompt per new approval");
+    out.remove(0)
+}
+
+#[test]
+fn a_create_prompt_says_what_will_be_made_and_that_the_agent_never_sees_it() {
+    let link = "https://fw.example.com/approvals/Y3JlYXRlYXBwcm92YWwxMg";
+    let n = create_prompt(&create_view(), Some(link));
+    assert_eq!(n.category, Category::Approval);
+    assert_eq!(n.title, "Ferrowarden: approval needed");
+    assert_eq!(n.severity, Severity::High);
+    let m = &n.message;
+    assert!(m.contains("Key \"homelab-claude\" (id 11111111)"), "{m}");
+    assert!(
+        m.contains("create the credential agent_keycloak_admin"),
+        "{m}"
+    );
+    assert!(m.contains("with username admin"), "{m}");
+    assert!(
+        m.contains("https://keycloak.example.com and https://sso.example.com:8443"),
+        "{m}"
+    );
+    assert!(m.contains("collection Ferrowarden managed"), "{m}");
+    assert!(m.contains("48-character ascii password"), "{m}");
+    assert!(m.contains("the agent never sees"), "{m}");
+    assert!(m.contains("Using it will need approval too."), "{m}");
+    assert!(m.contains(&format!("Approve or deny: {link}")), "{m}");
+    assert!(m.contains("Approval Y3JlYXRlYXBwcm92YWwxMg"), "{m}");
+    assert!(m.contains("open until 12:10 UTC"), "{m}");
+
+    // The webhook event carries the kind and the create fields.
+    let a = &n.webhook_body()["event"]["approval"];
+    assert_eq!(a["kind"], "create");
+    assert_eq!(a["id"], "Y3JlYXRlYXBwcm92YWwxMg");
+    assert_eq!(a["create"]["name"], "agent_keycloak_admin");
+    assert_eq!(a["create"]["username"], "admin");
+    assert_eq!(a["create"]["length"], 48);
+    assert_eq!(a["create"]["charset"], "ascii");
+    assert_eq!(a["create"]["approval_required"], true);
+    assert_eq!(a["create"]["collection"], "Ferrowarden managed");
+    assert_eq!(a["create"]["uris"][1], "https://sso.example.com:8443");
+    assert!(a.get("link").is_some());
+}
+
+#[test]
+fn a_create_prompt_without_a_username_or_flag_leaves_them_out() {
+    let mut v = create_view();
+    let c = v.create.as_mut().unwrap();
+    c.username = None;
+    c.approval_required = false;
+    let n = create_prompt(&v, None);
+    assert!(!n.message.contains("with username"), "{}", n.message);
+    assert!(!n.message.contains("need approval too"), "{}", n.message);
+    assert!(
+        n.message.contains("Open the Approvals page"),
+        "{}",
+        n.message
+    );
+    let a = &n.webhook_body()["event"]["approval"];
+    assert!(a["create"].get("username").is_none());
+}
+
+#[test]
+fn a_create_prompt_cleans_what_an_agent_chose() {
+    let mut v = create_view();
+    let c = v.create.as_mut().unwrap();
+    c.name = "evil\n{{vault:x}}<b>".into();
+    c.username = Some("a\u{202e}b\n".into());
+    c.uris = vec!["https://h.example/\n\u{202e}x".into()];
+    let n = create_prompt(&v, None);
+    let wire = serde_json::to_string(&n.webhook_body()).unwrap();
+    for bad in ["\n", "\u{202e}", "{{", "<b>"] {
+        assert!(!n.message.contains(bad), "{bad:?} in {}", n.message);
+        assert!(!wire.contains(bad), "{bad:?} in {wire}");
+    }
+}
+
+#[test]
+fn a_created_credential_is_an_admin_notice_with_no_value() {
+    let ev = SecurityEvent::new(Action::CredentialCreate)
+        .request(&ctx_from("172.20.0.5"))
+        .key_named("11111111-1111-1111-1111-111111111111", "homelab-claude")
+        .credentials(["agent_keycloak_admin"])
+        .detail("collection_id", "6c0d7f0e-52d0-4b5b-8a39-0e8a7f6d5c4b");
+    assert_eq!(classify(&ev), Some(Class::CredentialCreated));
+    assert_eq!(Class::CredentialCreated.category(), Category::Admin);
+    // Opt-in: `admin` is not among the default categories.
+    assert!(!Category::DEFAULT.contains(&Category::Admin));
+
+    let (mut e, _) = engine_with(settings(&[Category::Admin]));
+    let out = e.process(Instant::now(), &ev);
+    assert_eq!(out.len(), 1);
+    let n = &out[0];
+    assert_eq!(n.title, "Ferrowarden: credential created");
+    assert_eq!(n.severity, Severity::Normal);
+    assert!(
+        n.message.contains("agent_keycloak_admin was created by"),
+        "{}",
+        n.message
+    );
+    assert!(n.message.contains("homelab-claude"), "{}", n.message);
+    assert!(n.message.contains("no one has seen it"), "{}", n.message);
+    // A failed create is not announced.
+    let failed = ev
+        .clone()
+        .outcome(Outcome::Failure)
+        .reason(Reason::CredentialExists);
+    assert_eq!(classify(&failed), None);
 }

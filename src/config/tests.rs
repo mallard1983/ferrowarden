@@ -1558,3 +1558,72 @@ fn the_approval_category_is_valid_and_on_by_default() {
         .categories()
         .contains(crate::notify::Category::Approval));
 }
+
+// ── The managed collection ────────────────────────────────────────────────────
+
+fn config_from_env(pairs: &[(&str, &str)]) -> Config {
+    let mut env = std::collections::HashMap::new();
+    env.insert("FERROWARDEN_UNLOCK_MODE".to_string(), "manual".to_string());
+    for (k, v) in pairs {
+        env.insert((*k).to_string(), (*v).to_string());
+    }
+    config::Config::builder()
+        .add_source(
+            config::Environment::with_prefix("FERROWARDEN")
+                .prefix_separator("_")
+                .separator("__")
+                .ignore_empty(true)
+                .source(Some(env)),
+        )
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap()
+}
+
+#[test]
+fn the_managed_collection_is_off_unless_set() {
+    assert_eq!(VaultConfig::default().managed.setting(), None);
+    assert_eq!(ManagedConfig::default().collection, "");
+    let empty: VaultConfig = serde_json::from_str("{}").unwrap();
+    assert_eq!(empty.managed.setting(), None);
+    // Blank is unset.
+    let blank = ManagedConfig {
+        collection: "  \t ".to_string(),
+    };
+    assert_eq!(blank.setting(), None);
+}
+
+#[test]
+fn the_managed_collection_comes_from_the_file_or_the_environment() {
+    let from_file: VaultConfig =
+        serde_json::from_str(r#"{"managed":{"collection":" Ferrowarden managed "}}"#).unwrap();
+    assert_eq!(from_file.managed.setting(), Some("Ferrowarden managed"));
+
+    let cfg = config_from_env(&[(
+        "FERROWARDEN_VAULT__MANAGED__COLLECTION",
+        "0f9b3a52-1c1e-4a0e-9d57-1a2b3c4d5e6f",
+    )]);
+    assert_eq!(
+        cfg.vault.managed.setting(),
+        Some("0f9b3a52-1c1e-4a0e-9d57-1a2b3c4d5e6f")
+    );
+    // Unset in the environment: still off.
+    assert_eq!(config_from_env(&[]).vault.managed.setting(), None);
+}
+
+#[test]
+fn the_managed_collection_setting_is_bounded() {
+    let check = |collection: &str| {
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.vault.managed.collection = collection.to_string();
+        cfg.validate()
+    };
+    assert!(check("").is_ok());
+    assert!(check("Ferrowarden managed").is_ok());
+    assert!(check(&"x".repeat(MAX_MANAGED_COLLECTION_CHARS)).is_ok());
+    let e = check(&"x".repeat(MAX_MANAGED_COLLECTION_CHARS + 1)).unwrap_err();
+    assert!(e.to_string().contains("vault.managed.collection"), "{e}");
+    assert!(check("a\u{7}b").is_err());
+    assert!(check("a\nb").is_err());
+}

@@ -62,6 +62,7 @@ fn all_actions_are_listed() {
             Action::ApprovalExpired => 33,
             Action::GrantRevoked => 34,
             Action::GrantExpired => 35,
+            Action::CredentialCreate => 36,
         }
     }
     for (i, a) in Action::ALL.into_iter().enumerate() {
@@ -354,6 +355,20 @@ fn reason_codes_are_the_documented_snake_case_list() {
         (Reason::ApprovalPending, "approval_pending"),
         (Reason::ApprovalDenied, "approval_denied"),
         (Reason::ApprovalLimitReached, "approval_limit_reached"),
+        (Reason::CredentialExists, "credential_exists"),
+        (
+            Reason::ManagedCollectionUnavailable,
+            "managed_collection_unavailable",
+        ),
+        (
+            Reason::CredentialCreateDisabled,
+            "credential_create_disabled",
+        ),
+        (
+            Reason::CredentialCreateOutOfScope,
+            "credential_create_out_of_scope",
+        ),
+        (Reason::VaultWriteFailed, "vault_write_failed"),
     ];
     assert_eq!(all.len(), Reason::ALL.len());
     for ((reason, code), listed) in all.into_iter().zip(Reason::ALL) {

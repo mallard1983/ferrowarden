@@ -61,6 +61,8 @@ pub enum Class {
     EventsDropped,
     /// A request is waiting for a human to approve it.
     ApprovalRequested,
+    /// An agent key created a credential.
+    CredentialCreated,
 }
 
 impl Class {
@@ -72,9 +74,11 @@ impl Class {
             | Class::VaultUnlockFailed
             | Class::VaultSyncFailed
             | Class::VaultUnlockOk => Category::Vault,
-            Class::KeyCreate | Class::KeyRevoke | Class::KeyPolicyChange | Class::UiLoginOk => {
-                Category::Admin
-            }
+            Class::KeyCreate
+            | Class::KeyRevoke
+            | Class::KeyPolicyChange
+            | Class::UiLoginOk
+            | Class::CredentialCreated => Category::Admin,
             Class::EventsDropped => Category::System,
             Class::ApprovalRequested => Category::Approval,
         }
@@ -115,6 +119,7 @@ pub fn classify(event: &SecurityEvent) -> Option<Class> {
         Action::KeyCreate if e.outcome == Outcome::Success => Some(Class::KeyCreate),
         Action::KeyRevoke if e.outcome == Outcome::Success => Some(Class::KeyRevoke),
         Action::KeyPolicyChange if e.outcome == Outcome::Success => Some(Class::KeyPolicyChange),
+        Action::CredentialCreate if e.outcome == Outcome::Success => Some(Class::CredentialCreated),
         Action::EventsDropped => Some(Class::EventsDropped),
         Action::ApprovalRequested if e.outcome == Outcome::Success => {
             Some(Class::ApprovalRequested)
@@ -264,6 +269,7 @@ impl Engine {
             Class::KeyRevoke => (key_subject, Kind::KeyRevoked, 1, false),
             Class::KeyPolicyChange => (key_subject, Kind::KeyPolicyChanged, 1, false),
             Class::UiLoginOk => ("ui_login".to_string(), Kind::UiSignIn, 1, false),
+            Class::CredentialCreated => (key_subject, Kind::CredentialCreated, 1, false),
             Class::EventsDropped => (
                 "system".to_string(),
                 Kind::EventsDropped,

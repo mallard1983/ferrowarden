@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
 use super::enc::test_support::encrypt2;
-use super::enc::SymKey;
+use super::enc::{EncString, SymKey};
 use super::keys::stretch;
 use super::*;
 use crate::config::{Config, VaultBackend, VaultConfig, VaultCredentials};
@@ -31,6 +31,7 @@ const PASSWORD: &str = "correct horse battery";
 const KDF: Kdf = Kdf::Pbkdf2 { iterations: 5000 };
 const CLIENT_ID: &str = "user.11111111-2222-3333-4444-555555555555";
 const CLIENT_SECRET: &str = "api-secret-for-tests";
+const USER_ID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
 fn unhex(s: &str) -> Vec<u8> {
     (0..s.len())
@@ -149,6 +150,16 @@ struct Mock {
     last_version: String,
     /// The `Kdf*` members of the token response; PBKDF2 when `None`.
     kdf: Option<Value>,
+    /// The `collections` of `/api/sync`.
+    collections: Vec<Value>,
+    /// The bodies `POST /api/ciphers/create` received, in order.
+    created: Vec<Value>,
+    /// Answer `POST /api/ciphers/create` with this status instead of 200.
+    create_status: Option<u16>,
+    /// Answer the next create call with 401.
+    create_reject_once: bool,
+    /// The `Authorization` headers of the create calls.
+    create_auth: Vec<String>,
 }
 
 type Shared = Arc<Mutex<Mock>>;
@@ -219,13 +230,37 @@ async fn sync(AxState(m): AxState<Shared>, headers: HeaderMap) -> Response {
     Json(json!({
         "object": "sync",
         "profile": {
+            "id": USER_ID,
             "email": EMAIL, "key": m.profile_key, "privateKey": m.private_key,
             "securityStamp": m.stamp,
             "organizations": [{"id": "org1", "key": m.org_key}]
         },
-        "ciphers": m.ciphers, "folders": [], "collections": []
+        "ciphers": m.ciphers, "folders": [], "collections": m.collections
     }))
     .into_response()
+}
+
+async fn create_cipher(
+    AxState(m): AxState<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut m = m.lock().unwrap();
+    m.create_auth.push(
+        headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string(),
+    );
+    if std::mem::take(&mut m.create_reject_once) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(status) = m.create_status {
+        return StatusCode::from_u16(status).unwrap().into_response();
+    }
+    m.created.push(body);
+    Json(json!({"id": format!("new-{}", m.created.len()), "object": "cipher"})).into_response()
 }
 
 async fn profile(AxState(m): AxState<Shared>, headers: HeaderMap) -> Response {
@@ -275,6 +310,7 @@ async fn harness_full(
         .route("/identity/connect/token", post(token))
         .route("/api/accounts/revision-date", get(revision_date))
         .route("/api/sync", get(sync))
+        .route("/api/ciphers/create", post(create_cipher))
         .route("/api/accounts/profile", get(profile))
         .with_state(mock.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -287,6 +323,7 @@ async fn harness_full(
             url: format!("http://{addr}"),
             ca_file: String::new(),
             allow_hidden_passwords,
+            managed: Default::default(),
             credentials: VaultCredentials {
                 client_id: Some(Zeroizing::new(CLIENT_ID.into())),
                 client_secret: Some(Zeroizing::new(CLIENT_SECRET.into())),
@@ -457,6 +494,7 @@ async fn a_rejected_api_key_is_an_unlock_failure() {
         url: h.vault.api_base_for_tests(),
         ca_file: String::new(),
         allow_hidden_passwords: false,
+        managed: Default::default(),
         credentials: VaultCredentials {
             client_id: Some(Zeroizing::new(CLIENT_ID.into())),
             client_secret: Some(Zeroizing::new("wrong".into())),
@@ -1030,6 +1068,7 @@ async fn webvault_vault_from(token: &str, sync: &str, allow_hidden_passwords: bo
             url: format!("http://{addr}"),
             ca_file: String::new(),
             allow_hidden_passwords,
+            managed: Default::default(),
             credentials: VaultCredentials {
                 client_id: Some(Zeroizing::new(CLIENT_ID.into())),
                 client_secret: Some(Zeroizing::new(CLIENT_SECRET.into())),
@@ -1347,4 +1386,315 @@ async fn the_sync_reports_misspelt_approval_fields_once() {
     assert!(["guarded", "typo", "blank"]
         .iter()
         .all(|n| map[*n][0].approval_required));
+}
+
+// ── The managed collection and the write path ─────────────────────────────────
+
+const COLL_MANAGED: &str = "0f9b3a52-1c1e-4a0e-9d57-1a2b3c4d5e6f";
+const COLL_OTHER: &str = "6c0d7f0e-52d0-4b5b-8a39-0e8a7f6d5c4b";
+
+fn raw_collection(a: &Account, id: &str, name: &str, read_only: bool, hide: bool) -> Value {
+    json!({
+        "id": id, "organizationId": "org1", "name": enc(&a.org, name),
+        "readOnly": read_only, "hidePasswords": hide, "manage": !read_only,
+        "externalId": null, "object": "collectionDetails"
+    })
+}
+
+/// A vault with two writable collections in the organisation, the managed
+/// one holding the item `orgitem` (c3).
+async fn managed_harness(setting: &str) -> Harness {
+    let mut h = harness().await;
+    {
+        let mut m = h.mock.lock().unwrap();
+        m.collections = vec![
+            raw_collection(&h.acct, COLL_OTHER, "Other", false, false),
+            raw_collection(&h.acct, COLL_MANAGED, "Ferrowarden managed", false, false),
+        ];
+        for c in &mut m.ciphers {
+            if c["id"] == "c3" {
+                c["collectionIds"] = json!([COLL_MANAGED]);
+            }
+            if c["id"] == "c4" {
+                c["collectionIds"] = json!([COLL_OTHER]);
+            }
+        }
+    }
+    h.config.vault.managed.collection = setting.to_string();
+    h.vault = NativeVault::new(&h.config).unwrap();
+    h
+}
+
+fn new_login() -> NewLogin {
+    NewLogin {
+        name: "agent_keycloak_admin".into(),
+        username: Some("admin".into()),
+        uris: vec!["https://keycloak.example.com".into()],
+        password: Zeroizing::new("GENERATED-VALUE-0123456789".to_string()),
+        created_by: "homelab-claude".into(),
+        approval_required: false,
+    }
+}
+
+fn set_collection(h: &Harness, id: &str, read_only: bool, hide: bool) {
+    let mut m = h.mock.lock().unwrap();
+    for c in &mut m.collections {
+        if c["id"] == id {
+            c["readOnly"] = json!(read_only);
+            c["hidePasswords"] = json!(hide);
+        }
+    }
+    m.revision += 1;
+}
+
+#[tokio::test]
+async fn the_managed_collection_is_found_by_name_or_id_at_unlock() {
+    for setting in ["Ferrowarden managed", COLL_MANAGED] {
+        let h = managed_harness(setting).await;
+        assert!(matches!(
+            h.vault.managed_collection().await,
+            Err(FerroError::VaultLocked)
+        ));
+        h.vault.unlock(pw()).await.unwrap();
+        match h.vault.managed_collection().await.unwrap() {
+            ManagedState::Usable(c) => {
+                assert_eq!(c.id, COLL_MANAGED, "{setting}");
+                assert_eq!(c.organization_id, "org1");
+                assert_eq!(c.name, "Ferrowarden managed");
+                // Its items are counted from the cipher's `collectionIds`:
+                // c3 is in it, c4 is in the other one.
+                assert_eq!(c.items, 1, "{setting}");
+            }
+            other => panic!("{setting}: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn without_the_setting_creating_is_off_and_nothing_is_sent() {
+    let h = managed_harness("").await;
+    h.vault.unlock(pw()).await.unwrap();
+    assert_eq!(
+        h.vault.managed_collection().await.unwrap(),
+        ManagedState::Off
+    );
+    let e = h.vault.create_login(new_login()).await.unwrap_err();
+    assert!(matches!(e, FerroError::CredentialCreateDisabled), "{e}");
+    assert!(
+        h.mock.lock().unwrap().create_auth.is_empty(),
+        "no request was made"
+    );
+}
+
+#[tokio::test]
+async fn a_locked_vault_refuses_to_write() {
+    let h = managed_harness(COLL_MANAGED).await;
+    let e = h.vault.create_login(new_login()).await.unwrap_err();
+    assert!(matches!(e, FerroError::VaultLocked), "{e}");
+    assert!(h.mock.lock().unwrap().create_auth.is_empty());
+}
+
+#[tokio::test]
+async fn a_view_only_or_hiding_collection_is_unavailable_and_refuses_writes() {
+    for (read_only, hide, problem) in [
+        (true, false, ManagedProblem::ReadOnly),
+        (false, true, ManagedProblem::HidesPasswords),
+    ] {
+        let h = managed_harness(COLL_MANAGED).await;
+        set_collection(&h, COLL_MANAGED, read_only, hide);
+        h.vault.unlock(pw()).await.unwrap();
+        match h.vault.managed_collection().await.unwrap() {
+            ManagedState::Unavailable {
+                problem: p,
+                setting,
+            } => {
+                assert_eq!(p, problem);
+                assert_eq!(setting, COLL_MANAGED);
+            }
+            other => panic!("{other:?}"),
+        }
+        let e = h.vault.create_login(new_login()).await.unwrap_err();
+        assert!(
+            matches!(e, FerroError::ManagedCollectionUnavailable(p) if p == problem),
+            "{e}"
+        );
+        assert!(
+            h.mock.lock().unwrap().create_auth.is_empty(),
+            "nothing was sent"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_missing_or_ambiguous_collection_is_unavailable() {
+    let h = managed_harness("No such collection").await;
+    h.vault.unlock(pw()).await.unwrap();
+    assert!(matches!(
+        h.vault.managed_collection().await.unwrap(),
+        ManagedState::Unavailable {
+            problem: ManagedProblem::NotFound,
+            ..
+        }
+    ));
+
+    let h = managed_harness("Other").await;
+    {
+        let mut m = h.mock.lock().unwrap();
+        let dup = raw_collection(
+            &h.acct,
+            "11111111-1111-4111-8111-111111111111",
+            "Other",
+            false,
+            false,
+        );
+        m.collections.push(dup);
+    }
+    h.vault.unlock(pw()).await.unwrap();
+    assert!(matches!(
+        h.vault.managed_collection().await.unwrap(),
+        ManagedState::Unavailable {
+            problem: ManagedProblem::Ambiguous,
+            ..
+        }
+    ));
+    let e = h.vault.create_login(new_login()).await.unwrap_err();
+    assert!(matches!(
+        e,
+        FerroError::ManagedCollectionUnavailable(ManagedProblem::Ambiguous)
+    ));
+}
+
+#[tokio::test]
+async fn the_state_is_evaluated_again_on_every_sync() {
+    let h = managed_harness(COLL_MANAGED).await;
+    h.vault.unlock(pw()).await.unwrap();
+    assert!(matches!(
+        h.vault.managed_collection().await.unwrap(),
+        ManagedState::Usable(_)
+    ));
+    // The owner takes edit rights away: the next sync notices, and writes stop.
+    set_collection(&h, COLL_MANAGED, true, false);
+    h.vault.sync().await.unwrap();
+    assert!(matches!(
+        h.vault.managed_collection().await.unwrap(),
+        ManagedState::Unavailable {
+            problem: ManagedProblem::ReadOnly,
+            ..
+        }
+    ));
+    assert!(h.vault.create_login(new_login()).await.is_err());
+    assert!(h.mock.lock().unwrap().created.is_empty());
+    // And back.
+    set_collection(&h, COLL_MANAGED, false, false);
+    h.vault.sync().await.unwrap();
+    assert!(matches!(
+        h.vault.managed_collection().await.unwrap(),
+        ManagedState::Usable(_)
+    ));
+}
+
+#[tokio::test]
+async fn a_create_is_posted_to_the_managed_collection_and_nowhere_else() {
+    let h = managed_harness("Ferrowarden managed").await;
+    h.vault.unlock(pw()).await.unwrap();
+    let id = h.vault.create_login(new_login()).await.unwrap();
+    assert_eq!(id, "new-1");
+
+    let m = h.mock.lock().unwrap();
+    assert_eq!(m.created.len(), 1);
+    let body = &m.created[0];
+    // Exactly the managed collection (not the other writable one), and its
+    // organisation.
+    assert_eq!(body["collectionIds"], json!([COLL_MANAGED]));
+    assert_eq!(body["cipher"]["organizationId"], "org1");
+    assert_eq!(body["cipher"]["encryptedFor"], USER_ID);
+    assert!(body.as_object().unwrap().len() == 2);
+    // With the session's bearer token.
+    assert!(m.create_auth[0].starts_with("Bearer token-"));
+
+    // Everything in it opens with the item key, which opens with the
+    // organisation key; none of it is readable text.
+    let text = body.to_string();
+    for plain in [
+        "GENERATED-VALUE-0123456789",
+        "keycloak",
+        "agent_keycloak_admin",
+        "homelab-claude",
+    ] {
+        assert!(!text.contains(plain), "{plain}");
+    }
+    let c = &body["cipher"];
+    let item_key = super::keys::unwrap_sym_key(&h.acct.org, c["key"].as_str().unwrap()).unwrap();
+    let open = |v: &Value| {
+        EncString::parse(v.as_str().unwrap())
+            .unwrap()
+            .decrypt_string(&item_key)
+            .unwrap()
+            .as_str()
+            .to_string()
+    };
+    assert_eq!(open(&c["name"]), "agent_keycloak_admin");
+    assert_eq!(open(&c["login"]["password"]), "GENERATED-VALUE-0123456789");
+    assert_eq!(open(&c["login"]["username"]), "admin");
+    assert_eq!(open(&c["fields"][0]["name"]), "ferrowarden_created_by");
+    assert_eq!(open(&c["fields"][0]["value"]), "homelab-claude");
+}
+
+#[tokio::test]
+async fn a_rejected_token_is_replaced_once_and_the_write_goes_through() {
+    let h = managed_harness(COLL_MANAGED).await;
+    h.vault.unlock(pw()).await.unwrap();
+    let logins = h.mock.lock().unwrap().logins;
+    h.mock.lock().unwrap().create_reject_once = true;
+    h.vault.create_login(new_login()).await.unwrap();
+    let m = h.mock.lock().unwrap();
+    assert_eq!(m.logins, logins + 1, "one fresh login");
+    assert_eq!(m.create_auth.len(), 2, "tried twice");
+    assert_ne!(m.create_auth[0], m.create_auth[1], "with a new token");
+    assert_eq!(m.created.len(), 1, "applied once");
+}
+
+#[tokio::test]
+async fn a_server_error_is_not_retried_and_a_refusal_is_retried_once() {
+    let h = managed_harness(COLL_MANAGED).await;
+    h.vault.unlock(pw()).await.unwrap();
+    // A 5xx may have been applied: it is not sent again.
+    h.mock.lock().unwrap().create_status = Some(500);
+    let e = h.vault.create_login(new_login()).await.unwrap_err();
+    assert!(matches!(e, FerroError::VaultWriteFailed), "{e}");
+    assert_eq!(h.mock.lock().unwrap().create_auth.len(), 1);
+    // A 403 (no permission) is tried once more with a fresh login, then fails.
+    h.mock.lock().unwrap().create_status = Some(403);
+    let e = h.vault.create_login(new_login()).await.unwrap_err();
+    assert!(matches!(e, FerroError::VaultWriteFailed), "{e}");
+    assert_eq!(h.mock.lock().unwrap().create_auth.len(), 3);
+    assert!(h.mock.lock().unwrap().created.is_empty());
+}
+
+#[tokio::test]
+async fn the_sync_reads_collections_and_collection_ids_of_the_real_shape() {
+    // The shape Vaultwarden 1.36 and 1.37 send: the collection carries
+    // `readOnly`, `hidePasswords` and `manage`; a cipher carries
+    // `collectionIds`.
+    let sync: super::api::SyncResponse = serde_json::from_value(json!({
+        "profile": {"id": USER_ID, "email": EMAIL, "key": "k", "organizations": []},
+        "ciphers": [{"id": "c", "type": 1, "collectionIds": [COLL_MANAGED, COLL_OTHER]}],
+        "collections": [{
+            "id": COLL_MANAGED, "organizationId": "org1", "name": "2.a|b|c",
+            "externalId": null, "readOnly": false, "hidePasswords": false,
+            "manage": true, "object": "collectionDetails"
+        }]
+    }))
+    .unwrap();
+    assert_eq!(sync.profile.id.as_deref(), Some(USER_ID));
+    assert_eq!(sync.ciphers[0].collection_ids, [COLL_MANAGED, COLL_OTHER]);
+    let c = &sync.collections[0];
+    assert_eq!((c.read_only, c.hide_passwords), (Some(false), Some(false)));
+    assert_eq!(c.organization_id.as_deref(), Some("org1"));
+    // A sync without collections is an empty list.
+    let none: super::api::SyncResponse = serde_json::from_value(json!({
+        "profile": {"email": EMAIL}, "ciphers": []
+    }))
+    .unwrap();
+    assert!(none.collections.is_empty());
 }

@@ -281,3 +281,78 @@ fn error_codes_are_fixed_labels() {
         "unsupported EncString type 7"
     );
 }
+
+// ── Encryption (the write path) ────────────────────────────────────────────────
+
+#[test]
+fn encryption_reproduces_the_node_vectors_byte_for_byte() {
+    // The vectors come from Node's `crypto` (tests/native-vectors/gen.js):
+    // fixed key, fixed IVs, one case per padding shape (empty, ASCII, an exact
+    // multiple of the block size, one over, multi-byte UTF-8, long). The
+    // production encryption, not only the test helper, must give the same
+    // text.
+    let v = &vectors()["type2"];
+    let k = SymKey::from_slice(&unhex(v["key"].as_str().unwrap())).unwrap();
+    let cases = v["cases"].as_array().unwrap();
+    assert!(cases.len() >= 7);
+    for case in cases {
+        let iv: [u8; 16] = unhex(case["iv"].as_str().unwrap()).try_into().unwrap();
+        let plain = case["plain_utf8"].as_str().unwrap();
+        let got = encrypt_with_iv(&k, iv, plain.as_bytes()).unwrap();
+        assert_eq!(got, case["enc"].as_str().unwrap(), "plain {plain:?}");
+        // And the independent test helper agrees with it.
+        assert_eq!(got, encrypt2(&k, iv, plain.as_bytes()));
+    }
+}
+
+#[test]
+fn encrypt_then_decrypt_round_trips() {
+    let k = SymKey::generate().unwrap();
+    let long = "z".repeat(1000);
+    for plain in [
+        "",
+        "a",
+        "0123456789abcdef", // exactly one block
+        "0123456789abcdefX",
+        "p@ss w0rd! \u{fc}\u{20ac} \u{4e2d}",
+        long.as_str(),
+    ] {
+        let s = encrypt_str(&k, plain).unwrap();
+        assert!(s.starts_with("2."));
+        let parsed = EncString::parse(&s).unwrap();
+        assert_eq!(parsed.decrypt_string(&k).unwrap().as_str(), plain);
+    }
+}
+
+#[test]
+fn every_encryption_uses_a_fresh_iv() {
+    let k = SymKey::generate().unwrap();
+    let a = encrypt_str(&k, "same").unwrap();
+    let b = encrypt_str(&k, "same").unwrap();
+    assert_ne!(a, b);
+    let iv = |s: &str| match EncString::parse(s).unwrap() {
+        EncString::Aes256CbcHmac { iv, .. } => iv,
+        _ => unreachable!(),
+    };
+    assert_ne!(iv(&a), iv(&b));
+}
+
+#[test]
+fn a_ciphertext_does_not_verify_under_another_key() {
+    let (a, b) = (SymKey::generate().unwrap(), SymKey::generate().unwrap());
+    let s = encrypt_str(&a, "secret").unwrap();
+    assert_eq!(
+        EncString::parse(&s).unwrap().decrypt(&b).unwrap_err(),
+        EncError::MacFailure
+    );
+}
+
+#[test]
+fn generated_keys_are_64_bytes_and_differ() {
+    let (a, b) = (SymKey::generate().unwrap(), SymKey::generate().unwrap());
+    assert_ne!(&a.to_bytes()[..], &b.to_bytes()[..]);
+    // The bytes round-trip through `from_slice`.
+    let again = SymKey::from_slice(&a.to_bytes()[..]).unwrap();
+    assert_eq!(&again.to_bytes()[..], &a.to_bytes()[..]);
+    assert_eq!(EncError::Random.code(), "random_failure");
+}

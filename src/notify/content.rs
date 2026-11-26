@@ -107,17 +107,69 @@ pub struct EventFields {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ApprovalFields {
     pub id: String,
+    /// `forward` (use a credential) or `create` (create one).
+    pub kind: &'static str,
+    /// Empty for a create.
     pub method: String,
-    /// The target host, with `:port` when the port is not the default.
+    /// The target host, with `:port` when the port is not the default. Empty
+    /// for a create.
     pub target: String,
     /// The path as the agent sent it, without query or fragment, cut to 200
-    /// characters.
+    /// characters. Empty for a create.
     pub path: String,
+    /// What a create asks for: names, URIs and generation options, never a
+    /// value (there is none yet).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create: Option<CreateFields>,
     /// RFC 3339, UTC.
     pub expires_at: String,
     /// `<ui.public_url>/approvals/<id>`, when `ui.public_url` is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+}
+
+/// What a create prompt shows. Cleaned like every other field.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CreateFields {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    pub uris: Vec<String>,
+    pub charset: String,
+    pub length: u64,
+    pub approval_required: bool,
+    pub collection: String,
+}
+
+impl CreateFields {
+    fn from_detail(c: &Value) -> Option<Self> {
+        let text = |key: &str| c.get(key).and_then(Value::as_str);
+        let generate = c.get("generate")?;
+        Some(Self {
+            name: clean_name(text("name")?, MAX_NAME),
+            username: text("username").map(|u| clean_name(u, MAX_NAME)),
+            uris: c
+                .get("uris")?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .take(MAX_CREDENTIALS)
+                .map(clean_uri)
+                .collect(),
+            charset: clean_id(generate.get("charset")?.as_str()?, 16),
+            length: generate.get("length")?.as_u64()?,
+            approval_required: c.get("approval_required")?.as_bool()?,
+            collection: clean_name(text("collection")?, MAX_NAME),
+        })
+    }
+}
+
+/// A URI for display: printable ASCII only, cut to [`MAX_LINK`] characters.
+fn clean_uri(s: &str) -> String {
+    s.chars()
+        .take(MAX_LINK)
+        .map(|c| if c.is_ascii_graphic() { c } else { '?' })
+        .collect()
 }
 
 impl ApprovalFields {
@@ -127,8 +179,22 @@ impl ApprovalFields {
         }
         let details = event.ferrowarden.details.as_ref()?;
         let text = |key: &str| details.get(key).and_then(Value::as_str);
+        if text("kind") == Some("create") {
+            return Some(Self {
+                id: clean_token(text("approval_id")?, 64),
+                kind: "create",
+                method: String::new(),
+                target: String::new(),
+                path: String::new(),
+                create: Some(CreateFields::from_detail(details.get("create")?)?),
+                expires_at: clean_time(text("expires_at")?),
+                link: text("link").and_then(clean_link),
+            });
+        }
         Some(Self {
             id: clean_token(text("approval_id")?, 64),
+            kind: "forward",
+            create: None,
             method: clean_id(
                 &event
                     .http
@@ -323,6 +389,8 @@ pub enum Kind {
     Test,
     /// A request is waiting for a human to approve or deny it.
     ApprovalRequest,
+    /// A credential was created (opt-in, `admin` category).
+    CredentialCreated,
 }
 
 impl Kind {
@@ -343,6 +411,7 @@ impl Kind {
             | Kind::KeyRevoked
             | Kind::KeyPolicyChanged
             | Kind::UiSignIn
+            | Kind::CredentialCreated
             | Kind::Test => Severity::Normal,
         }
     }
@@ -357,7 +426,11 @@ impl Kind {
             Kind::AuthFailures { .. } | Kind::LockedOut => "lock,warning",
             Kind::VaultLocked | Kind::VaultUnlockFailed | Kind::VaultSyncFailed => "lock",
             Kind::VaultRecovered | Kind::Test => "white_check_mark",
-            Kind::KeyCreated | Kind::KeyRevoked | Kind::KeyPolicyChanged | Kind::UiSignIn => "key",
+            Kind::KeyCreated
+            | Kind::KeyRevoked
+            | Kind::KeyPolicyChanged
+            | Kind::UiSignIn
+            | Kind::CredentialCreated => "key",
             Kind::ApprovalRequest => "key,hourglass_flowing_sand",
         }
     }
@@ -380,6 +453,7 @@ impl Kind {
             Kind::Paused { .. } => "Ferrowarden: notifications paused",
             Kind::Test => "Ferrowarden: test notification",
             Kind::ApprovalRequest => "Ferrowarden: approval needed",
+            Kind::CredentialCreated => "Ferrowarden: credential created",
         }
     }
 }
@@ -606,6 +680,17 @@ fn message(kind: &Kind, f: &EventFields) -> String {
         ),
         Kind::Test => "This is a test notification from Ferrowarden. If you can read it, this notifier is set up correctly.".to_string(),
         Kind::ApprovalRequest => approval_message(f),
+        Kind::CredentialCreated => {
+            let what = if f.credentials.is_empty() {
+                "A credential".to_string()
+            } else {
+                list(&f.credentials)
+            };
+            format!(
+                "{what} was created by {} in the managed collection. The password was generated by Ferrowarden and no one has seen it.{tail}",
+                key_phrase(f, "an agent key")
+            )
+        }
     }
 }
 
@@ -621,6 +706,9 @@ fn approval_message(f: &EventFields) -> String {
     let Some(a) = &f.approval else {
         return format!("{who} is waiting for approval to use {what}.");
     };
+    if let Some(c) = &a.create {
+        return create_message(&who, a, c);
+    }
     let expires = DateTime::parse_from_rfc3339(&a.expires_at)
         .map(|t| t.with_timezone(&Utc).format("%H:%M UTC").to_string())
         .unwrap_or_else(|_| a.expires_at.clone());
@@ -633,6 +721,39 @@ fn approval_message(f: &EventFields) -> String {
     format!(
         "{who} wants to use {what} for {} {}{}. {decide} Approval {}, open until {expires}.",
         a.method, a.target, a.path, a.id
+    )
+}
+
+/// The prompt for a request to create a credential: who, what is made, where
+/// it goes and how it is generated. The value is generated only after the
+/// approval and is never shown to anyone.
+fn create_message(who: &str, a: &ApprovalFields, c: &CreateFields) -> String {
+    let expires = DateTime::parse_from_rfc3339(&a.expires_at)
+        .map(|t| t.with_timezone(&Utc).format("%H:%M UTC").to_string())
+        .unwrap_or_else(|_| a.expires_at.clone());
+    let decide = match &a.link {
+        Some(link) => format!("Approve or deny: {link}"),
+        None => {
+            "Open the Approvals page of the Ferrowarden admin UI to approve or deny.".to_string()
+        }
+    };
+    let username = match &c.username {
+        Some(u) => format!(" with username {u}"),
+        None => String::new(),
+    };
+    let flag = if c.approval_required {
+        " Using it will need approval too."
+    } else {
+        ""
+    };
+    format!(
+        "{who} wants to create the credential {}{username} for {} in the collection {}: a {}-character {} password that Ferrowarden generates and the agent never sees.{flag} {decide} Approval {}, open until {expires}.",
+        c.name,
+        list(&c.uris),
+        c.collection,
+        c.length,
+        c.charset,
+        a.id
     )
 }
 

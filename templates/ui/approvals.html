@@ -4,7 +4,7 @@
 {% block content %}
 <h1>Approvals</h1>
 {% if let Some(message) = notice %}<p class="alert ok" role="status">{{ message }}</p>{% endif %}
-<p class="muted">An agent that uses a credential marked as needing approval waits here for a decision. Deciding needs a sign-in within the last 10 minutes.</p>
+<p class="muted">An agent that uses a credential marked as needing approval, or asks to create one, waits here for a decision. Deciding needs a sign-in within the last 10 minutes.</p>
 <h2>Waiting for a decision ({{ pending.len() }})</h2>
 {% if pending.is_empty() %}
 <p class="muted">Nothing is waiting.</p>
@@ -12,14 +12,15 @@
 <div class="scroll">
 <table class="stack">
 <thead>
-<tr><th scope="col">Agent key</th><th scope="col">Credentials</th><th scope="col">Request</th><th scope="col">Asked</th><th scope="col">Open until</th><th scope="col">Actions</th></tr>
+<tr><th scope="col">Agent key</th><th scope="col">Kind</th><th scope="col">Credentials</th><th scope="col">Request</th><th scope="col">Asked</th><th scope="col">Open until</th><th scope="col">Actions</th></tr>
 </thead>
 <tbody>
 {% for p in pending %}
 <tr class="card-row">
 <th scope="row">{{ p.key_name }}</th>
+<td data-label="Kind"><code>{{ p.kind }}</code></td>
 <td data-label="Credentials">{% for c in p.credentials %}<code>{{ c.name }}</code> {% endfor %}</td>
-<td data-label="Request"><code>{{ p.method }}</code> {{ p.target }}<code>{{ p.path }}</code></td>
+<td data-label="Request">{% if p.is_create %}Create in <code>{{ p.collection }}</code>{% else %}<code>{{ p.method }}</code> {{ p.target }}<code>{{ p.path }}</code>{% endif %}</td>
 <td data-label="Asked">{{ p.created }}</td>
 <td data-label="Open until">{{ p.expires }}</td>
 <td data-label="Actions"><span class="links"><a href="/ui/approvals/{{ p.id }}">Review</a></span></td>

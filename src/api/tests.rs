@@ -961,11 +961,11 @@ async fn patch_emits_key_policy_change_with_before_and_after() {
     assert_eq!(d["key_name"], "audited");
     assert_eq!(
         d["before"],
-        json!({"credentials": ["a"], "methods": ["GET"], "approval": []})
+        json!({"credentials": ["a"], "methods": ["GET"], "approval": [], "create": []})
     );
     assert_eq!(
         d["after"],
-        json!({"credentials": ["a"], "methods": ["POST"], "approval": []})
+        json!({"credentials": ["a"], "methods": ["POST"], "approval": [], "create": []})
     );
     assert_eq!(events[1]["event"]["reason"], "invalid_request");
     assert_eq!(events[0]["event"]["reason"], "key_not_found");
@@ -999,11 +999,11 @@ async fn preview_diffs_draft_against_saved_and_saves_nothing() {
     assert_eq!(j["key"]["name"], "pv");
     assert_eq!(
         j["saved_policy"],
-        json!({"credentials": ["lab_*"], "methods": ["*"], "approval": []})
+        json!({"credentials": ["lab_*"], "methods": ["*"], "approval": [], "create": []})
     );
     assert_eq!(
         j["draft_policy"],
-        json!({"credentials": ["lab_nas", "prod_*"], "methods": ["GET"], "approval": []})
+        json!({"credentials": ["lab_nas", "prod_*"], "methods": ["GET"], "approval": [], "create": []})
     );
     assert_eq!(j["gained"], json!(["prod_db"]));
     assert_eq!(j["lost"], json!(["lab_router"]));
@@ -1592,7 +1592,9 @@ fn the_route_table_and_the_spec_describe_the_same_routes() {
 #[tokio::test]
 async fn every_route_in_the_table_is_served_with_its_method() {
     for prefix in ["", "/k7f3q9"] {
-        let app = app(prefix);
+        // Every route is called with every method: more than the default
+        // agent burst.
+        let (app, _) = build_configured(prefix, 1000, None, |c| c.agent_rate_limit_burst = 500);
         for r in ROUTES {
             let path = r.path.replace("{id}", "some-id");
             let full = if r.group == Group::Public {
@@ -2655,3 +2657,4 @@ async fn the_policy_preview_checks_session_syntax_but_not_the_store() {
 }
 
 mod approvals;
+mod create;

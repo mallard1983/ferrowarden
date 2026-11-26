@@ -81,12 +81,13 @@ pub enum Action {
     ApprovalExpired,
     GrantRevoked,
     GrantExpired,
+    CredentialCreate,
 }
 
 impl Action {
     /// Every action, in the order the audit view lists them. Keep in step
     /// with the enum: the `all_actions_are_listed` test counts the variants.
-    pub const ALL: [Action; 36] = [
+    pub const ALL: [Action; 37] = [
         Action::Forward,
         Action::CredentialsList,
         Action::AgentAuth,
@@ -123,6 +124,7 @@ impl Action {
         Action::ApprovalExpired,
         Action::GrantRevoked,
         Action::GrantExpired,
+        Action::CredentialCreate,
     ];
 
     /// The action whose wire name (`as_str`) is `name`.
@@ -168,6 +170,7 @@ impl Action {
             Action::ApprovalExpired => "approval_expired",
             Action::GrantRevoked => "grant_revoked",
             Action::GrantExpired => "grant_expired",
+            Action::CredentialCreate => "credential_create",
         }
     }
 
@@ -203,7 +206,8 @@ impl Action {
             | Action::ApprovalDenied
             | Action::ApprovalExpired
             | Action::GrantRevoked
-            | Action::GrantExpired => "iam",
+            | Action::GrantExpired
+            | Action::CredentialCreate => "iam",
             Action::VaultLock
             | Action::VaultSync
             | Action::Startup
@@ -263,6 +267,7 @@ impl Action {
             Action::ApprovalExpired => "approval expiry",
             Action::GrantRevoked => "grant revocation",
             Action::GrantExpired => "grant expiry",
+            Action::CredentialCreate => "credential creation",
         }
     }
 
@@ -305,6 +310,7 @@ impl Action {
             Action::ApprovalExpired => "approval expired",
             Action::GrantRevoked => "grant revoked",
             Action::GrantExpired => "grant expired",
+            Action::CredentialCreate => "credential created",
         }
     }
 }
@@ -378,12 +384,17 @@ pub enum Reason {
     ApprovalPending,
     ApprovalDenied,
     ApprovalLimitReached,
+    CredentialExists,
+    ManagedCollectionUnavailable,
+    CredentialCreateDisabled,
+    CredentialCreateOutOfScope,
+    VaultWriteFailed,
 }
 
 impl Reason {
     /// Every reason, in declaration order (tests and the notifier tables).
     #[cfg(test)]
-    pub const ALL: [Reason; 39] = [
+    pub const ALL: [Reason; 44] = [
         Reason::MissingKey,
         Reason::InvalidKey,
         Reason::MissingAdminKey,
@@ -423,6 +434,11 @@ impl Reason {
         Reason::ApprovalPending,
         Reason::ApprovalDenied,
         Reason::ApprovalLimitReached,
+        Reason::CredentialExists,
+        Reason::ManagedCollectionUnavailable,
+        Reason::CredentialCreateDisabled,
+        Reason::CredentialCreateOutOfScope,
+        Reason::VaultWriteFailed,
     ];
 
     /// The wire code (`event.reason`), the same text serde writes.
@@ -467,6 +483,11 @@ impl Reason {
             Reason::ApprovalPending => "approval_pending",
             Reason::ApprovalDenied => "approval_denied",
             Reason::ApprovalLimitReached => "approval_limit_reached",
+            Reason::CredentialExists => "credential_exists",
+            Reason::ManagedCollectionUnavailable => "managed_collection_unavailable",
+            Reason::CredentialCreateDisabled => "credential_create_disabled",
+            Reason::CredentialCreateOutOfScope => "credential_create_out_of_scope",
+            Reason::VaultWriteFailed => "vault_write_failed",
         }
     }
 
@@ -498,6 +519,8 @@ impl Reason {
                 | Reason::SessionsDisabled
                 | Reason::ApprovalDenied
                 | Reason::ApprovalLimitReached
+                | Reason::CredentialCreateDisabled
+                | Reason::CredentialCreateOutOfScope
         )
     }
 
@@ -543,6 +566,11 @@ impl Reason {
             Reason::ApprovalPending => "waiting for a human to approve",
             Reason::ApprovalDenied => "a human denied the request",
             Reason::ApprovalLimitReached => "too many approval requests from this agent key",
+            Reason::CredentialExists => "a credential with this name already exists",
+            Reason::ManagedCollectionUnavailable => "the managed collection cannot be written to",
+            Reason::CredentialCreateDisabled => "creating credentials is switched off",
+            Reason::CredentialCreateOutOfScope => "this agent key may not create that credential",
+            Reason::VaultWriteFailed => "the credential could not be written to the vault",
         }
     }
 }
@@ -578,6 +606,11 @@ impl From<&FerroError> for Reason {
             FerroError::ApprovalDenied => Reason::ApprovalDenied,
             FerroError::ApprovalLimitReached => Reason::ApprovalLimitReached,
             FerroError::ApprovalNotPending | FerroError::GrantNotFound => Reason::InvalidRequest,
+            FerroError::CredentialCreateDisabled => Reason::CredentialCreateDisabled,
+            FerroError::CredentialCreateOutOfScope(_) => Reason::CredentialCreateOutOfScope,
+            FerroError::CredentialExists(_) => Reason::CredentialExists,
+            FerroError::ManagedCollectionUnavailable(_) => Reason::ManagedCollectionUnavailable,
+            FerroError::VaultWriteFailed => Reason::VaultWriteFailed,
             FerroError::Config(_) => Reason::InternalError,
             FerroError::UnlockEndpointDisabled => Reason::InvalidRequest,
             FerroError::InvalidRequest(_) => Reason::InvalidRequest,
@@ -782,7 +815,9 @@ impl SecurityEvent {
             Action::UiLogout | Action::UiSessionExpired => vec!["end"],
             Action::UiTwoFactorEmailSent => vec!["info"],
             Action::RateLimited | Action::RequestRejected => vec!["denied"],
-            Action::KeyCreate | Action::SessionCapture => vec!["creation"],
+            Action::KeyCreate | Action::SessionCapture | Action::CredentialCreate => {
+                vec!["creation"]
+            }
             Action::KeyRevoke | Action::SessionDelete => vec!["deletion"],
             Action::SessionUse => vec!["access"],
             Action::SessionExpire => vec!["end"],

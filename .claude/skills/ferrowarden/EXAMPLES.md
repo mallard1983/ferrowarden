@@ -218,3 +218,37 @@ Correct action: wait 3 seconds, then resend the identical request once.
 ```
 
 Correct action: do not retry. Tell the user: "Ferrowarden's vault is locked. The operator needs to unlock it before I can make credentialed API calls."
+
+## Set up a new service without seeing its password
+
+The user asks you to deploy Keycloak with an admin account. Ask Ferrowarden to make the credential:
+
+```
+POST /v1/credentials
+{ "name": "agent_keycloak_admin", "username": "admin",
+  "uris": ["https://keycloak.example.com"],
+  "generate": { "length": 32, "charset": "alphanumeric" } }
+```
+
+After a minute with no decision:
+
+```
+403 { "error": "Approval required: ...", "code": "approval_pending", "approval_id": "2m3x8Qk0Zr1YtV5pUa9bLw" }
+```
+
+Tell the user: "Please approve request 2m3x8Qk0Zr1YtV5pUa9bLw (creating agent_keycloak_admin) in the Ferrowarden admin UI." When they say it is done, send the **identical** request again:
+
+```
+201 { "name": "agent_keycloak_admin", "placeholder": "{{vault:agent_keycloak_admin}}", "cache_refreshed": true }
+```
+
+Use the placeholder where the password belongs:
+
+```
+POST /v1/forward
+{ "request": { "method": "POST", "url": "https://keycloak.example.com/admin/setup",
+    "body": { "username": "{{vault:agent_keycloak_admin:username}}",
+              "password": "{{vault:agent_keycloak_admin}}" } } }
+```
+
+You never saw the password. If the user needs it, it is in Vaultwarden in the managed collection.

@@ -13,6 +13,7 @@ use crate::config::UnlockMode;
 use crate::error::{FerroError, FerroResult};
 use crate::events::{Action, Outcome, Reason, SecurityEvent};
 use crate::state::AppState;
+use crate::vault::model::ManagedState;
 use crate::vault::{read_password_file, Vault};
 
 /// Sync the vault backend with Vaultwarden and reload the credential cache.
@@ -60,6 +61,7 @@ pub async fn refresh_credentials(state: &AppState) -> FerroResult<()> {
                 != approval_invalid as u64
                 && approval_invalid > 0;
             let previous = std::mem::replace(&mut *state.credentials.write().await, map).len();
+            report_managed(state).await;
             tracing::debug!(credential_count = count, "Credential cache refreshed");
             let excluded = listing.excluded.filter(|r| !r.is_empty());
             if count != previous || excluded.is_some() || warn_approval {
@@ -100,6 +102,54 @@ pub async fn refresh_credentials(state: &AppState) -> FerroResult<()> {
             }
             Err(e)
         }
+    }
+}
+
+/// Where the managed collection stands after this sync. When it has become
+/// unusable (or its problem changed) say so once: a log line and a `vault_sync`
+/// event with a warning, so the operator hears about it before an agent's
+/// create request is refused. Creating never falls back to anything else.
+async fn report_managed(state: &AppState) {
+    let problem = match state.vault.managed_collection().await {
+        Ok(ManagedState::Unavailable { problem, .. }) => Some(problem),
+        Ok(_) => None,
+        // Locked: nothing to say about it.
+        Err(_) => return,
+    };
+    let previous = state
+        .sync_stats
+        .swap_managed_problem(problem.map(|p| p.code()));
+    match problem {
+        Some(p) if previous != Some(p.code()) => {
+            tracing::warn!(
+                reason = p.code(),
+                "The managed collection cannot be written to: {}; creating credentials is refused until it is fixed",
+                p.describe()
+            );
+            state
+                .events
+                .emit(SecurityEvent::new(Action::VaultSync).detail(
+                    "warnings",
+                    serde_json::json!({ "managed_collection": p.code() }),
+                ));
+        }
+        None if previous.is_some() => {
+            tracing::info!("The managed collection can be written to again");
+        }
+        _ => {}
+    }
+}
+
+/// The startup rule for the managed collection: when one is configured, it
+/// has to be usable, or Ferrowarden does not start (fail closed). `Ok` when
+/// none is configured.
+pub fn check_managed_at_startup(managed: &ManagedState) -> Result<(), String> {
+    match managed {
+        ManagedState::Off | ManagedState::Usable(_) => Ok(()),
+        ManagedState::Unavailable { problem, .. } => Err(format!(
+            "vault.managed.collection is set, but {}. Fix the collection or the account's access              to it in Vaultwarden, or unset vault.managed.collection to switch creating off",
+            problem.describe()
+        )),
     }
 }
 
@@ -193,3 +243,6 @@ pub fn spawn_refresher(state: Arc<AppState>) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests;

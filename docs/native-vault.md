@@ -5,6 +5,7 @@ Ferrowarden reads the vault itself: it speaks the Bitwarden client protocol to V
 - No extra containers: no Bitwarden CLI and no Node.js.
 - Secrets are decrypted in Ferrowarden, one value at a time, on request. Nothing decrypted crosses a network.
 - The vault is held in memory as ciphertext. Only metadata (names, URIs, field names) is decrypted.
+- It can also **write**, in one place only: a login item in the [managed collection](#the-write-path-and-the-managed-collection), when an agent asks for a credential and a human approves ([managed-credentials.md](managed-credentials.md)). Everything else it does is read-only.
 
 The code that reads the vault sits behind an internal `Vault` interface, and everything else (placeholders, host binding, policy, scrubbing, events, the admin UI) uses only that. The interface stays so that another backend can be added later; the native one is its only implementation.
 
@@ -29,6 +30,7 @@ FERROWARDEN_VAULT_CLIENT_SECRET_FILE=/run/secrets/bw_client_secret
 - `vault.backend` accepts `native` only. `vault.backend = "bw-serve"` (or `FERROWARDEN_VAULT__BACKEND=bw-serve`) is a **startup error**, never a silent fallback. A leftover `bw_serve_url` (or `FERROWARDEN_BW_SERVE_URL`) is ignored, with a warning at startup.
 - `vault.url` and `vault.ca_file` are *the* setting for how Ferrowarden reaches Vaultwarden. They replace `ui.vaultwarden_url` and `ui.vaultwarden_ca_file`, which still work as deprecated aliases (a warning is logged; if both are set and differ, `vault.*` wins). `vault.url` must be `https://` (plain `http://` only for loopback hosts, for tests). Certificate verification is never switched off.
 - `vault.allow_hidden_passwords` (`FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS`, default `false`): see [Hidden passwords](#hidden-passwords-collections-that-hide-them).
+- `vault.managed.collection` (`FERROWARDEN_VAULT__MANAGED__COLLECTION`, default unset): the one collection Ferrowarden may create items in, by id or by name. Unset, Ferrowarden never writes. See [The write path](#the-write-path-and-the-managed-collection).
 - The startup event, `GET /v1/admin/status`, the `ferrowarden_build_info` metric and the admin UI's status page report the backend as `vault_backend`. The value is always `native` now; the field stays so that dashboards and SIEM rules keep working.
 - In file unlock mode one process holds both the API key and the master password. Manual unlock is the hardened option: see [security.md](security.md#native-backend-one-process-holds-both-secrets).
 
@@ -56,12 +58,32 @@ Starting 0.3.0 with `vault.backend = "bw-serve"` set fails with an error that po
 
 ## Reserved custom fields
 
-Two custom fields are read as settings, not offered as fields (a placeholder cannot name them, and they are not in the credential listing):
+Three custom fields are Ferrowarden's own, not offered as fields (a placeholder cannot name them, and they are not in the credential listing):
 
 | Field | Value | Effect |
 |---|---|---|
 | `ferrowarden_uris` | URIs, comma- or newline-separated | The item's host bindings; overrides a login's URIs and gives secure notes a binding |
 | `ferrowarden_approval` | `required` | A person has to approve use of the item ([approvals.md](approvals.md)). **Any other value, empty included, also means required**: a typo can only make the item stricter. Items whose value is not `required` are counted in the `vault_sync` event (`warnings.approval_field_invalid`) |
+| `ferrowarden_created_by` | the name of an agent key | Written by Ferrowarden on an item it created ([managed-credentials.md](managed-credentials.md)): which key asked for it. A plain text field. Ferrowarden never reads it as a setting; it is reserved so that nobody names a field of their own that way |
+
+## The write path and the managed collection
+
+Ferrowarden writes in exactly one situation: an agent key asked to **create a credential** and a human approved that one operation ([managed-credentials.md](managed-credentials.md)). The code is small and kept apart (`src/vault/native/write.rs`, with the encryption in `enc.rs`); nothing else in the backend writes, rotates, edits or deletes.
+
+**Where.** `vault.managed.collection` names one organisation collection. On every unlock and sync Ferrowarden reads the account's `collections` from `/api/sync` (id, organisation, name, and the account's own `readOnly` and `hidePasswords` flags; each item's `collectionIds` are read too, to count the items in it) and decides whether the collection is **usable**: it exists, `readOnly` is `false`, `hidePasswords` is `false` (a flag the server did not send counts against it) and the organisation key is available. Names are decrypted with the organisation key; a name that matches more than one collection is an error (use the id). The request for a write takes its target from this evaluated state and from nothing the agent sent, so it cannot name another collection. When the collection is not usable, nothing is written: no fallback to another collection or to the personal vault.
+
+**What is written.** A Login (type 1) with its **own 64-byte item key**, from the operating system's random generator. Every encrypted field uses the item key (name, username, password, each URI and its checksum, each custom field's name and value). The item key is wrapped (EncString type 2) under the **organisation key** of the collection's organisation. The URI checksum is `base64(SHA-256(uri))`, encrypted like the URI, as web vaults write it. The item has `notes: null`, `favorite: false`, `reprompt: 0`, no TOTP, `ferrowarden_created_by`, and `ferrowarden_approval` when asked. It is sent as `POST /api/ciphers/create` with `{ cipher, collectionIds: [<the managed collection>] }` and the session's bearer token. A rejected token (`401`) is retried once with a fresh login; a timeout or a server error is not retried, because it may have been applied.
+
+**Encryption.** EncString type 2 is the only format Ferrowarden writes: a fresh random 16-byte IV for every value, AES-256-CBC with PKCS#7 padding, and HMAC-SHA256 over `iv || ciphertext` with the MAC key, written `2.<base64 iv>|<base64 ct>|<base64 mac>`. Keys are 64 bytes, wiped when dropped. Plaintext buffers are wiped too. The generated password is a `Zeroizing<String>` that moves into the encryption and is dropped there.
+
+**How it is verified.**
+
+- **Known answers.** The type 2 encryption reproduces, byte for byte, the vectors `testdata/vectors.json` holds for fixed keys and IVs (empty, ASCII, an exact multiple of the block size, one over, multi-byte UTF-8 and a long value), which were generated with Node's `crypto` module. Encrypting and decrypting round-trips for the same shapes.
+- **The shape.** A unit test builds an item and decrypts every field back with the item key, the item key with the organisation key, and checks the URI checksums and that nothing readable is in the body. The mock-server tests check the request: the path, the one collection in `collectionIds`, the bearer token, the single retry.
+- **Cross-reading.** The integration suite creates an item through Ferrowarden against a real Vaultwarden, then an **independent reader** (`docker/bw-read-item.js`: Node's `crypto` and `docker/bw-lib.js`, no Rust) logs in as the account, finds the item in `/api/sync`, decrypts it, and prints the SHA-256 of the password, the username, the URIs, whether the checksums verify and the field names. The test compares the hash with the hash of what the target service received. This runs against both Vaultwarden versions in CI.
+- **Provenance.** Written from the item format and the primitives, as the reading side is. No Bitwarden SDK or client code is used or copied; `docker/bw-seed.js`, a Node writer of the same format for the test stack, was read to understand the wire format and the Rust was written independently.
+
+**Trust.** The write path asks for one thing it did not need before: the Ferrowarden account has **edit rights on the managed collection** (an organisation owner or admin, or a member with "Can edit" on it). See [security.md](security.md#22-generated-credentials-and-the-managed-collection).
 
 ## Fail closed, per item
 

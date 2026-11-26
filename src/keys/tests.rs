@@ -54,6 +54,7 @@ fn save_and_load_roundtrip() {
             credentials: None,
             methods: None,
             approval: None,
+            create: None,
         },
         StoredKey {
             id: "id-2".to_string(),
@@ -63,6 +64,7 @@ fn save_and_load_roundtrip() {
             credentials: None,
             methods: None,
             approval: None,
+            create: None,
         },
     ];
 
@@ -100,6 +102,7 @@ fn save_overwrites_existing_file() {
         credentials: None,
         methods: None,
         approval: None,
+        create: None,
     }];
     save(&path, &v1).unwrap();
 
@@ -231,7 +234,8 @@ b"]"#,
 fn policy_roundtrips_and_is_always_written_explicitly() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("keys.json");
-    let policy = KeyPolicy::from_raw(vec!["lab_*".into()], vec!["*".into()], vec![]).unwrap();
+    let policy =
+        KeyPolicy::from_raw(vec!["lab_*".into()], vec!["*".into()], vec![], vec![]).unwrap();
     let keys = vec![StoredKey::new(
         "i".into(),
         "n".into(),
@@ -300,8 +304,13 @@ fn approval_is_read_validated_and_never_null() {
 fn approval_roundtrips_and_a_changed_policy_writes_it() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("keys.json");
-    let policy =
-        KeyPolicy::from_raw(vec!["*".into()], vec!["GET".into()], vec!["nas_*".into()]).unwrap();
+    let policy = KeyPolicy::from_raw(
+        vec!["*".into()],
+        vec!["GET".into()],
+        vec!["nas_*".into()],
+        vec![],
+    )
+    .unwrap();
     let mut key = StoredKey::new("i".into(), "n".into(), "h".into(), Utc::now(), &policy);
     save(&path, std::slice::from_ref(&key)).unwrap();
     assert!(std::fs::read_to_string(&path)
@@ -311,7 +320,78 @@ fn approval_roundtrips_and_a_changed_policy_writes_it() {
 
     // Setting a policy on an entry that had no approval list writes one.
     key.approval = None;
-    let wider = KeyPolicy::from_raw(vec!["*".into()], vec!["GET".into()], vec![]).unwrap();
+    let wider = KeyPolicy::from_raw(vec!["*".into()], vec!["GET".into()], vec![], vec![]).unwrap();
     key.set_policy(&wider);
     assert_eq!(key.approval, Some(vec![]));
+}
+
+// ── create patterns in the key file ───────────────────────────────────────────
+
+#[test]
+fn an_entry_without_create_loads_with_none_and_creates_nothing() {
+    // The 0.2.0 shape: no `create`.
+    let (_d, p) = write_raw(&format!(
+        "[{}]",
+        ONE.replace(
+            '}',
+            r#","credentials":["a_*"],"methods":["GET"],"approval":[]}"#
+        )
+    ));
+    let keys = load(&p).unwrap();
+    assert!(
+        keys[0].policy_set(),
+        "absence of create is not a legacy key"
+    );
+    assert_eq!(keys[0].create, None);
+    assert!(keys[0].policy().create.is_empty());
+    assert!(!keys[0].policy().allows_create("anything"));
+    // A 0.1.0 entry has none either.
+    let (_d, p) = write_raw(&format!("[{ONE}]"));
+    assert!(load(&p).unwrap()[0].policy().create.is_empty());
+}
+
+#[test]
+fn create_is_read_validated_and_never_null() {
+    let (_d, p) = write_raw(&format!(
+        "[{}]",
+        ONE.replace(
+            '}',
+            r#","credentials":["*"],"methods":["GET"],"create":["agent_*","agent_*","q"]}"#
+        )
+    ));
+    assert_eq!(load(&p).unwrap()[0].policy().create, ["agent_*", "q"]);
+
+    let (_d, p) = write_raw(&format!("[{}]", ONE.replace('}', r#","create":null}"#)));
+    let e = load(&p).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+    assert!(e.to_string().contains("`create`"), "{e}");
+    for extra in [r#","create":[""]"#, r#","create":"*""#, r#","create":[1]"#] {
+        let (_d, p) = write_raw(&format!("[{}]", ONE.replace('}', &format!("{extra}}}"))));
+        assert!(load(&p).is_err(), "{extra}");
+    }
+}
+
+#[test]
+fn create_roundtrips_and_a_changed_policy_writes_it() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("keys.json");
+    let policy = KeyPolicy::from_raw(
+        vec!["*".into()],
+        vec!["GET".into()],
+        vec![],
+        vec!["agent_*".into()],
+    )
+    .unwrap();
+    let mut key = StoredKey::new("i".into(), "n".into(), "h".into(), Utc::now(), &policy);
+    save(&path, std::slice::from_ref(&key)).unwrap();
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("\"create\""));
+    assert_eq!(load(&path).unwrap()[0].policy(), policy);
+
+    // Setting a policy on an entry that had no create list writes one.
+    key.create = None;
+    let wider = KeyPolicy::from_raw(vec!["*".into()], vec!["GET".into()], vec![], vec![]).unwrap();
+    key.set_policy(&wider);
+    assert_eq!(key.create, Some(vec![]));
 }

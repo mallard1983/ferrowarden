@@ -20,6 +20,8 @@
 <dd>{% if api_tls %}TLS{% else %}Plain HTTP{% endif %}</dd>
 <dt>Agent keys</dt>
 <dd>{{ key_count }}</dd>
+<dt>Managed collection</dt>
+<dd>{% if !managed.configured %}<span class="muted">Not set: agents cannot create credentials (<code>vault.managed.collection</code>).</span>{% else if managed.usable %}<span class="badge ok">Usable</span> {{ managed.name }} <span class="muted">(<code>{{ managed.id }}</code>)</span>{% else %}<span class="badge bad">Not usable</span> <code>{{ managed.name }}</code>: {{ managed.problem }}{% endif %}</dd>
 <dt>Keys without a policy</dt>
 <dd>{% if keys_without_policy > 0 %}<span class="badge bad">{{ keys_without_policy }}</span> These keys are deny-all until a policy is set.{% else %}0{% endif %}</dd>
 <dt>Security events dropped</dt>

@@ -82,6 +82,28 @@ Some credentials need a person's yes before you can use them. Your request is he
 - An approval covers your key, that credential and that host for the minutes the person chose. Do not try other credentials, hosts or methods to get around a pending approval.
 - Do not give these requests a short timeout: they can be held for a minute or more.
 
+## Creating a credential for a new service
+
+To set up a service that needs a new account, ask Ferrowarden to generate the credential. You get a placeholder, never the password. Your key needs a `create` pattern for the name (`403` `credential_create_out_of_scope` otherwise: tell the user), and a person approves each request.
+
+```
+POST /v1/credentials
+{
+  "name": "agent_keycloak_admin",
+  "username": "admin",
+  "uris": ["https://keycloak.example.com"],
+  "generate": { "length": 32, "charset": "alphanumeric" }
+}
+```
+
+Answer `201`: `{ "name": ..., "placeholder": "{{vault:agent_keycloak_admin}}" }`. Put that placeholder where the password belongs in the request that sets it at the service (`POST /v1/forward`).
+
+- `uris` are the hosts the credential may be sent to. `charset`: `alphanumeric` (default), `ascii`, `hex`, `base64url`; `length` 16 to 128 (default 32). `"approval_required": true` makes every later use need a person's approval too.
+- Held while the user decides. `403` `approval_pending` (with `approval_id`): ask the user to approve it in the Ferrowarden admin UI, quoting the id, then **retry the identical request**. `approval_denied`: stop, tell the user.
+- `409` `credential_exists`: choose another name. `503` `managed_collection_unavailable`: tell the user, the operator must fix it. `403` `credential_create_disabled`: creating is not set up.
+- An approval is for exactly that request, once: a different username, URI or option is a new request.
+- Never ask a service to echo the password.
+
 ## Anti-patterns
 
 WRONG: guessing a credential name without listing first.

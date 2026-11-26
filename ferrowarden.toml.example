@@ -46,6 +46,17 @@ bind_addr = "0.0.0.0:3000"
 #   such items are left out (reason hidden_password in the vault_sync event);
 #   true makes them usable by agents (a startup warning and the startup event
 #   say so). See docs/native-vault.md.
+#
+# [vault.managed]
+# collection = "Ferrowarden managed"      # FERROWARDEN_VAULT__MANAGED__COLLECTION
+#   The one organisation collection Ferrowarden may CREATE credentials in, by
+#   id (a UUID) or by name (a name that matches more than one collection is
+#   refused: use the id). Unset (the default): creating is off, and Ferrowarden
+#   only reads the vault. When it is set, the account needs "Can edit" on the
+#   collection and must not have "Hide passwords"; with unlock_mode = "file"
+#   Ferrowarden does not start if it is not usable. An agent key also needs a
+#   `create` pattern, and a human approves every create. See
+#   docs/managed-credentials.md.
 # The API key comes only from the environment or secret files, never from this
 # file.
 

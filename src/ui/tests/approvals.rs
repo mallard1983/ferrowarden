@@ -618,6 +618,7 @@ async fn key_with_approval(h: &Harness, name: &str, approval: &[&str]) -> (Strin
         vec!["*".into()],
         vec!["GET".into()],
         approval.iter().map(|s| s.to_string()).collect(),
+        vec![],
     )
     .await
     .unwrap();
@@ -849,4 +850,291 @@ async fn a_draft_parked_by_a_stale_sign_in_keeps_the_approval_patterns() {
     assert!(r.body.contains("Your unsaved changes were restored"));
     assert!(r.body.contains("a_*\nb_*"));
     assert_eq!(approval_of(&h, &token), ["a_*"], "restored, not saved");
+}
+
+// ── Create approvals ──────────────────────────────────────────────────────────
+
+/// Open a create approval as the gate does, without holding a request.
+fn open_create(h: &Harness, key: &str, name: &str) -> String {
+    let detail = crate::approvals::CreateDetail {
+        name: name.to_string(),
+        username: Some("admin".to_string()),
+        uris: vec![
+            "https://keycloak.example.com".to_string(),
+            "https://sso.example.com".to_string(),
+        ],
+        charset: "ascii".to_string(),
+        length: 40,
+        approval_required: true,
+        collection: "Ferrowarden managed".to_string(),
+    };
+    let ask = crate::approvals::CreateAsk {
+        key_id: &format!("{key}-id"),
+        key_name: key,
+        request_id: "0193abcd-0000-7000-8000-000000000002",
+        fingerprint: &format!("fp-{name}"),
+        detail: &detail,
+    };
+    let cfg = crate::config::ApprovalConfig {
+        max_pending_per_key: 50,
+        max_requests_per_key_per_hour: 1000,
+        ..Default::default()
+    };
+    match h
+        .app
+        .approvals
+        .check_create(&ask, &cfg, chrono::Utc::now())
+        .unwrap()
+    {
+        Check::Wait { view, .. } | Check::Pending { view, .. } => view.id,
+        _ => panic!("not opened"),
+    }
+}
+
+#[tokio::test]
+async fn a_create_approval_is_listed_with_its_kind_and_shown_in_full() {
+    let h = harness(full_opts()).await;
+    let id = open_create(&h, "agent-a", "agent_keycloak_admin");
+    let mut b = signed_in(&h).await;
+
+    let r = b.get(&h, "/ui/approvals").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("Waiting for a decision (1)"));
+    assert!(r.body.contains("<code>create</code>"));
+    assert!(r.body.contains("agent_keycloak_admin"));
+    assert!(r
+        .body
+        .contains("Create in <code>Ferrowarden managed</code>"));
+
+    let r = b.get(&h, &format!("/ui/approvals/{id}")).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_security_headers(&r);
+    for want in [
+        "Create this credential?",
+        "agent-a",
+        "agent_keycloak_admin",
+        "<code>admin</code>",
+        "https://keycloak.example.com",
+        "https://sso.example.com",
+        "40 characters, <code>ascii</code>",
+        "ferrowarden_approval",
+        "Ferrowarden managed",
+        "never sees the password",
+        "one credential",
+        "Approve and create",
+    ] {
+        assert!(r.body.contains(want), "missing {want:?}");
+    }
+    // Approve or deny, and nothing else: no duration to choose.
+    for absent in ["name=\"preset\"", "name=\"minutes\"", "How long"] {
+        assert!(!r.body.contains(absent), "unexpected {absent:?}");
+    }
+    assert!(r
+        .body
+        .contains(&format!("action=\"/ui/approvals/{id}/approve\"")));
+    assert!(r
+        .body
+        .contains(&format!("action=\"/ui/approvals/{id}/deny\"")));
+}
+
+#[tokio::test]
+async fn approving_a_create_in_the_ui_allows_one_operation_and_gives_no_grant() {
+    let h = harness(full_opts()).await;
+    let id = open_create(&h, "agent-a", "agent_one");
+    let mut b = signed_in(&h).await;
+    let csrf = detail_csrf(&mut b, &h, &id).await;
+    let r = b
+        .post(
+            &h,
+            &format!("/ui/approvals/{id}/approve"),
+            &[("csrf", &csrf)],
+        )
+        .await;
+    assert_eq!(
+        r.location(),
+        "/ui/approvals?m=approved_create",
+        "{}",
+        r.body
+    );
+    assert_eq!(counts(&h), (0, 0), "no open approval and no grant");
+    let r = b.get(&h, "/ui/approvals?m=approved_create").await;
+    assert!(r.body.contains("covers that one credential only"));
+    assert!(r.body.contains("Live grants (0)"));
+    // The approval is waiting for its one request.
+    assert!(h
+        .app
+        .approvals
+        .consume_create("agent-a-id", "fp-agent_one", chrono::Utc::now()));
+    assert!(!h
+        .app
+        .approvals
+        .consume_create("agent-a-id", "fp-agent_one", chrono::Utc::now()));
+
+    // The event names the kind and the approver, with no grant.
+    let granted = h.events_of("approval_granted");
+    assert_eq!(granted.len(), 1);
+    let d = &granted[0]["ferrowarden"]["details"];
+    assert_eq!(d["kind"], "create");
+    assert_eq!(d["via"], "ui");
+    assert_eq!(d["approver"], EMAIL);
+    assert!(d.get("grant_id").is_none() && d.get("minutes").is_none());
+}
+
+#[tokio::test]
+async fn a_create_can_be_denied_in_the_ui_and_a_duration_field_is_refused() {
+    let h = harness(full_opts()).await;
+    let id = open_create(&h, "agent-a", "agent_two");
+    let mut b = signed_in(&h).await;
+    let csrf = detail_csrf(&mut b, &h, &id).await;
+    // The form of a forward approval is not the form of a create: a `minutes`
+    // field is not accepted for it (the form has no such field).
+    let r = b
+        .post(
+            &h,
+            &format!("/ui/approvals/{id}/approve"),
+            &[("csrf", &csrf), ("minutes", "30")],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert!(r.body.contains("has no duration"));
+    assert_eq!(counts(&h).0, 1, "still open");
+
+    let r = b
+        .post(&h, &format!("/ui/approvals/{id}/deny"), &[("csrf", &csrf)])
+        .await;
+    assert_eq!(r.location(), "/ui/approvals?m=denied", "{}", r.body);
+    assert_eq!(counts(&h), (0, 0));
+    assert!(!h
+        .app
+        .approvals
+        .consume_create("agent-a-id", "fp-agent_two", chrono::Utc::now()));
+    // And a second decision is "no longer pending".
+    let r = b
+        .post(
+            &h,
+            &format!("/ui/approvals/{id}/approve"),
+            &[("csrf", &csrf)],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn a_hostile_create_request_is_escaped_on_the_pages() {
+    let h = harness(full_opts()).await;
+    let id = open_create(&h, "agent-a", "<script>alert(1)</script>");
+    let mut b = signed_in(&h).await;
+    for path in ["/ui/approvals".to_string(), format!("/ui/approvals/{id}")] {
+        let r = b.get(&h, &path).await;
+        assert!(!r.body.contains("<script>alert"), "{path}");
+        assert!(
+            r.body.contains("&lt;script&gt;") || r.body.contains("&#60;script&#62;"),
+            "{path}"
+        );
+    }
+}
+
+// ── The create patterns in the key forms ──────────────────────────────────────
+
+#[tokio::test]
+async fn the_key_forms_take_and_show_the_create_patterns() {
+    let h = harness(full_opts()).await;
+    let mut b = signed_in(&h).await;
+
+    // The create form has the field and creates a key with the list.
+    let r = b.get(&h, "/ui/keys/new").await;
+    assert!(r.body.contains("name=\"create\""));
+    assert!(r.body.contains("Credentials this key may create"));
+    let csrf = r.csrf();
+    let form_id = r.form_id();
+    let r = b
+        .post(
+            &h,
+            "/ui/keys/new",
+            &[
+                ("csrf", &csrf),
+                ("form_id", &form_id),
+                ("name", "creator"),
+                ("credentials", "*"),
+                ("m_GET", "1"),
+                ("create", "agent_*\nsvc_*"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("May create"));
+    assert!(r.body.contains("agent_*") && r.body.contains("svc_*"));
+    let stored = load(h.keys_path.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        stored[0].create.as_deref(),
+        Some(&["agent_*".to_string(), "svc_*".to_string()][..])
+    );
+    assert!(stored[0].policy().allows_create("agent_x"));
+
+    // The detail page shows the saved list and the edit form carries it.
+    let id = stored[0].id.clone();
+    let r = b.get(&h, &format!("/ui/keys/{id}")).await;
+    assert!(r.body.contains("May create:"));
+    assert!(r.body.contains("name=\"create\""));
+    assert!(r.body.contains("agent_*"));
+}
+
+async fn save_create(
+    b: &mut Browser,
+    h: &Harness,
+    id: &str,
+    csrf: &str,
+    create: &str,
+    confirm: bool,
+) -> Resp {
+    let mut fields = vec![
+        ("csrf", csrf),
+        ("op", "save"),
+        ("credentials", "*"),
+        ("m_GET", "1"),
+        ("create", create),
+    ];
+    if confirm {
+        fields.push(("confirm", "1"));
+    }
+    b.post(h, &format!("/ui/keys/{id}"), &fields).await
+}
+
+#[tokio::test]
+async fn widening_the_create_list_needs_confirmation_and_narrowing_does_not() {
+    let h = harness(full_opts()).await;
+    let (id, _) = key_with_approval(&h, "creator", &[]).await;
+    let mut b = signed_in(&h).await;
+    let csrf = b.get(&h, &format!("/ui/keys/{id}")).await.csrf();
+
+    // Adding a pattern shows the confirmation page and saves nothing yet.
+    let r = save_create(&mut b, &h, &id, &csrf, "agent_*", false).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("Confirm save"));
+    assert!(load(h.keys_path.as_ref().unwrap()).unwrap()[0]
+        .policy()
+        .create
+        .is_empty());
+    // The draft is carried by the confirm form.
+    assert!(r.body.contains("name=\"create\" value=\"agent_*\""));
+
+    // Confirmed: saved.
+    let r = save_create(&mut b, &h, &id, &csrf, "agent_*", true).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(
+        load(h.keys_path.as_ref().unwrap()).unwrap()[0]
+            .policy()
+            .create,
+        ["agent_*"]
+    );
+
+    // Narrowing needs no confirmation.
+    let r = save_create(&mut b, &h, &id, &csrf, "agent_a*", false).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    let r = save_create(&mut b, &h, &id, &csrf, "", false).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert!(load(h.keys_path.as_ref().unwrap()).unwrap()[0]
+        .policy()
+        .create
+        .is_empty());
 }

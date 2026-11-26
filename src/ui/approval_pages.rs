@@ -33,7 +33,8 @@ use crate::middleware::request_context::RequestContext;
 use crate::ui::admin_pages::{begin_post, caller, fmt_time, nav};
 use crate::ui::handlers::{page, Reply};
 use crate::ui::pages::{
-    ApprovalDetail, ApprovalListRow, ApprovalPage, ApprovalRow, ApprovalsPage, GrantRow, Preset,
+    ApprovalDetail, ApprovalListRow, ApprovalPage, ApprovalRow, ApprovalsPage, CreateRow, GrantRow,
+    Preset,
 };
 use crate::ui::session::SessionView;
 use crate::ui::web::{parse_form, Transport};
@@ -51,6 +52,9 @@ fn notice_text(code: &str) -> Option<&'static str> {
     match code {
         "approved" => Some(
             "Approved. The agent's next request for these credentials passes until the grant ends.",
+        ),
+        "approved_create" => Some(
+            "Approved. Ferrowarden generates the password and stores the credential now; the agent never sees it. This approval covers that one credential only.",
         ),
         "denied" => Some("Denied. The agent is refused for these credentials for a while."),
         "revoked" => Some("Grant revoked. The next request asks again."),
@@ -85,10 +89,34 @@ fn target(v: &PendingView) -> String {
     format!("{}://{}", v.scheme, v.host)
 }
 
+/// `create` details of a pending approval, for the detail page.
+fn create_row(v: &PendingView) -> CreateRow {
+    match &v.create {
+        None => CreateRow::default(),
+        Some(c) => CreateRow {
+            name: c.name.clone(),
+            has_username: c.username.is_some(),
+            username: c.username.clone().unwrap_or_default(),
+            uris: c.uris.clone(),
+            charset: c.charset.clone(),
+            length: c.length,
+            approval_required: c.approval_required,
+            collection: c.collection.clone(),
+        },
+    }
+}
+
 fn pending_row(v: &PendingView) -> ApprovalListRow {
     ApprovalListRow {
         id: v.id.clone(),
+        kind: v.kind.as_str(),
+        is_create: v.create.is_some(),
         key_name: v.key_name.clone(),
+        collection: v
+            .create
+            .as_ref()
+            .map(|c| c.collection.clone())
+            .unwrap_or_default(),
         credentials: v.items.iter().map(row).collect(),
         method: v.method.clone(),
         target: target(v),
@@ -213,6 +241,9 @@ fn detail_page(
             error,
             d: ApprovalDetail {
                 id: v.id.clone(),
+                kind: v.kind.as_str(),
+                is_create: v.create.is_some(),
+                create: create_row(v),
                 key_id: v.key_id.clone(),
                 key_name: v.key_name.clone(),
                 credentials: v.items.iter().map(row).collect(),
@@ -312,6 +343,33 @@ pub async fn approve_post(
     }
     if let Err(redirect) = ui.require_sudo(&view, &format!("/ui/approvals/{id}")) {
         return redirect;
+    }
+    // An approval to create a credential has no duration: it allows exactly
+    // one operation, once. Approve or deny, nothing else.
+    if ui.app.approvals.kind_of(&id, Utc::now()) == Some(approvals::ApprovalKind::Create) {
+        if form.take("preset").is_some() || form.take("minutes").is_some() {
+            let email = ui.account_email().await.unwrap_or_default();
+            return match ui.app.approvals.get(&id, Utc::now()) {
+                Some(v) => detail_page(
+                    &ui,
+                    &view,
+                    &email,
+                    &v,
+                    StatusCode::BAD_REQUEST,
+                    Some("An approval to create a credential has no duration: it covers that one credential."),
+                ),
+                None => no_longer_pending(&ui, &view).await,
+            };
+        }
+        return match approval_service::approve_create(
+            &ui.app,
+            caller(&ctx),
+            &id,
+            &approver(&ui).await,
+        ) {
+            Ok(_) => Reply::redirect("/ui/approvals?m=approved_create"),
+            Err(e) => failed(&ui, &view, &e).await,
+        };
     }
     let preset = form.take("preset");
     let custom = form.take("minutes");

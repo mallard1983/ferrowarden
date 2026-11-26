@@ -2269,11 +2269,11 @@ async fn test_patch_changes_policy_immediately_and_is_strict() {
     assert_eq!(e["ferrowarden"]["details"]["key_id"], id.as_str());
     assert_eq!(
         e["ferrowarden"]["details"]["before"],
-        json!({"credentials": ["test_api_token"], "methods": ["GET"], "approval": []})
+        json!({"credentials": ["test_api_token"], "methods": ["GET"], "approval": [], "create": []})
     );
     assert_eq!(
         e["ferrowarden"]["details"]["after"],
-        json!({"credentials": ["test_*"], "methods": ["GET"], "approval": []})
+        json!({"credentials": ["test_*"], "methods": ["GET"], "approval": [], "create": []})
     );
 
     // Narrow, and lift with ["*"].
@@ -2415,11 +2415,11 @@ async fn test_policy_preview() {
     assert_eq!(p["key"]["name"], "preview-me");
     assert_eq!(
         p["saved_policy"],
-        json!({"credentials": ["test_api_*"], "methods": ["*"], "approval": []})
+        json!({"credentials": ["test_api_*"], "methods": ["*"], "approval": [], "create": []})
     );
     assert_eq!(
         p["draft_policy"],
-        json!({"credentials": ["test_bearer", "nas_*"], "methods": ["GET"], "approval": []})
+        json!({"credentials": ["test_bearer", "nas_*"], "methods": ["GET"], "approval": [], "create": []})
     );
     let strs = |v: &Value| -> Vec<String> {
         v.as_array()
@@ -6095,6 +6095,12 @@ async fn test_listing_matches_the_seed_data() {
     let wanted: std::collections::BTreeSet<&str> =
         expected.iter().map(|i| i.name.as_str()).collect();
     for name in actual.keys() {
+        // Credentials the create tests made (docs/managed-credentials.md) stay
+        // in the vault: they are not seed data, and the tests may run before
+        // this one.
+        if name.starts_with(CREATED_PREFIX) {
+            continue;
+        }
         if !wanted.contains(name.as_str()) {
             problems.push(format!("{name}: offered, but not in the seed data"));
         }
@@ -7434,4 +7440,730 @@ async fn test_approval_ui_approve_and_deny() {
         ui_email().as_str()
     );
     env.revoke_key(&id).await;
+}
+
+// ── Creating credentials (docs/managed-credentials.md) ────────────────────────
+//
+// An agent asks for a new credential; a human approves; Ferrowarden generates
+// the password, writes it into the managed collection and answers with a
+// placeholder. These tests prove, against the live stack, that the value
+// reaches the new service's setup API (the mock) and nowhere an agent or the
+// operator's output can see it, that Vaultwarden stores it in a form an
+// independent reader (Node's crypto, docker/bw-read-item.js) can decrypt, and
+// that nothing is generated or written before a human approves.
+
+/// Every credential these tests create has this prefix, so that the listing
+/// test can tell them from the seed data (the vault keeps them: Ferrowarden
+/// has no delete). The test agent key may create `agent_*`.
+const CREATED_PREFIX: &str = "agent_created_";
+/// The collection the stack's `vault.managed.collection` names.
+const MANAGED_COLLECTION_NAME: &str = "Ferrowarden managed";
+/// The mock's "new service" setup API: it keeps the password it is sent.
+const SETUP_API_PATH: &str = "/api/created/setup";
+/// The symbols of `generate.charset = ascii` besides letters and digits.
+const ASCII_SYMBOLS: &str = "-_.~!@#%^*+=:,";
+
+fn created_name(label: &str) -> String {
+    format!("{CREATED_PREFIX}{label}_{}", unique_suffix())
+}
+
+fn create_body(name: &str) -> Value {
+    json!({
+        "name": name,
+        "username": "svc-admin",
+        "uris": ["http://mock-api:7777"],
+        "generate": { "length": 40, "charset": "ascii" },
+    })
+}
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+impl TestEnv {
+    /// A key that may create `create` (patterns) and use every credential.
+    /// Returns (name, id, token).
+    async fn creator_key(&self, label: &str, create: Value) -> (String, String, String) {
+        let name = format!("{label}-{}", unique_suffix());
+        let resp = self
+            .admin_call(
+                "POST",
+                "/v1/admin/keys",
+                Some(json!({
+                    "name": name, "credentials": ["*"], "methods": ["*"], "create": create
+                })),
+            )
+            .await;
+        assert_eq!(resp.status(), 201, "creating key {name}");
+        let body: Value = resp.json().await.unwrap();
+        let token = body["token"].as_str().unwrap().to_string();
+        record_secret_for_gate(&token);
+        (name, body["id"].as_str().unwrap().to_string(), token)
+    }
+
+    async fn post_create(&self, token: &str, body: &Value) -> reqwest::Response {
+        self.client
+            .post(format!("{}/v1/credentials", self.fw_url))
+            .header("X-Agent-Key", token)
+            .json(body)
+            .send()
+            .await
+            .expect("create request failed")
+    }
+
+    /// The (non-secret) metadata of the item as an independent reader sees it:
+    /// logs in as the test account with Node's crypto, in the setup image, and
+    /// prints the SHA-256 of the password and the rest (docker/bw-read-item.js).
+    fn read_item(&self, name: &str) -> Value {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let out = std::process::Command::new("docker")
+            .current_dir(root)
+            .args([
+                "compose",
+                "-f",
+                "docker-compose.test.yml",
+                "run",
+                "--rm",
+                "--no-deps",
+                "-T",
+                "-e",
+                &format!("ITEM_NAME={name}"),
+                "vault-reader",
+            ])
+            .output()
+            .expect("could not run docker compose for the independent reader");
+        assert!(
+            out.status.success(),
+            "the independent reader failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text
+            .lines()
+            .rev()
+            .find(|l| l.trim_start().starts_with('{'))
+            .unwrap_or_else(|| panic!("the reader printed no JSON: {text}"));
+        serde_json::from_str(line).expect("the reader's line is JSON")
+    }
+
+    /// Whether the agent can see a credential called `name` (any key sees
+    /// every name: the test keys have `credentials: ["*"]`).
+    async fn lists(&self, token: &str, name: &str) -> bool {
+        self.names_for(token).await.iter().any(|n| n == name)
+    }
+
+    /// The newest password the mock's setup API received.
+    async fn latest_created_password(&self) -> String {
+        self.latest_issued("created_password").await
+    }
+
+    /// Approve the open approval `id` of a create (no body: no duration).
+    async fn approve_create_api(&self, id: &str) -> reqwest::Response {
+        self.admin_call("POST", &format!("/v1/admin/approvals/{id}/approve"), None)
+            .await
+    }
+}
+
+/// A create as `token`, held for approval, run in the background. The answer
+/// is checked against the spec on the way.
+fn spawn_create(token: &str, body: Value) -> tokio::task::JoinHandle<(u16, Value)> {
+    let token = token.to_string();
+    tokio::spawn(async move {
+        let env = TestEnv::load().expect("integration environment");
+        let spec = Spec::load();
+        let resp = env.post_create(&token, &body).await;
+        spec.check("/v1/credentials", "POST", resp).await
+    })
+}
+
+/// Check a create answer against the spec and its status and code.
+async fn expect_create(
+    spec: &Spec,
+    what: &str,
+    expected: (u16, Option<&str>),
+    resp: reqwest::Response,
+) {
+    let (status, body) = spec.check("/v1/credentials", "POST", resp).await;
+    assert_eq!((status, body["code"].as_str()), expected, "{what}: {body}");
+}
+
+/// Send the generated value through Ferrowarden to the mock's setup API, as an
+/// agent setting up the new service would. Returns (status, response body).
+async fn use_created_password(env: &TestEnv, token: &str, name: &str) -> (u16, Value) {
+    let resp = env
+        .forward_payload_as(
+            token,
+            json!({ "request": {
+                "method": "POST",
+                "url": format!("{}{SETUP_API_PATH}", env.mock_url_via_ferrowarden()),
+                "body": { "password": format!("{{{{vault:{name}}}}}") },
+            }}),
+        )
+        .await;
+    (
+        resp.status().as_u16(),
+        resp.json().await.unwrap_or(Value::Null),
+    )
+}
+
+/// The whole story: create, approve from a concurrent task while the request
+/// is held, use the placeholder in a forward, and prove (a) the target got a
+/// password of the requested length and character set, (b) it is in nothing
+/// the agent can read nor in any event or metric, (c) an independent reader
+/// decrypts the stored item and finds the same password, with valid URI
+/// checksums, the created-by field, and the managed collection.
+#[tokio::test]
+async fn test_create_approved_value_reaches_only_the_target_and_vaultwarden() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    let m = metrics_env();
+    env.reset_mock().await;
+    let (key_name, key_id, token) = env.creator_key("create-main", json!(["agent_*"])).await;
+    let name = created_name("main");
+    let before = m.scrape(&env).await;
+
+    // Held: an approval of the create kind is open, and nothing exists yet.
+    let held = spawn_create(&token, create_body(&name));
+    let pending = env.wait_for_pending(&key_name, 1).await.remove(0);
+    let approval_id = pending["id"].as_str().unwrap().to_string();
+    assert_eq!(pending["kind"], "create");
+    assert_eq!(pending["create"]["name"], name.as_str());
+    assert_eq!(pending["create"]["username"], "svc-admin");
+    assert_eq!(
+        pending["create"]["generate"],
+        json!({"charset": "ascii", "length": 40})
+    );
+    assert_eq!(pending["create"]["approval_required"], false);
+    assert_eq!(pending["create"]["collection"], MANAGED_COLLECTION_NAME);
+    assert!(pending.get("origin").is_none() && pending.get("method").is_none());
+    assert!(
+        !env.lists(&token, &name).await,
+        "nothing is created before approval"
+    );
+    assert!(!held.is_finished());
+
+    // Approve with no body, as a human at the admin API would.
+    let r = env.approve_create_api(&approval_id).await;
+    let (s, approved) = spec
+        .check("/v1/admin/approvals/{id}/approve", "POST", r)
+        .await;
+    assert_eq!(s, 200);
+    assert_eq!(approved, json!({"status": "approved", "kind": "create"}));
+
+    let (status, created) = held.await.unwrap();
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["name"], name.as_str());
+    assert_eq!(created["placeholder"], format!("{{{{vault:{name}}}}}"));
+    assert_eq!(created["cache_refreshed"], true);
+
+    // It works at once: the agent sees it, bound to the URI it asked for,
+    // with a username placeholder, and still no value.
+    let detail = env.agent_get_json("/v1/credentials?detail=true").await;
+    let entry = detail
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == name.as_str())
+        .expect("the new credential is listed");
+    assert_eq!(entry["bound_to"], json!(["http://mock-api:7777"]));
+    assert_eq!(entry["username"], format!("{{{{vault:{name}:username}}}}"));
+    assert!(entry["fields"].as_object().is_none_or(|f| f.is_empty()));
+
+    // The target (the new service's setup API) receives the password.
+    let (status, answer) = use_created_password(&env, &token, &name).await;
+    assert_eq!(status, 200, "{answer}");
+    let value = env.latest_created_password().await;
+    record_secret_for_gate(&value);
+    assert_eq!(value.chars().count(), 40);
+    assert!(
+        value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ASCII_SYMBOLS.contains(c)),
+        "a character outside the requested set"
+    );
+    let setup_reply = answer["body"].as_str().unwrap_or_default();
+    assert!(setup_reply.contains("\"length\": 40") || setup_reply.contains("\"length\":40"));
+
+    // ... and it is nowhere the agent, the operator or a scraper can read.
+    assert!(!created.to_string().contains(&value));
+    assert!(
+        !answer.to_string().contains(&value),
+        "scrubbed from the answer"
+    );
+    assert!(!detail.to_string().contains(&value));
+    assert!(!env.all_events_text().await.contains(&value), "in an event");
+    let after = m.scrape(&env).await;
+    assert!(!after.text.contains(&value), "in the metrics");
+    assert_scrape_is_clean(&env, &m, &after);
+
+    // The audit trail: the prompt (kind create, what was asked), the decision
+    // (no grant), and the creation.
+    let requested = env
+        .approval_events("approval_requested", &approval_id)
+        .await;
+    assert_eq!(requested.len(), 1);
+    assert_eq!(requested[0]["ferrowarden"]["details"]["kind"], "create");
+    assert_eq!(
+        requested[0]["ferrowarden"]["details"]["create"]["name"],
+        name.as_str()
+    );
+    let granted = env.approval_events("approval_granted", &approval_id).await;
+    assert_eq!(granted[0]["ferrowarden"]["details"]["kind"], "create");
+    assert_eq!(
+        granted[0]["ferrowarden"]["details"]["approver"],
+        "admin_api"
+    );
+    assert!(granted[0]["ferrowarden"]["details"]
+        .get("grant_id")
+        .is_none());
+    let events: Vec<Value> = env
+        .events(300)
+        .await
+        .into_iter()
+        .filter(|e| e["event"]["action"] == "credential_create")
+        .filter(|e| e["ferrowarden"]["credentials"] == json!([name]))
+        .collect();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event"]["outcome"], "success");
+    assert_eq!(events[0]["ferrowarden"]["key"]["name"], key_name.as_str());
+    assert!(events[0]["ferrowarden"]["details"]["collection_id"].is_string());
+    // An approved create is not a grant.
+    assert!(env.approvals().await["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|g| g["key"]["name"] != key_name.as_str()));
+    let delta = |n: &str, l: &[(&str, &str)]| after.sum(n, l) - before.sum(n, l);
+    assert_eq!(
+        delta(
+            "ferrowarden_credential_creates_total",
+            &[("outcome", "created")]
+        ),
+        1.0
+    );
+
+    // The independent reader: Node's crypto decrypts what Rust wrote.
+    let item = env.read_item(&name);
+    assert_eq!(item["found"], true, "{item}");
+    assert_eq!(item["count"], 1);
+    assert_eq!(
+        item["passwordSha256"],
+        sha256_hex(&value).as_str(),
+        "the stored password is the one the target received"
+    );
+    assert_eq!(item["passwordLength"], 40);
+    assert_eq!(item["username"], "svc-admin");
+    assert_eq!(item["uris"], json!(["http://mock-api:7777"]));
+    assert_eq!(
+        item["checksumsValid"], true,
+        "uriChecksum is base64(SHA-256(uri))"
+    );
+    assert_eq!(item["fieldNames"], json!(["ferrowarden_created_by"]));
+    assert_eq!(item["createdBy"], key_name.as_str());
+    assert_eq!(item["approvalField"], Value::Null);
+    assert_eq!(item["type"], 1);
+    assert_eq!(item["hasItemKey"], true);
+    assert_eq!(item["totp"], Value::Null);
+    assert_eq!(item["notes"], Value::Null);
+    assert_eq!(item["collections"], json!([MANAGED_COLLECTION_NAME]));
+    assert!(item["organizationId"].is_string(), "an organisation item");
+
+    env.revoke_key(&key_id).await;
+}
+
+/// Denied: `403 approval_denied`, nothing is written (a fresh read of the
+/// vault finds no item), and the identical retry is refused with no new prompt.
+#[tokio::test]
+async fn test_create_denied_writes_nothing() {
+    let Some(env) = TestEnv::load() else { return };
+    let (key_name, key_id, token) = env.creator_key("create-deny", json!(["agent_*"])).await;
+    let name = created_name("denied");
+
+    let held = spawn_create(&token, create_body(&name));
+    let open = env.wait_for_pending(&key_name, 1).await.remove(0);
+    let id = open["id"].as_str().unwrap().to_string();
+    let r = env
+        .admin_call("POST", &format!("/v1/admin/approvals/{id}/deny"), None)
+        .await;
+    assert_eq!(r.status(), 200);
+    let (status, body) = held.await.unwrap();
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (403, Some("approval_denied"))
+    );
+
+    assert!(!env.lists(&token, &name).await);
+    let item = env.read_item(&name);
+    assert_eq!(item["found"], false, "nothing was written: {item}");
+
+    // The identical retry: refused at once, with no new prompt.
+    let (status, body) = spawn_create(&token, create_body(&name)).await.unwrap();
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (403, Some("approval_denied"))
+    );
+    assert!(env.pending_of(&key_name).await.is_empty());
+    let asked: Vec<Value> = env
+        .events(500)
+        .await
+        .into_iter()
+        .filter(|e| {
+            e["event"]["action"] == "approval_requested"
+                && e["ferrowarden"]["key"]["name"] == key_name.as_str()
+        })
+        .collect();
+    assert_eq!(asked.len(), 1, "a denial is not asked again");
+    env.revoke_key(&key_id).await;
+}
+
+/// Undecided: `approval_pending` with the id; the human approves; the
+/// identical retry creates it; the same request again is a `409` (checked
+/// before any prompt: no new `approval_requested`).
+#[tokio::test]
+async fn test_create_undecided_is_pending_then_the_retry_creates_it_once() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    let (key_name, key_id, token) = env.creator_key("create-pend", json!(["agent_*"])).await;
+    let name = created_name("pending");
+
+    let (status, body) = spawn_create(&token, create_body(&name)).await.unwrap();
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (403, Some("approval_pending"))
+    );
+    let approval_id = body["approval_id"].as_str().unwrap().to_string();
+    assert!(!env.lists(&token, &name).await);
+
+    // The human approves while nobody is waiting; nothing is written yet.
+    let r = env.approve_create_api(&approval_id).await;
+    assert_eq!(r.status(), 200);
+    assert!(!env.lists(&token, &name).await);
+
+    // The identical retry goes through, and the approval is used up.
+    let resp = env.post_create(&token, &create_body(&name)).await;
+    let (status, created) = spec.check("/v1/credentials", "POST", resp).await;
+    assert_eq!(status, 201, "{created}");
+    assert!(env.lists(&token, &name).await);
+
+    let resp = env.post_create(&token, &create_body(&name)).await;
+    let (status, again) = spec.check("/v1/credentials", "POST", resp).await;
+    assert_eq!(
+        (status, again["code"].as_str()),
+        (409, Some("credential_exists"))
+    );
+    let asked = env
+        .events(500)
+        .await
+        .into_iter()
+        .filter(|e| {
+            e["event"]["action"] == "approval_requested"
+                && e["ferrowarden"]["key"]["name"] == key_name.as_str()
+        })
+        .count();
+    assert_eq!(asked, 1, "the conflict was answered before any prompt");
+    env.revoke_key(&key_id).await;
+}
+
+/// Refused before any prompt (and so before anything is generated or
+/// written): a name that exists, a name outside the key's `create` list, a
+/// key with no `create` list, a URI the outbound policy blocks, and invalid
+/// bodies.
+#[tokio::test]
+async fn test_create_refusals_come_before_any_prompt() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    let (key_name, key_id, token) = env.creator_key("create-refuse", json!(["agent_*"])).await;
+    let m = metrics_env();
+    let before = m.scrape(&env).await;
+    let open_before = env.approvals().await["pending"].as_array().unwrap().len();
+
+    // A name that already exists (a seeded credential), even for a key that
+    // may create anything.
+    let (_, any_id, any_token) = env.creator_key("create-any", json!(["*"])).await;
+    expect_create(
+        &spec,
+        "an existing name",
+        (409, Some("credential_exists")),
+        env.post_create(&any_token, &create_body("test_api_token"))
+            .await,
+    )
+    .await;
+    // A name outside the key's list.
+    expect_create(
+        &spec,
+        "outside the create list",
+        (403, Some("credential_create_out_of_scope")),
+        env.post_create(
+            &token,
+            &create_body(&created_name("x").replace("agent_", "other_")),
+        )
+        .await,
+    )
+    .await;
+    // A key without a create list: its credentials and methods do not matter.
+    let (_, none_id, none_token) = env.creator_key("create-none", json!([])).await;
+    expect_create(
+        &spec,
+        "no create list",
+        (403, Some("credential_create_out_of_scope")),
+        env.post_create(&none_token, &create_body(&created_name("none")))
+            .await,
+    )
+    .await;
+    // URIs the outbound target policy blocks.
+    for uri in [
+        "http://169.254.169.254/latest/meta-data",
+        "http://10.1.2.3:8080",
+        "https://vaultwarden",
+    ] {
+        let mut body = create_body(&created_name("blocked"));
+        body["uris"] = json!([uri]);
+        let resp = env.post_create(&token, &body).await;
+        let (status, b) = spec.check("/v1/credentials", "POST", resp).await;
+        assert_eq!(status, 403, "{uri}: {b}");
+    }
+    // Invalid bodies.
+    let ok = create_body(&created_name("invalid"));
+    for (what, body) in [
+        ("short length", {
+            let mut b = ok.clone();
+            b["generate"] = json!({"length": 8});
+            b
+        }),
+        ("unknown charset", {
+            let mut b = ok.clone();
+            b["generate"] = json!({"charset": "emoji"});
+            b
+        }),
+        ("no uris", {
+            let mut b = ok.clone();
+            b["uris"] = json!([]);
+            b
+        }),
+        ("a null username", {
+            let mut b = ok.clone();
+            b["username"] = Value::Null;
+            b
+        }),
+        ("an unknown field", {
+            let mut b = ok.clone();
+            b["password"] = json!("chosen-by-the-agent");
+            b
+        }),
+    ] {
+        let resp = env.post_create(&token, &body).await;
+        let (status, b) = spec.check("/v1/credentials", "POST", resp).await;
+        assert_eq!(status, 400, "{what}: {b}");
+    }
+    // No key, a bad key.
+    for key in [None, Some("not-a-key")] {
+        let mut req = env
+            .client
+            .post(format!("{}/v1/credentials", env.fw_url))
+            .json(&ok);
+        if let Some(k) = key {
+            req = req.header("X-Agent-Key", k);
+        }
+        let resp = req.send().await.unwrap();
+        assert_eq!(spec.check("/v1/credentials", "POST", resp).await.0, 401);
+    }
+
+    // Nobody was asked, and no create was written or counted as created.
+    assert!(env.pending_of(&key_name).await.is_empty());
+    assert_eq!(
+        env.approvals().await["pending"].as_array().unwrap().len(),
+        open_before
+    );
+    let after = m.scrape(&env).await;
+    assert_eq!(
+        after.sum(
+            "ferrowarden_credential_creates_total",
+            &[("outcome", "created")]
+        ) - before.sum(
+            "ferrowarden_credential_creates_total",
+            &[("outcome", "created")]
+        ),
+        0.0
+    );
+    assert!(
+        after.sum(
+            "ferrowarden_credential_creates_total",
+            &[("outcome", "credential_exists")]
+        ) - before.sum(
+            "ferrowarden_credential_creates_total",
+            &[("outcome", "credential_exists")]
+        ) >= 1.0
+    );
+    for id in [key_id, any_id, none_id] {
+        env.revoke_key(&id).await;
+    }
+}
+
+/// `approval_required: true`: the new item carries a `ferrowarden_approval`
+/// field, so using it needs a human's approval (a forward-kind approval with
+/// the vault field as the reason), and the independent reader sees the field.
+#[tokio::test]
+async fn test_create_approval_required_makes_every_use_need_approval() {
+    let Some(env) = TestEnv::load() else { return };
+    let (key_name, key_id, token) = env.creator_key("create-flag", json!(["agent_*"])).await;
+    let name = created_name("flag");
+    let mut body = create_body(&name);
+    body["approval_required"] = json!(true);
+
+    let held = spawn_create(&token, body);
+    let open = env.wait_for_pending(&key_name, 1).await.remove(0);
+    assert_eq!(open["create"]["approval_required"], true);
+    env.approve_create_api(open["id"].as_str().unwrap()).await;
+    assert_eq!(held.await.unwrap().0, 201);
+
+    // Using it is held for approval (kind forward, reason vault_field).
+    env.reset_mock().await;
+    let use_it = {
+        let (token, name) = (token.clone(), name.clone());
+        tokio::spawn(async move {
+            let env = TestEnv::load().unwrap();
+            use_created_password(&env, &token, &name).await
+        })
+    };
+    let open = env.wait_for_pending(&key_name, 1).await.remove(0);
+    assert_eq!(open["kind"], "forward");
+    assert_eq!(
+        open["credentials"],
+        json!([{ "credential": name, "reasons": ["vault_field"] }])
+    );
+    assert!(
+        env.all_captured_requests().await.is_empty(),
+        "nothing sent yet"
+    );
+    let r = env.approve_api(open["id"].as_str().unwrap(), 5).await;
+    assert_eq!(r.status(), 200);
+    let (status, answer) = use_it.await.unwrap();
+    assert_eq!(status, 200, "{answer}");
+    let value = env.latest_created_password().await;
+    record_secret_for_gate(&value);
+    assert_eq!(value.chars().count(), 40);
+
+    let item = env.read_item(&name);
+    assert_eq!(item["approvalField"], "required");
+    assert_eq!(
+        item["fieldNames"],
+        json!(["ferrowarden_created_by", "ferrowarden_approval"])
+    );
+    assert_eq!(item["passwordSha256"], sha256_hex(&value).as_str());
+    env.revoke_key(&key_id).await;
+}
+
+/// The agent key cannot decide a create approval, and a duration is refused
+/// for it (it has none). Both leave it open for the human.
+#[tokio::test]
+async fn test_create_the_agent_cannot_decide_and_a_duration_is_refused() {
+    let Some(env) = TestEnv::load() else { return };
+    let (key_name, key_id, token) = env.creator_key("create-decide", json!(["agent_*"])).await;
+    let name = created_name("decide");
+    let held = spawn_create(&token, create_body(&name));
+    let open = env.wait_for_pending(&key_name, 1).await.remove(0);
+    let id = open["id"].as_str().unwrap().to_string();
+
+    // The agent's own key is not an admin key.
+    for action in ["approve", "deny"] {
+        let resp = env
+            .client
+            .post(format!("{}/v1/admin/approvals/{id}/{action}", env.fw_url))
+            .header("X-Agent-Key", &token)
+            .header("X-Admin-Key", &token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401, "{action} with an agent key");
+    }
+    // A duration makes no sense for one operation.
+    let resp = env
+        .admin_call(
+            "POST",
+            &format!("/v1/admin/approvals/{id}/approve"),
+            Some(json!({ "minutes": 15 })),
+        )
+        .await;
+    assert_eq!(resp.status(), 400);
+    assert_eq!(env.pending_of(&key_name).await.len(), 1, "still open");
+    assert!(!env.lists(&token, &name).await);
+
+    // The human denies it; the held request ends.
+    let r = env
+        .admin_call("POST", &format!("/v1/admin/approvals/{id}/deny"), None)
+        .await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(held.await.unwrap().0, 403);
+    env.revoke_key(&key_id).await;
+}
+
+/// The status endpoint and the UI status page name the managed collection and
+/// say whether it is usable; the UI shows a create approval in full and
+/// approving it there (no duration) lets the retry through.
+#[tokio::test]
+async fn test_create_status_and_ui_approval() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    let r = env.admin_call("GET", "/v1/admin/status", None).await;
+    let (s, status) = spec.check("/v1/admin/status", "GET", r).await;
+    assert_eq!(s, 200);
+    let managed = &status["managed_collection"];
+    assert_eq!(managed["configured"], true, "{status}");
+    assert_eq!(managed["usable"], true, "{status}");
+    assert_eq!(managed["name"], MANAGED_COLLECTION_NAME);
+    assert!(managed["id"].as_str().is_some_and(|id| id.len() == 36));
+
+    let mut b = env.ui_browser();
+    assert_eq!(b.sign_in(&master_password()).await.status, 303);
+    let page = b.get("/ui/").await;
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("Managed collection"));
+    assert!(page.body.contains(MANAGED_COLLECTION_NAME));
+    assert!(page.body.contains("Usable"));
+
+    let (key_name, key_id, token) = env.creator_key("create-ui", json!(["agent_*"])).await;
+    let name = created_name("ui");
+    let held = spawn_create(&token, create_body(&name));
+    let open = env.wait_for_pending(&key_name, 1).await.remove(0);
+    let id = open["id"].as_str().unwrap().to_string();
+    let page = b.get(&format!("/ui/approvals/{id}")).await;
+    assert_eq!(page.status, 200);
+    for needle in [
+        "Create this credential?",
+        name.as_str(),
+        "svc-admin",
+        "40 characters",
+        MANAGED_COLLECTION_NAME,
+        "never sees the password",
+    ] {
+        assert!(page.body.contains(needle), "{needle}");
+    }
+    assert!(
+        !page.body.contains("name=\"minutes\""),
+        "no duration for a create"
+    );
+    let list = b.get("/ui/approvals").await;
+    assert!(list.body.contains(&id) && list.body.contains("<code>create</code>"));
+
+    let r = b
+        .post(
+            &format!("/ui/approvals/{id}/approve"),
+            &[("csrf", &page.csrf())],
+        )
+        .await;
+    assert_eq!(r.status, 303);
+    assert_eq!(r.header("location"), "/ui/approvals?m=approved_create");
+    assert_eq!(held.await.unwrap().0, 201);
+    let granted = env.approval_events("approval_granted", &id).await;
+    assert_eq!(granted[0]["ferrowarden"]["details"]["via"], "ui");
+    assert_eq!(granted[0]["ferrowarden"]["details"]["kind"], "create");
+    assert_eq!(
+        granted[0]["ferrowarden"]["details"]["approver"],
+        ui_email().as_str()
+    );
+    env.revoke_key(&key_id).await;
 }

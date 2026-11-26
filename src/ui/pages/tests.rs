@@ -32,6 +32,13 @@ fn interpolated_values_are_escaped() {
         events_dropped: 0,
         session_expires: "soon",
         csrf: "tok",
+        managed: ManagedView {
+            configured: true,
+            usable: false,
+            name: "<b>x</b>".to_string(),
+            id: String::new(),
+            problem: "<i>why</i>".to_string(),
+        },
         notify: NotifyView {
             enabled: true,
             senders: vec![NotifySenderRow {

@@ -20,6 +20,18 @@
 //!   (key revoke, policy change, vault lock), modelled on `sessions`;
 //! * the events (never a value).
 //!
+//! **Two kinds of approval** share the store, the limits, the hold-then-retry
+//! flow and the decision routes:
+//!
+//! * `forward`: a request that uses a credential that needs approval. Approving
+//!   it gives a **grant** for a chosen number of minutes (key, items, origin).
+//! * `create`: a request to **create** a credential (`POST /v1/credentials`).
+//!   It is approved for **exactly one operation**, identified by a fingerprint
+//!   of the key, the name, the username, the URIs, the generation options and
+//!   the approval flag. The approval is consumed by the first request that
+//!   matches it (the one that is waiting, or the first retry within
+//!   `approval.pending_ttl_secs`); it never becomes a timed grant.
+//!
 //! Decisions (approve, deny, revoke a grant) are made by
 //! `api::approval_service`, which only the admin API and the admin UI call.
 //! No agent route reaches them.
@@ -149,6 +161,57 @@ pub fn needs(required: &Required) -> Vec<ApprovalNeed> {
         .collect()
 }
 
+// ── Kinds ─────────────────────────────────────────────────────────────────────
+
+/// What an approval is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalKind {
+    /// Using a credential that needs approval; approving gives a grant.
+    Forward,
+    /// Creating a credential; approving allows exactly one operation.
+    Create,
+}
+
+impl ApprovalKind {
+    /// The value of `kind` in events and the admin API: `forward`, `create`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ApprovalKind::Forward => "forward",
+            ApprovalKind::Create => "create",
+        }
+    }
+}
+
+/// What a `create` approval is asked for: everything the human decides on.
+/// There is no value, because none has been generated yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateDetail {
+    pub name: String,
+    pub username: Option<String>,
+    /// Sorted.
+    pub uris: Vec<String>,
+    /// `alphanumeric`, `ascii`, `hex` or `base64url`.
+    pub charset: String,
+    pub length: u32,
+    /// The new item will itself need approval whenever it is used.
+    pub approval_required: bool,
+    /// The managed collection the item will be written to (its name).
+    pub collection: String,
+}
+
+impl CreateDetail {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "name": self.name,
+            "username": self.username,
+            "uris": self.uris,
+            "generate": { "charset": self.charset, "length": self.length },
+            "approval_required": self.approval_required,
+            "collection": self.collection,
+        })
+    }
+}
+
 // ── Views ─────────────────────────────────────────────────────────────────────
 
 /// What became of a pending approval.
@@ -165,9 +228,13 @@ pub enum Decision {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingView {
     pub id: String,
+    pub kind: ApprovalKind,
     pub key_id: String,
     pub key_name: String,
+    /// For a `create`: the one credential name.
     pub items: Vec<ApprovalNeed>,
+    /// What a `create` approval is for (`None` for a forward).
+    pub create: Option<CreateDetail>,
     pub method: String,
     pub scheme: String,
     /// Host, with `:port` when it is not the scheme's default.
@@ -192,17 +259,27 @@ impl PendingView {
     }
 
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut body = json!({
             "id": self.id,
+            "kind": self.kind.as_str(),
             "key": { "id": self.key_id, "name": self.key_name },
             "credentials": self.items.iter().map(ApprovalNeed::to_json).collect::<Vec<_>>(),
-            "method": self.method,
-            "origin": { "scheme": self.scheme, "host": self.host, "port": self.port },
-            "url": self.url,
             "request_id": self.request_id,
             "created_at": rfc3339(self.created),
             "expires_at": rfc3339(self.expires),
-        })
+        });
+        match &self.create {
+            // A create has no method, origin or URL: it is not a request to
+            // a target.
+            Some(create) => body["create"] = create.to_json(),
+            None => {
+                body["method"] = json!(self.method);
+                body["origin"] =
+                    json!({ "scheme": self.scheme, "host": self.host, "port": self.port });
+                body["url"] = json!(self.url);
+            }
+        }
+        body
     }
 }
 
@@ -253,7 +330,10 @@ impl GrantView {
 
 struct Pending {
     view: PendingView,
-    origin: Origin,
+    /// The target origin of a forward (`None` for a create).
+    origin: Option<Origin>,
+    /// The fingerprint of the one operation a create approval covers.
+    fingerprint: Option<String>,
     tx: watch::Sender<Decision>,
 }
 
@@ -264,8 +344,18 @@ struct Grant {
 
 struct Denial {
     key_id: String,
+    /// A credential name, or `create:<fingerprint>` for a create.
     item: String,
-    origin: Origin,
+    /// `None` for a create.
+    origin: Option<Origin>,
+    until: DateTime<Utc>,
+}
+
+/// A create approval that was approved and has not been used yet: the one
+/// operation it covers, until `until`.
+struct ApprovedCreate {
+    key_id: String,
+    fingerprint: String,
     until: DateTime<Utc>,
 }
 
@@ -273,6 +363,8 @@ struct Denial {
 struct Inner {
     pending: HashMap<String, Pending>,
     grants: HashMap<String, Grant>,
+    /// Approved creates waiting for their request; consumed once.
+    approved_creates: Vec<ApprovedCreate>,
     denials: Vec<Denial>,
     /// When each key's prompts were created, for the hourly limit (sliding
     /// window: a prompt counts for one hour).
@@ -320,6 +412,16 @@ pub struct AskFor<'a> {
     /// The URL as the agent sent it.
     pub url: &'a str,
     pub request_id: &'a str,
+}
+
+/// The create request an approval is asked for.
+pub struct CreateAsk<'a> {
+    pub key_id: &'a str,
+    pub key_name: &'a str,
+    pub request_id: &'a str,
+    /// Identifies this one operation (see `create::CreateRequest::fingerprint`).
+    pub fingerprint: &'a str,
+    pub detail: &'a CreateDetail,
 }
 
 /// A held request counts against its key's `max_waiters_per_key` until this
@@ -413,7 +515,7 @@ impl ApprovalStore {
         // 2. A recent denial of any of them stands.
         if needed
             .iter()
-            .any(|item| inner.is_denied(ask.key_id, ask.origin, item, now))
+            .any(|item| inner.is_denied(ask.key_id, Some(ask.origin), item, now))
         {
             return Ok(Check::Denied);
         }
@@ -424,7 +526,7 @@ impl ApprovalStore {
             .values()
             .find(|p| {
                 p.view.key_id == ask.key_id
-                    && p.origin == *ask.origin
+                    && p.origin.as_ref() == Some(ask.origin)
                     && p.view.expires > now
                     && p.view.items.len() == needed.len()
                     && p.view
@@ -438,27 +540,20 @@ impl ApprovalStore {
             Some((view, rx)) => (view, rx, false),
             None => {
                 // 4. A new one, within the limits.
-                let open = inner
-                    .pending
-                    .values()
-                    .filter(|p| p.view.key_id == ask.key_id && p.view.expires > now)
-                    .count();
-                if open >= cfg.max_pending_per_key {
-                    return Ok(Check::LimitReached);
-                }
-                let prompts = inner.prompts.entry(ask.key_id.to_string()).or_default();
-                while prompts.front().is_some_and(|t| *t <= now - PROMPT_WINDOW) {
-                    prompts.pop_front();
-                }
-                if prompts.len() >= cfg.max_requests_per_key_per_hour {
+                if !inner.within_limits(ask.key_id, cfg, now) {
                     return Ok(Check::LimitReached);
                 }
                 let id = new_id()
                     .ok_or_else(|| FerroError::Internal("no random id for an approval".into()))?;
-                prompts.push_back(now);
+                inner
+                    .prompts
+                    .entry(ask.key_id.to_string())
+                    .or_default()
+                    .push_back(now);
                 let ttl = ChronoDuration::seconds(i64::try_from(cfg.pending_ttl_secs).unwrap_or(0));
                 let view = PendingView {
                     id: id.clone(),
+                    kind: ApprovalKind::Forward,
                     key_id: ask.key_id.to_string(),
                     key_name: ask.key_name.to_string(),
                     items: needed
@@ -468,6 +563,7 @@ impl ApprovalStore {
                             reasons: required[*item],
                         })
                         .collect(),
+                    create: None,
                     method: truncate(ask.method, MAX_METHOD_CHARS),
                     scheme: ask.origin.scheme().to_string(),
                     host: ask.origin.host_label(),
@@ -482,29 +578,140 @@ impl ApprovalStore {
                     id,
                     Pending {
                         view: view.clone(),
-                        origin: ask.origin.clone(),
+                        origin: Some(ask.origin.clone()),
+                        fingerprint: None,
                         tx,
                     },
                 );
                 (view, rx, true)
             }
         };
+        Ok(self.hold(inner, ask.key_id, view, rx, created, cfg))
+    }
 
-        // Hold the request, unless the key already has too many held.
-        let held = inner.waiters.get(ask.key_id).copied().unwrap_or(0);
-        if held >= cfg.max_waiters_per_key {
-            return Ok(Check::Pending { view, created });
+    /// The same for a **create**: an approved operation that matches is used
+    /// up (once), a recent denial of it stands, an open approval for the same
+    /// operation is reused, and otherwise a new one is opened within the
+    /// limits (the same per-key limits as forwards).
+    pub fn check_create(
+        self: &Arc<Self>,
+        ask: &CreateAsk<'_>,
+        cfg: &ApprovalConfig,
+        now: DateTime<Utc>,
+    ) -> FerroResult<Check> {
+        let mut guard = self.lock();
+        let inner: &mut Inner = &mut guard;
+
+        // 1. Approved already, and not used yet: used now.
+        if inner.consume_create(ask.key_id, ask.fingerprint, now) {
+            return Ok(Check::Granted);
         }
-        *inner.waiters.entry(ask.key_id.to_string()).or_default() += 1;
-        Ok(Check::Wait {
+        // 2. A recent denial of this operation stands.
+        let denial_item = create_denial_item(ask.fingerprint);
+        if inner.is_denied(ask.key_id, None, &denial_item, now) {
+            return Ok(Check::Denied);
+        }
+        // 3. An open approval for exactly this operation.
+        let found = inner
+            .pending
+            .values()
+            .find(|p| {
+                p.view.key_id == ask.key_id
+                    && p.fingerprint.as_deref() == Some(ask.fingerprint)
+                    && p.view.expires > now
+            })
+            .map(|p| (p.view.clone(), p.tx.subscribe()));
+        let (view, rx, created) = match found {
+            Some((view, rx)) => (view, rx, false),
+            None => {
+                // 4. A new one, within the limits.
+                if !inner.within_limits(ask.key_id, cfg, now) {
+                    return Ok(Check::LimitReached);
+                }
+                let id = new_id()
+                    .ok_or_else(|| FerroError::Internal("no random id for an approval".into()))?;
+                inner
+                    .prompts
+                    .entry(ask.key_id.to_string())
+                    .or_default()
+                    .push_back(now);
+                let ttl = ChronoDuration::seconds(i64::try_from(cfg.pending_ttl_secs).unwrap_or(0));
+                let view = PendingView {
+                    id: id.clone(),
+                    kind: ApprovalKind::Create,
+                    key_id: ask.key_id.to_string(),
+                    key_name: ask.key_name.to_string(),
+                    items: vec![ApprovalNeed {
+                        item: ask.detail.name.clone(),
+                        reasons: Reasons::default(),
+                    }],
+                    create: Some(ask.detail.clone()),
+                    method: String::new(),
+                    scheme: String::new(),
+                    host: String::new(),
+                    port: 0,
+                    url: String::new(),
+                    request_id: truncate(ask.request_id, 64),
+                    created: now,
+                    expires: now + ttl,
+                };
+                let (tx, rx) = watch::channel(Decision::Pending);
+                inner.pending.insert(
+                    id,
+                    Pending {
+                        view: view.clone(),
+                        origin: None,
+                        fingerprint: Some(ask.fingerprint.to_string()),
+                        tx,
+                    },
+                );
+                (view, rx, true)
+            }
+        };
+        Ok(self.hold(inner, ask.key_id, view, rx, created, cfg))
+    }
+
+    /// Hold the request, unless the key already has too many held.
+    fn hold(
+        self: &Arc<Self>,
+        inner: &mut Inner,
+        key_id: &str,
+        view: PendingView,
+        rx: watch::Receiver<Decision>,
+        created: bool,
+        cfg: &ApprovalConfig,
+    ) -> Check {
+        let held = inner.waiters.get(key_id).copied().unwrap_or(0);
+        if held >= cfg.max_waiters_per_key {
+            return Check::Pending { view, created };
+        }
+        *inner.waiters.entry(key_id.to_string()).or_default() += 1;
+        Check::Wait {
             view,
             created,
             rx,
             guard: WaiterGuard {
                 store: self.clone(),
-                key_id: ask.key_id.to_string(),
+                key_id: key_id.to_string(),
             },
-        })
+        }
+    }
+
+    /// Use up the approved create that matches, if there is one. Called by a
+    /// request that was woken by the approval, and by [`check_create`].
+    ///
+    /// [`check_create`]: Self::check_create
+    pub fn consume_create(&self, key_id: &str, fingerprint: &str, now: DateTime<Utc>) -> bool {
+        self.lock().consume_create(key_id, fingerprint, now)
+    }
+
+    /// The kind of an open approval, if `id` is one.
+    pub fn kind_of(&self, id: &str, now: DateTime<Utc>) -> Option<ApprovalKind> {
+        self.lock()
+            .pending
+            .get(id)
+            .filter(|p| p.view.expires > now)
+            .map(|p| p.view.kind)
     }
 
     /// Does the key hold a live grant for every one of `required`, at `origin`?
@@ -533,7 +740,11 @@ impl ApprovalStore {
         now: DateTime<Utc>,
     ) -> Result<(PendingView, GrantView), NotPending> {
         let mut inner = self.lock();
-        if !inner.pending.get(id).is_some_and(|p| p.view.expires > now) {
+        // Only a forward approval gives a grant: a create is approved with
+        // `approve_create`.
+        if !inner.pending.get(id).is_some_and(|p| {
+            p.view.expires > now && p.view.kind == ApprovalKind::Forward && p.origin.is_some()
+        }) {
             return Err(NotPending);
         }
         let Some(pending) = inner.pending.remove(id) else {
@@ -562,11 +773,44 @@ impl ApprovalStore {
             grant.id.clone(),
             Grant {
                 view: grant.clone(),
-                origin: pending.origin.clone(),
+                origin: pending.origin.clone().ok_or(NotPending)?,
             },
         );
         let _ = pending.tx.send(Decision::Approved);
         Ok((pending.view, grant))
+    }
+
+    /// Approve the create approval `id`: **one** operation, the one it was
+    /// opened for, may now proceed. It replaces any denial of it, wakes the
+    /// held requests, and is kept for `ttl` for a retry to use; the first
+    /// request that matches uses it up. It never becomes a grant.
+    pub fn approve_create(
+        &self,
+        id: &str,
+        ttl: Duration,
+        now: DateTime<Utc>,
+    ) -> Result<PendingView, NotPending> {
+        let mut inner = self.lock();
+        if !inner.pending.get(id).is_some_and(|p| {
+            p.view.expires > now && p.view.kind == ApprovalKind::Create && p.fingerprint.is_some()
+        }) {
+            return Err(NotPending);
+        }
+        let Some(pending) = inner.pending.remove(id) else {
+            return Err(NotPending);
+        };
+        let fingerprint = pending.fingerprint.clone().ok_or(NotPending)?;
+        let denial_item = create_denial_item(&fingerprint);
+        inner
+            .denials
+            .retain(|d| !(d.key_id == pending.view.key_id && d.item == denial_item));
+        inner.approved_creates.push(ApprovedCreate {
+            key_id: pending.view.key_id.clone(),
+            fingerprint,
+            until: now + ChronoDuration::from_std(ttl).unwrap_or(ChronoDuration::zero()),
+        });
+        let _ = pending.tx.send(Decision::Approved);
+        Ok(pending.view)
     }
 
     /// Deny `id`: its items are refused for the key and origin for `ttl`, and
@@ -585,13 +829,24 @@ impl ApprovalStore {
             return Err(NotPending);
         };
         let until = now + ChronoDuration::from_std(ttl).unwrap_or(ChronoDuration::zero());
-        for need in &pending.view.items {
-            inner.denials.push(Denial {
+        match &pending.fingerprint {
+            // A create: the one operation is refused for a while.
+            Some(fingerprint) => inner.denials.push(Denial {
                 key_id: pending.view.key_id.clone(),
-                item: need.item.clone(),
-                origin: pending.origin.clone(),
+                item: create_denial_item(fingerprint),
+                origin: None,
                 until,
-            });
+            }),
+            None => {
+                for need in &pending.view.items {
+                    inner.denials.push(Denial {
+                        key_id: pending.view.key_id.clone(),
+                        item: need.item.clone(),
+                        origin: pending.origin.clone(),
+                        until,
+                    });
+                }
+            }
         }
         let _ = pending.tx.send(Decision::Denied);
         Ok(pending.view)
@@ -690,6 +945,7 @@ impl ApprovalStore {
             }
         }
         inner.denials.retain(|d| !pick(&d.key_id));
+        inner.approved_creates.retain(|a| !pick(&a.key_id));
         cleared
             .pending
             .sort_by(|a, b| (a.created, &a.id).cmp(&(b.created, &b.id)));
@@ -726,6 +982,7 @@ impl ApprovalStore {
             }
         }
         inner.denials.retain(|d| d.until > now);
+        inner.approved_creates.retain(|a| a.until > now);
         inner.prompts.retain(|_, q| {
             while q.front().is_some_and(|t| *t <= now - PROMPT_WINDOW) {
                 q.pop_front();
@@ -761,11 +1018,60 @@ impl Inner {
         })
     }
 
-    fn is_denied(&self, key_id: &str, origin: &Origin, item: &str, now: DateTime<Utc>) -> bool {
-        self.denials
-            .iter()
-            .any(|d| d.key_id == key_id && d.origin == *origin && d.item == item && d.until > now)
+    fn is_denied(
+        &self,
+        key_id: &str,
+        origin: Option<&Origin>,
+        item: &str,
+        now: DateTime<Utc>,
+    ) -> bool {
+        self.denials.iter().any(|d| {
+            d.key_id == key_id && d.origin.as_ref() == origin && d.item == item && d.until > now
+        })
     }
+
+    /// May the key open one more approval? Not when it has too many open, or
+    /// has caused too many prompts in the last hour (shared by both kinds).
+    /// Does not record the prompt: the caller does that when it opens one.
+    fn within_limits(&mut self, key_id: &str, cfg: &ApprovalConfig, now: DateTime<Utc>) -> bool {
+        let open = self
+            .pending
+            .values()
+            .filter(|p| p.view.key_id == key_id && p.view.expires > now)
+            .count();
+        if open >= cfg.max_pending_per_key {
+            return false;
+        }
+        let prompts = self.prompts.entry(key_id.to_string()).or_default();
+        while prompts.front().is_some_and(|t| *t <= now - PROMPT_WINDOW) {
+            prompts.pop_front();
+        }
+        prompts.len() < cfg.max_requests_per_key_per_hour
+    }
+
+    /// Remove (and report) one live approved create of this key and
+    /// operation.
+    fn consume_create(&mut self, key_id: &str, fingerprint: &str, now: DateTime<Utc>) -> bool {
+        // Expired entries are dropped on the way, so none can be used late.
+        self.approved_creates.retain(|a| a.until > now);
+        match self
+            .approved_creates
+            .iter()
+            .position(|a| a.key_id == key_id && a.fingerprint == fingerprint)
+        {
+            Some(i) => {
+                self.approved_creates.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// The `item` of a create's denial record: the operation's fingerprint, marked
+/// so that it can never equal a credential name.
+fn create_denial_item(fingerprint: &str) -> String {
+    format!("create:{fingerprint}")
 }
 
 // ── The gate ──────────────────────────────────────────────────────────────────
@@ -895,6 +1201,77 @@ pub async fn gate(
     }
 }
 
+/// The approval gate of `POST /v1/credentials`. Runs after every other check
+/// and **before anything is generated or written**: the request is held, and
+/// only a human's approval of exactly this operation lets it go on.
+///
+/// Returns `Ok(())` when the operation was approved (and the approval is
+/// used up), or the refusal: `approval_denied`, `approval_pending` (with the
+/// id to approve) or `approval_limit_reached`. No lock is held while the
+/// request waits.
+pub async fn gate_create(
+    state: &Arc<AppState>,
+    agent: &AgentKey,
+    ctx: &RequestContext,
+    fingerprint: &str,
+    detail: &CreateDetail,
+) -> FerroResult<()> {
+    let cfg = &state.config.approval;
+    let store = &state.approvals;
+    let ask = CreateAsk {
+        key_id: &agent.id,
+        key_name: &agent.name,
+        request_id: &ctx.request_id,
+        fingerprint,
+        detail,
+    };
+    match store.check_create(&ask, cfg, Utc::now())? {
+        Check::Granted => Ok(()),
+        Check::Denied => Err(FerroError::ApprovalDenied),
+        Check::LimitReached => Err(FerroError::ApprovalLimitReached),
+        Check::Pending { view, created } => {
+            if created {
+                announce(state, ctx, &view);
+            }
+            Err(FerroError::ApprovalPending { id: view.id })
+        }
+        Check::Wait {
+            view,
+            created,
+            rx,
+            guard,
+        } => {
+            if created {
+                announce(state, ctx, &view);
+            }
+            let waited = wait_for_decision(
+                rx,
+                store.shutdown.subscribe(),
+                Duration::from_secs(cfg.wait_secs),
+            )
+            .await;
+            drop(guard);
+            match waited {
+                Waited::Decision(Decision::Approved) => {
+                    // The approval is for one operation: whoever gets to it
+                    // first uses it up. If another request (an identical
+                    // retry) was first, or the key was changed in the
+                    // instant since, this one asks again.
+                    if store.consume_create(&agent.id, fingerprint, Utc::now()) {
+                        Ok(())
+                    } else {
+                        Err(FerroError::ApprovalPending { id: view.id })
+                    }
+                }
+                Waited::Decision(Decision::Denied) => Err(FerroError::ApprovalDenied),
+                Waited::Decision(_) | Waited::Timeout | Waited::Shutdown => {
+                    Err(FerroError::ApprovalPending { id: view.id })
+                }
+            }
+        }
+    }
+}
+
 /// A new approval was opened: record `approval_requested` (which the notifier
 /// turns into the prompt) and, once, warn when nobody will be told.
 fn announce(state: &AppState, ctx: &RequestContext, view: &PendingView) {
@@ -930,14 +1307,20 @@ pub fn requested_event(
     let mut event = SecurityEvent::new(Action::ApprovalRequested)
         .request(ctx)
         .key_named(&v.key_id, &v.key_name)
-        .method(&v.method)
-        .url(&v.url)
         .credentials(v.item_names())
+        .detail("kind", v.kind.as_str())
         .detail("approval_id", v.id.as_str())
-        .detail("reasons", reasons_json(&v.items))
-        .detail("host", v.host.as_str())
-        .detail("path", v.path())
         .detail("expires_at", rfc3339(v.expires));
+    event = match &v.create {
+        // A create asks about what will be made: no request to a target.
+        Some(create) => event.detail("create", create.to_json()),
+        None => event
+            .method(&v.method)
+            .url(&v.url)
+            .detail("reasons", reasons_json(&v.items))
+            .detail("host", v.host.as_str())
+            .detail("path", v.path()),
+    };
     if let Some(link) = link {
         event = event.detail("link", link);
     }
@@ -950,6 +1333,7 @@ pub fn expired_event(v: &PendingView, cause: &'static str) -> SecurityEvent {
     SecurityEvent::new(Action::ApprovalExpired)
         .key_named(&v.key_id, &v.key_name)
         .credentials(v.item_names())
+        .detail("kind", v.kind.as_str())
         .detail("approval_id", v.id.as_str())
         .detail("host", v.host.as_str())
         .detail("cause", cause)
