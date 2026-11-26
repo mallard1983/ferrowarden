@@ -4,9 +4,9 @@ Ferrowarden's goal: an AI agent can do real infrastructure work — call APIs, d
 
 Each item is a GitHub issue with the motivation, a design sketch, security considerations and acceptance criteria. Discussion and feedback are welcome on the issues — especially on anything labelled [`security`](https://github.com/mallard1983/ferrowarden/labels/security). Plans can change; the [milestones](https://github.com/mallard1983/ferrowarden/milestones) are the source of truth.
 
-## v0.2.0 — Credential coverage and integrations
+## v0.2.0 — Credential coverage and integrations (released)
 
-Make Ferrowarden a drop-in for more services and more agent harnesses.
+Make Ferrowarden a drop-in for more services and more agent harnesses. Released on 2026-11-25: see the [release notes](docs/release-notes/v0.2.0.md).
 
 | Issue | Summary |
 |---|---|
@@ -19,16 +19,28 @@ Make Ferrowarden a drop-in for more services and more agent harnesses.
 | [#11](https://github.com/mallard1983/ferrowarden/issues/11) | **MCP server** (`ferrowarden-mcp`) so any MCP-capable harness can use Ferrowarden |
 | [#12](https://github.com/mallard1983/ferrowarden/issues/12) | **Push notifications** for blocked requests and security events (Gotify, webhooks) |
 | [#13](https://github.com/mallard1983/ferrowarden/issues/13) | **Prometheus metrics** |
+| [#34](https://github.com/mallard1983/ferrowarden/issues/34) | **Hardened container** — no shell, secrets read in Rust, `ferrowarden healthcheck` |
+| [#36](https://github.com/mallard1983/ferrowarden/issues/36) | **Native vault backend** — Ferrowarden reads the vault itself; no `bw serve`, Node.js or openssl in the default deployment |
 
 ## v0.3.0 — Human in the loop and credential lifecycle
 
-Keep humans in control of sensitive actions, and keep derived and newly created credentials away from the agent too.
+Keep humans in control of sensitive actions, and keep derived and newly created credentials away from the agent too. Planned order: remove `bw-serve` first, so the vault write path for #16 is built once; #15 is self-contained; #14 builds on the notifiers and the admin UI.
 
 | Issue | Summary |
 |---|---|
-| [#14](https://github.com/mallard1983/ferrowarden/issues/14) | **Human approval** for sensitive credentials, with time-boxed grants |
+| [#48](https://github.com/mallard1983/ferrowarden/issues/48) | **Remove the deprecated `bw-serve` backend** — the native backend only |
 | [#15](https://github.com/mallard1983/ferrowarden/issues/15) | **Server-side session tokens** — capture login JWTs/tickets so the agent is not handed them |
-| [#16](https://github.com/mallard1983/ferrowarden/issues/16) | **Generate and store** new credentials without the agent seeing the value |
+| [#14](https://github.com/mallard1983/ferrowarden/issues/14) | **Human approval** for sensitive credentials, with time-boxed grants |
+| [#16](https://github.com/mallard1983/ferrowarden/issues/16) | **Generate and store** new credentials without the agent seeing the value (native vault writes) |
+
+Hardening and quality work in the same release:
+
+| Issue | Summary |
+|---|---|
+| [#49](https://github.com/mallard1983/ferrowarden/issues/49) | **Renew the internal CA** before it expires |
+| [#50](https://github.com/mallard1983/ferrowarden/issues/50) | **CI brings up the shipped `docker-compose.yml`**, including an in-place upgrade |
+| [#51](https://github.com/mallard1983/ferrowarden/issues/51) | **`actionlint`** on the workflow files in CI |
+| [#52](https://github.com/mallard1983/ferrowarden/issues/52) | **Integration test** for `vault.allow_hidden_passwords = true` |
 
 ## v0.4.0 — Agent SSH client
 
@@ -40,6 +52,7 @@ Run commands and deploy files on hosts without the agent holding SSH keys or see
 | [#17](https://github.com/mallard1983/ferrowarden/issues/17) | **`POST /v1/ssh/exec`** — operator-defined targets, pinned host keys, keys stay inside Ferrowarden |
 | [#18](https://github.com/mallard1983/ferrowarden/issues/18) | **`POST /v1/ssh/write-file`** — write `.env`/config files with substituted secrets over SFTP |
 | [#19](https://github.com/mallard1983/ferrowarden/issues/19) | **Default-deny command policy** and protected paths |
+| [#35](https://github.com/mallard1983/ferrowarden/issues/35) | **Append-only audit store** on S3-compatible storage (age-encrypted, Object Lock) for events and SSH recordings |
 
 ## How the pieces fit
 
