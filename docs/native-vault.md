@@ -1,43 +1,57 @@
 # The native vault backend
 
-Ferrowarden can read the vault in two ways, chosen with `vault.backend`:
+Since 0.2.0 Ferrowarden reads the vault itself. This is the **default** (`vault.backend = "native"`): it speaks the Bitwarden client protocol to Vaultwarden and does the cryptography in Rust. The earlier way, the Bitwarden CLI's `bw serve`, is **deprecated** and still selectable for this one release (`vault.backend = "bw-serve"`); it is removed in the next release.
 
-| | `bw-serve` (default) | `native` |
+| | `native` (default) | `bw-serve` (deprecated, removed next release) |
 |---|---|---|
-| How | The Bitwarden CLI (`bw serve`) logs in, syncs and decrypts; Ferrowarden calls its local REST API | Ferrowarden speaks the Bitwarden client protocol to Vaultwarden itself and does the cryptography in Rust |
-| Extra containers | `bw-serve` (Node.js, the `bw` CLI) | none |
-| Where secrets are decrypted | In `bw serve`; a value crosses a local HTTP connection to Ferrowarden | In Ferrowarden, one value at a time, on request; nothing decrypted crosses a network |
-| Vault in memory | Decrypted, inside `bw serve` | Ciphertext; only metadata (names, URIs, field names) is decrypted |
-| Status | Default | Opt-in, behind the switch (issue #36) |
+| How | Ferrowarden speaks the Bitwarden client protocol to Vaultwarden itself and does the cryptography in Rust | The Bitwarden CLI (`bw serve`) logs in, syncs and decrypts; Ferrowarden calls its local REST API |
+| Extra containers | none | `bw-serve` (Node.js, the `bw` CLI) |
+| Where secrets are decrypted | In Ferrowarden, one value at a time, on request; nothing decrypted crosses a network | In `bw serve`; a value crosses a local HTTP connection to Ferrowarden |
+| Vault in memory | Ciphertext; only metadata (names, URIs, field names) is decrypted | Decrypted, inside `bw serve` |
+| Status | Default | Deprecated; startup logs a warning |
 
 Both back ends implement the same internal `Vault` interface, and everything else (placeholders, host binding, policy, scrubbing, events, the admin UI) is the same code. The two are tested against each other: see [Equivalence](#equivalence-with-bw-serve).
 
 ## Switching
 
+Native is the default, so a new deployment needs no switch: [setup.md](setup.md) is the path. This section is for two cases: you are **upgrading from 0.1.0**, or you want to **stay on bw-serve for this release**.
+
+### Native settings
+
 ```toml
 [vault]
-backend = "native"                 # or FERROWARDEN_VAULT__BACKEND=native
-url     = "https://vaultwarden"    # FERROWARDEN_VAULT__URL
+url     = "https://vaultwarden"    # FERROWARDEN_VAULT__URL (this is the default)
 ca_file = "/ca-public/ca.crt"      # FERROWARDEN_VAULT__CA_FILE (extra CA, PEM; optional)
 ```
 
-and the Vaultwarden **personal API key** (Account settings, Security, Keys, View API key), as secrets:
+and the Vaultwarden **personal API key** (web vault: Settings, Security, Keys, View API key), as secrets:
 
 ```sh
 FERROWARDEN_VAULT_CLIENT_ID_FILE=/run/secrets/bw_client_id          # user.<uuid>
 FERROWARDEN_VAULT_CLIENT_SECRET_FILE=/run/secrets/bw_client_secret
 ```
 
-(`FERROWARDEN_VAULT_CLIENT_ID` and `FERROWARDEN_VAULT_CLIENT_SECRET` also work; a direct variable wins over its `_FILE`.) These are the same two files the `bw serve` container already uses. The values never come from `ferrowarden.toml`.
+(`FERROWARDEN_VAULT_CLIENT_ID` and `FERROWARDEN_VAULT_CLIENT_SECRET` also work; a direct variable wins over its `_FILE`.) These are the same two files (`secrets/bw_client_id`, `secrets/bw_client_secret`) the `bw-serve` container used. The values never come from `ferrowarden.toml`. If either is missing, startup fails with a message that names both variables and `vault.url`, and tells you how to stay on bw-serve.
 
 - `unlock_mode` and `unlock_file` work exactly as before: **file mode** logs in, syncs and unlocks at startup and again when the vault locks; **manual mode** waits for `POST /v1/unlock` (or the admin UI) to supply the master password.
 - `bw_serve_url` is ignored in native mode (Ferrowarden warns if it is set), and the API key variables are ignored in `bw-serve` mode.
 - `vault.url` and `vault.ca_file` are *the* setting for how Ferrowarden reaches Vaultwarden. They replace `ui.vaultwarden_url` and `ui.vaultwarden_ca_file`, which still work as deprecated aliases (a warning is logged; if both are set and differ, `vault.*` wins). `vault.url` must be `https://` (plain `http://` only for loopback hosts, for tests). Certificate verification is never switched off.
-- Native mode does not need the `bw-serve` container, the Bitwarden CLI or Node.js. `docker-compose.yml` keeps `bw-serve` as the active default; the native settings are there as comments.
+- Native mode does not need the `bw-serve` container, the Bitwarden CLI or Node.js. `docker-compose.yml` no longer has a `bw-serve` service or a `bw-data` volume.
 - `vault.allow_hidden_passwords` (`FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS`, default `false`): see [Hidden passwords](#hidden-passwords-collections-that-hide-them).
 - The startup event and `GET /v1/admin/status` report the backend (`vault_backend`), and so does the admin UI's status page.
+- In file unlock mode one process holds both the API key and the master password. Manual unlock is the hardened option: see [security.md](security.md#native-backend-one-process-holds-both-secrets).
 
-Switching back is the same setting. Nothing is stored by either back end between runs.
+### Staying on bw-serve for this release
+
+If you cannot move yet, keep the deprecated backend:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.bw-serve.yml up -d
+```
+
+`docker-compose.bw-serve.yml` adds the `bw-serve` service and its `bw-data` volume back and sets `FERROWARDEN_VAULT__BACKEND=bw-serve` and `FERROWARDEN_BW_SERVE_URL`. Outside Compose, set `vault.backend = "bw-serve"` (or `FERROWARDEN_VAULT__BACKEND=bw-serve`) and `bw_serve_url`. Ferrowarden then logs "the bw-serve backend is deprecated and will be removed in the next release" at every start. The override file is removed together with the backend.
+
+To move to native later, drop the override file and restart; nothing is stored by either back end between runs, so there is nothing to migrate.
 
 ## How it works
 
@@ -97,7 +111,7 @@ The type number decides the algorithm; nothing is guessed from the shape of the 
 | Archived (`archivedDate`) | no | `bw serve` does not list them either (checked by the equivalence suite) |
 | Organisation items, with or without a per-item key | yes | except items whose collection hides passwords from the account (`viewPassword = false`): left out unless `vault.allow_hidden_passwords` is on, see below |
 
-**Format drift.** A client format Ferrowarden does not know is not guessed at: the affected items are excluded and counted in the `vault_sync` event, so a newer client writing a new format shows up as a number to investigate rather than as a silent failure or a weaker decryption. Every other item keeps working. The `bw-serve` backend remains available as the fallback for formats not yet implemented.
+**Format drift.** A client format Ferrowarden does not know is not guessed at: the affected items are excluded and counted in the `vault_sync` event, so a newer client writing a new format shows up as a number to investigate rather than as a silent failure or a weaker decryption. Every other item keeps working. Until bw-serve is removed (next release), it remains available as a temporary fallback for formats not yet implemented.
 
 TOTP: RFC 6238 with SHA-1, SHA-256 or SHA-512; `otpauth://` URIs (`algorithm`, `digits` 1 to 10, `period` above 0), bare base32 secrets (case-insensitive; spaces and `=` ignored) and `steam://`. A specification that cannot produce a code behaves like a missing TOTP (the placeholder fails with "not found").
 
@@ -121,7 +135,7 @@ The native backend implements the protocol itself, so the Vaultwarden release ma
 | 1.37.5 (current) | PBKDF2-SHA256, 600 000 iterations | 2026.11.0 |
 | 1.36.0 (previous minor) | Argon2id, 64 MiB, 3 iterations, parallelism 4 | 2026.5.0 |
 
-The statement of support is: the current and the previous minor release. A newer Vaultwarden that changes the formats is first run against the stack. The default backend changes only when the equivalence suite is green on both, and on a vault written by a real web vault or extension client with organisation items, as set out in #36.
+The statement of support is: the current and the previous minor release. A newer Vaultwarden that changes the formats is first run against the stack. Native became the default in 0.2.0 once the equivalence suite was green on both and a vault written by a real web vault, with organisation items, had been checked (#36).
 
 ## A vault written by the web vault
 

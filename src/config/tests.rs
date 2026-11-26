@@ -26,7 +26,10 @@ fn base_config(mode: UnlockMode) -> Config {
         events: Default::default(),
         ui: Default::default(),
         notify: Default::default(),
-        vault: Default::default(),
+        vault: VaultConfig {
+            backend: VaultBackend::BwServe,
+            ..Default::default()
+        },
         metrics: Default::default(),
     }
 }
@@ -42,6 +45,32 @@ fn events_defaults_match_the_documentation() {
     assert_eq!(e.file_keep, 10);
     assert_eq!(e.syslog_facility, "auth");
     assert_eq!(e.enabled_sinks(), vec!["stdout"]);
+}
+
+#[test]
+fn the_default_backend_needs_its_settings_and_the_error_says_where_to_look() {
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.vault = VaultConfig::default();
+    let err = cfg.validate().unwrap_err().to_string();
+    assert!(err.contains(ENV_VAULT_CLIENT_ID), "{err}");
+    assert!(err.contains(ENV_VAULT_CLIENT_SECRET), "{err}");
+    assert!(err.contains("vault.url"), "{err}");
+    assert!(err.contains("docs/native-vault.md"), "{err}");
+    assert!(err.contains("bw-serve"), "{err}");
+    cfg.vault.credentials = vault_creds(Some("i"), Some("s"));
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn bw_serve_is_deprecated_and_still_selectable() {
+    let v: VaultConfig = serde_json::from_str(r#"{"backend":"bw-serve"}"#).unwrap();
+    assert_eq!(v.backend, VaultBackend::BwServe);
+    let w = v.validate(false, false).unwrap();
+    assert_eq!(w.len(), 1);
+    assert!(
+        w[0].contains("deprecated") && w[0].contains("docs/native-vault.md#switching"),
+        "{w:?}"
+    );
     assert!(base_config(UnlockMode::Manual).validate().is_ok());
 }
 
@@ -186,6 +215,7 @@ fn the_admin_key_file_is_read_without_touching_the_environment() {
     std::env::remove_var("FERROWARDEN_ADMIN_KEY");
     std::env::set_var("FERROWARDEN_ADMIN_KEY_FILE", &path);
     std::env::set_var("FERROWARDEN_TLS_ENABLED", "false");
+    std::env::set_var("FERROWARDEN_VAULT__BACKEND", "bw-serve");
     std::env::set_var("FERROWARDEN_UNLOCK_MODE", "manual");
     let loaded = Config::load();
     // The key stays out of the process environment.
@@ -203,6 +233,7 @@ fn the_admin_key_file_is_read_without_touching_the_environment() {
         "FERROWARDEN_ADMIN_KEY",
         "FERROWARDEN_ADMIN_KEY_FILE",
         "FERROWARDEN_TLS_ENABLED",
+        "FERROWARDEN_VAULT__BACKEND",
         "FERROWARDEN_UNLOCK_MODE",
     ] {
         std::env::remove_var(name);
@@ -626,9 +657,9 @@ fn vault_creds(id: Option<&str>, secret: Option<&str>) -> VaultCredentials {
 }
 
 #[test]
-fn vault_defaults_to_bw_serve_and_the_documented_url() {
+fn vault_defaults_to_native_and_the_documented_url() {
     let v = VaultConfig::default();
-    assert_eq!(v.backend, VaultBackend::BwServe);
+    assert_eq!(v.backend, VaultBackend::Native);
     assert_eq!(v.url, "https://vaultwarden");
     assert_eq!(v.ca_file, "");
     assert_eq!(VaultBackend::Native.as_str(), "native");
@@ -674,6 +705,29 @@ fn vault_backend_comes_from_the_file_or_the_environment() {
     assert_eq!(cfg.vault.backend, VaultBackend::Native);
     assert_eq!(cfg.vault.ca_file, "/ca/ca.crt");
     assert!(cfg.vault.credentials.client_secret.is_none());
+
+    // bw-serve stays selectable from the environment.
+    let mut env = std::collections::HashMap::new();
+    env.insert("FERROWARDEN_UNLOCK_MODE".to_string(), "manual".to_string());
+    env.insert(
+        "FERROWARDEN_VAULT__BACKEND".to_string(),
+        "bw-serve".to_string(),
+    );
+    let cfg: Config = config::Config::builder()
+        .add_source(
+            config::Environment::with_prefix("FERROWARDEN")
+                .prefix_separator("_")
+                .separator("__")
+                .ignore_empty(true)
+                .source(Some(env)),
+        )
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+    assert_eq!(cfg.vault.backend, VaultBackend::BwServe);
+    // And unset, the default is native.
+    assert_eq!(VaultBackend::default(), VaultBackend::Native);
 }
 
 #[test]
@@ -711,12 +765,15 @@ fn hidden_passwords_are_refused_unless_the_operator_opts_in() {
 
 #[test]
 fn allowing_hidden_passwords_with_bw_serve_warns_that_it_does_nothing() {
-    let mut v = VaultConfig::default();
-    assert!(v.validate(false, false).unwrap().is_empty());
+    let mut v = VaultConfig {
+        backend: VaultBackend::BwServe,
+        ..Default::default()
+    };
+    assert_eq!(v.validate(false, false).unwrap().len(), 1); // the deprecation
     v.allow_hidden_passwords = true;
     let w = v.validate(false, false).unwrap();
-    assert_eq!(w.len(), 1);
-    assert!(w[0].contains("allow_hidden_passwords") && w[0].contains("bw-serve"));
+    assert_eq!(w.len(), 2);
+    assert!(w[1].contains("allow_hidden_passwords") && w[1].contains("bw-serve"));
     // With the native backend it is meaningful: no warning.
     v.backend = VaultBackend::Native;
     v.credentials = vault_creds(Some("i"), Some("s"));
@@ -762,10 +819,12 @@ fn bw_serve_mode_does_not_need_or_check_the_native_settings() {
 
 #[test]
 fn ignored_settings_produce_warnings_in_either_mode() {
-    let mut v = VaultConfig::default();
-    assert!(v.validate(false, false).unwrap().is_empty());
+    let mut v = VaultConfig {
+        backend: VaultBackend::BwServe,
+        ..Default::default()
+    };
     let w = v.validate(false, true).unwrap();
-    assert!(w[0].contains("ignored"), "{w:?}");
+    assert!(w[1].contains("ignored"), "{w:?}");
     v.backend = VaultBackend::Native;
     v.credentials = vault_creds(Some("i"), Some("s"));
     assert!(v.validate(false, true).unwrap().is_empty());

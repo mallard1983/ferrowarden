@@ -330,7 +330,10 @@ async fn harness(opts: Opts) -> Harness {
             ..UiConfig::default()
         },
         notify: opts.notify.clone().unwrap_or_default(),
-        vault: Default::default(),
+        vault: crate::config::VaultConfig {
+            backend: crate::config::VaultBackend::BwServe,
+            ..Default::default()
+        },
         metrics: Default::default(),
     };
     let events = Arc::new(EventLog::buffer_only(1000));

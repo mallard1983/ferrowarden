@@ -1,6 +1,6 @@
 # docker-compose.yml
 #
-# Ferrowarden production stack: Vaultwarden + bw serve + Ferrowarden
+# Ferrowarden production stack: Vaultwarden + Ferrowarden (native vault backend)
 #
 # BEFORE FIRST RUN:
 #   1. Generate secrets (see the secrets section at the bottom).
@@ -25,8 +25,8 @@ services:
 
   # ── Internal PKI (one-shot) ──────────────────────────────────────────────────
   # Creates a private CA and a certificate for "vaultwarden" in the
-  # internal-pki volume. The Bitwarden CLI refuses plain-HTTP servers, so
-  # Vaultwarden serves HTTPS on the internal network and bw serve trusts this
+  # internal-pki volume. Ferrowarden refuses plain-HTTP vault URLs, so
+  # Vaultwarden serves HTTPS on the internal network and ferrowarden trusts this
   # CA. Idempotent: re-issues the server cert only when missing or expiring.
   internal-certs:
     build:
@@ -51,11 +51,11 @@ services:
   # Self-hosted Bitwarden-compatible server: your password manager. Its web
   # vault (and any Bitwarden app or browser extension) is where you store and
   # manage passwords, including the credentials agents use through
-  # ferrowarden. Ferrowarden itself never talks to Vaultwarden — only bw
-  # serve does, over the internal network.
+  # ferrowarden. Ferrowarden is the only other service that talks to it, over
+  # the internal network.
   vaultwarden:
-    # Pinned: bw CLI 2026.11.0 (see docker/bw-cli.Dockerfile) is verified
-    # against this release. Upgrade both deliberately and re-run the tests.
+    # Pinned: the version Ferrowarden is tested against (CI also runs 1.36.0).
+    # Upgrade deliberately and re-run the tests.
     image: vaultwarden/server:1.37.5
     restart: unless-stopped
     volumes:
@@ -76,13 +76,12 @@ services:
       # (VAULTWARDEN_SIGNUPS_ALLOWED=true docker compose up -d vaultwarden).
       # Anyone who can reach the web vault could otherwise register.
       SIGNUPS_ALLOWED: "${VAULTWARDEN_SIGNUPS_ALLOWED:-false}"
-      # HTTPS with the internal CA's certificate: required because current
-      # Bitwarden CLI releases refuse plain HTTP, and the web vault needs a
-      # secure context.
+      # HTTPS with the internal CA's certificate: Ferrowarden refuses plain
+      # HTTP vault URLs, and the web vault needs a secure context.
       ROCKET_TLS: '{certs="/pki/vaultwarden.crt",key="/pki/vaultwarden.key"}'
       ROCKET_PORT: "443"
     networks:
-      # vault-internal: reached by bw serve as https://vaultwarden.
+      # vault-internal: reached by ferrowarden as https://vaultwarden.
       # vault-web: an ordinary bridge so the web vault can be published.
       - vault-internal
       - vault-web
@@ -90,80 +89,6 @@ services:
       # The web vault. Loopback by default; set VAULTWARDEN_PUBLISH=0.0.0.0
       # (in .env) for a reverse proxy or LAN clients — see docs/tls.md.
       - "${VAULTWARDEN_PUBLISH:-127.0.0.1}:${VAULTWARDEN_PORT:-8443}:443"
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "5"
-
-  # ── bw serve ────────────────────────────────────────────────────────────────
-  # The Bitwarden CLI running in server mode. Provides a local REST API that
-  # ferrowarden uses to list credentials and retrieve values.
-  #
-  # Why bw serve instead of direct Vaultwarden API calls?
-  # Vaultwarden's vault items are end-to-end encrypted with the master password.
-  # bw serve handles decryption locally — no raw credential values travel over
-  # the network at any point.
-  bw-serve:
-    build:
-      context: ./docker
-      dockerfile: bw-cli.Dockerfile
-    restart: unless-stopped
-    entrypoint: ["/bin/sh", "/entrypoint.sh"]
-    # Hardening: the bw CLI and its npm tree are the stack's largest attack
-    # surface (docs/security.md). Read-only root filesystem, no capabilities,
-    # no privilege escalation, bounded processes and memory. The only path bw
-    # writes is its data directory (data.json), which is the bw-data volume
-    # below; /tmp is not written. If an update ever needs scratch space, add
-    #   tmpfs: ["/tmp"]
-    read_only: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - "no-new-privileges:true"
-    pids_limit: 128
-    # Node plus the decrypted vault in memory: 1 GiB is ample for thousands of
-    # items. Raise it for a very large vault.
-    mem_limit: 1g
-    volumes:
-      - ./docker/bw-entrypoint.sh:/entrypoint.sh:ro
-      # The bw local vault cache and login state: the one writable path. A
-      # volume (not tmpfs) so the CLI keeps its device identity across
-      # restarts, instead of registering a new device with Vaultwarden each
-      # time. The node user can write here because the Dockerfile creates and
-      # chowns this directory before the USER switch, so Docker copies that
-      # ownership to the volume.
-      - bw-data:/home/node/.config/Bitwarden CLI
-      # Internal CA certificate (trusted via NODE_EXTRA_CA_CERTS).
-      - internal-pki:/pki:ro
-    secrets:
-      - bw_client_id
-      - bw_client_secret
-    environment:
-      BW_SERVER_URL: "https://vaultwarden"
-      # bw serve only accepts requests whose Host header is localhost or the
-      # --hostname it was started with, so this must be the name ferrowarden
-      # uses in FERROWARDEN_BW_SERVE_URL. It binds to this container's address
-      # on vault-internal.
-      BW_SERVE_HOSTNAME: "bw-serve"
-      BW_SERVE_PORT: "8087"
-    depends_on:
-      internal-certs:
-        condition: service_completed_successfully
-    networks:
-      - vault-internal
-    # bw serve takes ~15–20 seconds to log in and sync before the HTTP API is
-    # ready. The healthcheck polls /status so ferrowarden can wait for the real
-    # ready signal instead of a fixed sleep.
-    healthcheck:
-      # Must use the bw-serve name: bw serve rejects other Host headers.
-      test: ["CMD", "curl", "-f", "http://bw-serve:8087/status"]
-      interval: 5s
-      timeout: 3s
-      retries: 15
-      start_period: 20s
-    # bw serve port is intentionally NOT exposed to the host.
-    # Only ferrowarden (on vault-internal) can reach it.
     logging:
       driver: json-file
       options:
@@ -199,6 +124,8 @@ services:
     secrets:
       - ferrowarden_admin_key
       - bw_master_password
+      - bw_client_id
+      - bw_client_secret
       # Notifier tokens, as needed (see the FERROWARDEN_NOTIFY_* lines below):
       # - gotify_token
       # The metrics bearer token (see FERROWARDEN_METRICS_* below):
@@ -219,17 +146,21 @@ services:
     environment:
       FERROWARDEN_UNLOCK_MODE: "file"
       FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
-      FERROWARDEN_BW_SERVE_URL: "http://bw-serve:8087"
-      # The native vault backend (docs/native-vault.md) reads the vault itself:
-      # no bw-serve container, no Bitwarden CLI. To switch, uncomment these,
-      # add bw_client_id and bw_client_secret to this service's `secrets:`
-      # list, and remove the bw-serve service and its depends_on. Everything
-      # else (unlock mode, placeholders, policy) works as it does today.
-      # In file unlock mode one process then holds both the API key and the
-      # master password: read the trade-off in docs/security.md first.
-      # FERROWARDEN_VAULT__BACKEND: "native"
-      # FERROWARDEN_VAULT_CLIENT_ID_FILE: "/run/secrets/bw_client_id"
-      # FERROWARDEN_VAULT_CLIENT_SECRET_FILE: "/run/secrets/bw_client_secret"
+      # The vault backend is native (the default): Ferrowarden signs in to
+      # Vaultwarden with your API key and decrypts only the one field a request
+      # needs. No bw serve, no Bitwarden CLI, no decrypted values on the network
+      # (docs/native-vault.md, docs/architecture.md).
+      FERROWARDEN_VAULT__URL: "https://vaultwarden"
+      # Trusts the internal CA that signed the Vaultwarden certificate. Also used
+      # by the admin UI sign-in.
+      FERROWARDEN_VAULT__CA_FILE: "/ca-public/ca.crt"
+      # The API key, from secret files only (never values in this file).
+      FERROWARDEN_VAULT_CLIENT_ID_FILE: "/run/secrets/bw_client_id"
+      FERROWARDEN_VAULT_CLIENT_SECRET_FILE: "/run/secrets/bw_client_secret"
+      # In file unlock mode one process holds both the API key and the master
+      # password: read the trade-off in docs/security.md. For the hardened
+      # setup, use FERROWARDEN_UNLOCK_MODE: "manual" and drop the
+      # bw_master_password secret.
       # Items whose collection hides passwords from this account are left out by
       # default; "true" makes them usable by agents (docs/native-vault.md).
       # FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS: "false"
@@ -304,10 +235,6 @@ services:
       # It accepts the vault master password, so it only serves its sign-in form
       # over HTTPS: put a TLS reverse proxy in front and list it in
       # FERROWARDEN_TRUSTED_PROXIES, or enable ferrowarden's own TLS.
-      # The CA file is how Ferrowarden trusts Vaultwarden's internal certificate
-      # (the admin UI sign-in and, in native mode, the vault connection).
-      FERROWARDEN_VAULT__CA_FILE: "/ca-public/ca.crt"
-      # FERROWARDEN_VAULT__URL: "https://vaultwarden"
       # FERROWARDEN_UI__BIND: "0.0.0.0:3001"
       # FERROWARDEN_UI__SESSION_IDLE_MINUTES: "15"
       # FERROWARDEN_UI__SESSION_MAX_HOURS: "8"
@@ -333,11 +260,10 @@ services:
       internal-certs:
         # The CA certificate copy exists once the one-shot has finished.
         condition: service_completed_successfully
-      bw-serve:
-        # Wait for bw serve to pass its healthcheck before starting ferrowarden.
-        # Without this, ferrowarden's file-mode unlock races against bw serve init
-        # and fails with "connection refused" on the first boot.
-        condition: service_healthy
+      vaultwarden:
+        # Ferrowarden signs in and unlocks at start. If Vaultwarden is not ready
+        # yet, the start fails and the restart policy tries again.
+        condition: service_started
     healthcheck:
       # The image has no curl: the binary checks itself. It requests the public
       # /health endpoint (no auth) on the port it listens on, over TLS when TLS
@@ -357,12 +283,10 @@ services:
         max-size: "50m"
         max-file: "10"
 
-
 # ── Networks ──────────────────────────────────────────────────────────────────
 networks:
-  # Internal network for vault communication. Vaultwarden, bw-serve, and
-  # ferrowarden can reach each other here. bw serve is only on this network,
-  # so nothing outside Docker can reach it.
+  # Internal network for vault communication. Vaultwarden and ferrowarden can
+  # reach each other here; nothing outside Docker can reach it.
   vault-internal:
     driver: bridge
     internal: true
@@ -381,14 +305,11 @@ networks:
 volumes:
   # Encrypted vault data. Back this up — it contains your credentials.
   vaultwarden-data:
-  # bw CLI local vault cache. Persists across restarts so bw does not need
-  # to re-sync on every container start.
-  bw-data:
   # Agent key hashes. Allows keys to survive ferrowarden restarts.
   ferrowarden-keys:
   # Internal CA + Vaultwarden certificate (created by internal-certs).
-  # Holds the CA private key — back it up with the other volumes or let it be
-  # regenerated (bw serve picks up a new CA on restart).
+  # Holds the CA private key: back it up with the other volumes or let it be
+  # regenerated (Ferrowarden picks up the new CA on restart).
   internal-pki:
   # Only the CA certificate (ca.crt), copied from internal-pki by internal-certs.
   # This is what ferrowarden mounts, so it never sees the CA private key.

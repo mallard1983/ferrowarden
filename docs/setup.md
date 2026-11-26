@@ -2,12 +2,13 @@
 
 # Setup Guide
 
-This guide walks through a complete Ferrowarden deployment using Docker Compose. Ferrowarden runs as a sidecar to [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (it is not a fork or replacement, and is not affiliated with Vaultwarden or Bitwarden) and reaches your vault through the Bitwarden CLI's `bw serve`. By the end you will have:
+This guide walks through a complete Ferrowarden deployment using Docker Compose. Ferrowarden runs as a sidecar to [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (it is not a fork or replacement, and is not affiliated with Vaultwarden or Bitwarden) and reads your vault itself, over the Bitwarden client protocol (the native backend, the default since 0.2.0). By the end you will have:
 
-- Vaultwarden running and configured
-- The Bitwarden CLI logged in and running `bw serve`
-- Ferrowarden proxying credential requests
+- Vaultwarden running and configured, with an account and an API key
+- Ferrowarden signed in to that account and proxying credential requests
 - One agent key ready to use
+
+Upgrading from 0.1.0? The `bw-serve` container is gone from the default stack: read the [upgrade note](release-notes/v0.2.0.md#upgrading) first. The old way is deprecated and described [at the end of this guide](#staying-on-the-deprecated-bw-serve-backend).
 
 ---
 
@@ -99,9 +100,9 @@ echo -n "YourMasterPasswordHere" > secrets/bw_master_password
 openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48 > secrets/ferrowarden_admin_key
 
 # Docker mounts these with their host owner and mode. Ferrowarden runs as
-# UID 999 and bw serve as UID 1000 inside their containers:
-sudo chown 999:999   secrets/bw_master_password secrets/ferrowarden_admin_key
-sudo chown 1000:1000 secrets/bw_client_id secrets/bw_client_secret
+# UID 999 inside its container and reads all four files:
+sudo chown 999:999 secrets/bw_master_password secrets/ferrowarden_admin_key \
+                   secrets/bw_client_id secrets/bw_client_secret
 sudo chmod 600 secrets/*
 ```
 
@@ -144,14 +145,14 @@ VAULTWARDEN_SIGNUPS_ALLOWED=true docker compose up -d vaultwarden
 $env:VAULTWARDEN_SIGNUPS_ALLOWED = 'true'; docker compose up -d vaultwarden; Remove-Item env:VAULTWARDEN_SIGNUPS_ALLOWED
 ```
 
-This first runs the one-shot `internal-certs` service, which creates a private CA and Vaultwarden's certificate in the `internal-pki` volume. Vaultwarden serves **HTTPS**, because the Bitwarden CLI that `bw serve` runs refuses plain-HTTP servers.
+This first runs the one-shot `internal-certs` service, which creates a private CA and Vaultwarden's certificate in the `internal-pki` volume. Vaultwarden serves **HTTPS** on the internal network, and Ferrowarden, which refuses plain-HTTP vault URLs, trusts that CA (`vault.ca_file`).
 
 Browse to **https://127.0.0.1:8443** (or your `VAULTWARDEN_DOMAIN`). Browsing directly, the browser warns about the certificate because it is issued by the internal CA; accept it, or install `ca.crt` from the `internal-pki` volume as a trusted CA (`docker compose cp internal-certs:/pki/ca.crt .` after a run). Behind a reverse proxy with its own certificate there is no warning.
 
 In the web vault:
 1. **Create account** with your email and the master password you wrote to `secrets/bw_master_password`.
-2. Go to **Settings → Security → Keys** and click **View API key**. Enter your master password.
-3. Write the **client_id** and **client_secret** to the secrets files:
+2. Open **Settings** (your account menu, top right), then **Security**, then the **Keys** tab, and click **View API key**. Enter your master password. This is your **personal API key**: it is how Ferrowarden signs in to Vaultwarden. (It is not an organisation API key.)
+3. Write the **client_id** (it looks like `user.` followed by a UUID) and the **client_secret** to the secrets files. Ferrowarden reads them as `FERROWARDEN_VAULT_CLIENT_ID_FILE` and `FERROWARDEN_VAULT_CLIENT_SECRET_FILE`, which the Compose file already points at `secrets/bw_client_id` and `secrets/bw_client_secret`:
 
    ```sh
    echo -n "user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" > secrets/bw_client_id
@@ -305,12 +306,12 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | Config key | Environment variable | Default |
 |---|---|---|
 | `bind_addr` | `FERROWARDEN_BIND_ADDR` | `0.0.0.0:3000` |
-| `vault.backend` | `FERROWARDEN_VAULT__BACKEND` | `bw-serve` — or `native`: Ferrowarden reads the vault itself, no bw serve ([native-vault.md](native-vault.md)) |
-| `vault.url` | `FERROWARDEN_VAULT__URL` | `https://vaultwarden` — how Ferrowarden reaches Vaultwarden (native backend, admin UI sign-in) |
+| `vault.backend` | `FERROWARDEN_VAULT__BACKEND` | `native` — Ferrowarden reads the vault itself ([native-vault.md](native-vault.md)). `bw-serve` is deprecated and removed in the next release |
+| `vault.url` | `FERROWARDEN_VAULT__URL` | `https://vaultwarden` — how Ferrowarden reaches Vaultwarden (the vault connection and the admin UI sign-in) |
 | `vault.ca_file` | `FERROWARDEN_VAULT__CA_FILE` | *(empty; the Compose files set `/ca-public/ca.crt`)* — extra CA for `vault.url`, on top of the public roots |
-| `vault.allow_hidden_passwords` | `FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS` | `false` — the native backend leaves out items whose collection hides passwords from the account ("Hide passwords"); `true` makes them usable by agents (warning at startup). No effect with `bw-serve`, which withholds those passwords itself. See [native-vault.md](native-vault.md#hidden-passwords-collections-that-hide-them) |
-| *(env or file only)* | `FERROWARDEN_VAULT_CLIENT_ID` / `_FILE`, `FERROWARDEN_VAULT_CLIENT_SECRET` / `_FILE` | Vaultwarden personal API key, **native backend only** (the same two secret files `bw serve` uses) |
-| `bw_serve_url` | `FERROWARDEN_BW_SERVE_URL` | `http://127.0.0.1:8087` — `bw-serve` backend only |
+| `vault.allow_hidden_passwords` | `FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS` | `false` — the native backend leaves out items whose collection hides passwords from the account ("Hide passwords"); `true` makes them usable by agents (warning at startup). No effect with the deprecated `bw-serve`, which withholds those passwords itself. See [native-vault.md](native-vault.md#hidden-passwords-collections-that-hide-them) |
+| *(env or file only)* | `FERROWARDEN_VAULT_CLIENT_ID` / `_FILE`, `FERROWARDEN_VAULT_CLIENT_SECRET` / `_FILE` | Vaultwarden personal API key, **required** by the native backend (`secrets/bw_client_id` and `secrets/bw_client_secret` in the Compose file) |
+| `bw_serve_url` | `FERROWARDEN_BW_SERVE_URL` | `http://127.0.0.1:8087` — deprecated `bw-serve` backend only |
 | `unlock_mode` | `FERROWARDEN_UNLOCK_MODE` | *(required)* |
 | `unlock_file` | `FERROWARDEN_UNLOCK_FILE` | *(required in file mode)* |
 | *(env or file only)* | `FERROWARDEN_ADMIN_KEY` or `FERROWARDEN_ADMIN_KEY_FILE` | *(one required)*: the file variant names a file holding the key (the Compose files use `/run/secrets/ferrowarden_admin_key`). Ferrowarden reads the file itself and never puts the key in its environment; a plain `FERROWARDEN_ADMIN_KEY` wins if both are set |
@@ -319,7 +320,7 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `tls_cert_file` | `FERROWARDEN_TLS_CERT_FILE` | *(required when tls_enabled)* |
 | `tls_key_file` | `FERROWARDEN_TLS_KEY_FILE` | *(required when tls_enabled)* |
 | `allowed_targets` | `FERROWARDEN_ALLOWED_TARGETS` | *(empty)* — comma-separated CIDRs, IPs or host names of internal targets agents may reach |
-| `allow_private_targets` | `FERROWARDEN_ALLOW_PRIVATE_TARGETS` | `false` — allow all private/internal targets (bw serve stays blocked) |
+| `allow_private_targets` | `FERROWARDEN_ALLOW_PRIVATE_TARGETS` | `false` — allow all private/internal targets (the vault, Vaultwarden, stays blocked) |
 | `enforce_credential_hosts` | `FERROWARDEN_ENFORCE_CREDENTIAL_HOSTS` | `true` — only send credentials to hosts in their vault item URIs |
 | `refresh_interval_secs` | `FERROWARDEN_REFRESH_INTERVAL_SECS` | `300` — sync/refresh interval; `0` disables |
 | `max_response_bytes` | `FERROWARDEN_MAX_RESPONSE_BYTES` | `10485760` (10 MiB) |
@@ -339,9 +340,15 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 
 ---
 
-### Using the native vault backend
+### Staying on the deprecated bw-serve backend
 
-By default Ferrowarden reads the vault through `bw serve`. To use the native backend instead (no `bw-serve` container, no Bitwarden CLI), see [native-vault.md](native-vault.md). In short: set `FERROWARDEN_VAULT__BACKEND=native`, give the ferrowarden service the `bw_client_id` and `bw_client_secret` secrets and point `FERROWARDEN_VAULT_CLIENT_ID_FILE` / `FERROWARDEN_VAULT_CLIENT_SECRET_FILE` at them, and make sure `FERROWARDEN_VAULT__CA_FILE` trusts your Vaultwarden certificate. `docker-compose.yml` has the lines ready, commented out. Read the trade-off in [security.md](security.md#18-the-native-vault-backend) first.
+The `bw-serve` backend (the Bitwarden CLI's `bw serve`) is **deprecated** and is removed in the release after 0.2.0. If you cannot move to the native backend yet, add the override file:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.bw-serve.yml up -d
+```
+
+See [native-vault.md](native-vault.md#switching). Ferrowarden logs a deprecation warning at every start in this mode.
 
 ---
 
@@ -394,28 +401,15 @@ What the hardening covers, and what it does not: [Deployment Profiles](deploymen
 
 ## Running Without Docker
 
-If you are running Ferrowarden directly on a host (development or bare-metal):
+If you are running Ferrowarden directly on a host (development or bare-metal), you need a Vaultwarden account with a personal API key (see Step 2) and the URL it is served at. It must be `https://`; for a private CA, set `vault.ca_file` to the CA's PEM file.
 
 ```sh
-# Install the Bitwarden CLI
-# https://bitwarden.com/help/cli/
-
-# Configure bw to point at your Vaultwarden instance. It must be https://:
-# current CLI releases refuse plain HTTP. For a private CA, also
-# export NODE_EXTRA_CA_CERTS=/path/to/ca.crt
-bw config server https://your-vaultwarden-host
-
-# Log in
-bw login --apikey  # requires BW_CLIENTID and BW_CLIENTSECRET env vars
-
-# Start bw serve (keep this running in a separate terminal or service).
-# bw serve only accepts requests addressed to localhost/127.0.0.1 or this
-# --hostname, so keep bw_serve_url = "http://127.0.0.1:8087".
-bw serve --hostname 127.0.0.1 --port 8087
-
-# In another terminal, start Ferrowarden
+export FERROWARDEN_VAULT__URL=https://your-vaultwarden-host
+export FERROWARDEN_VAULT__CA_FILE=/path/to/ca.crt            # only for a private CA
+export FERROWARDEN_VAULT_CLIENT_ID_FILE=/path/to/bw_client_id
+export FERROWARDEN_VAULT_CLIENT_SECRET_FILE=/path/to/bw_client_secret
 export FERROWARDEN_ADMIN_KEY="your-32-char-minimum-admin-key-here"
 export FERROWARDEN_UNLOCK_MODE=manual
 ./ferrowarden
-# Then POST /v1/unlock to unlock the vault
+# Then POST /v1/unlock (or use the admin UI) to supply the master password
 ```

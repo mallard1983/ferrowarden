@@ -63,7 +63,7 @@ Set `FERROWARDEN_LOG_LEVEL` in `docker-compose.yml` or the host environment:
 | `error` | Startup failures and fatal errors only |
 | `warn` | Errors plus warnings (TLS disabled, a failing event sink, failed credential refresh) |
 | `info` | **Default** — normal operation: startup/shutdown messages, vault unlock and refresh notes |
-| `debug` | Internal state transitions, bw serve calls, substitution details |
+| `debug` | Internal state transitions, vault calls, substitution details |
 | `trace` | Everything including HTTP internals — very verbose |
 
 ```yaml

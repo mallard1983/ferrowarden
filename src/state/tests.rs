@@ -27,7 +27,10 @@ fn test_config() -> Config {
         events: Default::default(),
         ui: Default::default(),
         notify: Default::default(),
-        vault: Default::default(),
+        vault: crate::config::VaultConfig {
+            backend: crate::config::VaultBackend::BwServe,
+            ..Default::default()
+        },
         metrics: Default::default(),
     }
 }

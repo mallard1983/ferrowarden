@@ -26,7 +26,7 @@ Prerequisites: Rust (stable), Docker with Compose v2, `openssl` (ships with Git 
 git clone https://github.com/mallard1983/ferrowarden.git
 cd ferrowarden
 
-# Build a throwaway test stack (Vaultwarden, bw serve, Ferrowarden, mock API)
+# Build a throwaway test stack (Vaultwarden, Ferrowarden with both vault backends, mock API)
 # with a test account and fake credentials; writes .env.test
 ./scripts/dev-setup.sh            # Linux/macOS
 .\scripts\dev-setup.ps1           # Windows (PowerShell 7)

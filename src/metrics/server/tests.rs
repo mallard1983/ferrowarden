@@ -36,7 +36,10 @@ fn config(token: Option<&str>) -> Config {
         events: Default::default(),
         ui: Default::default(),
         notify: Default::default(),
-        vault: Default::default(),
+        vault: crate::config::VaultConfig {
+            backend: crate::config::VaultBackend::BwServe,
+            ..Default::default()
+        },
         metrics: MetricsConfig {
             bind: "127.0.0.1:9095".into(),
             token: MetricsToken(token.map(|t| Zeroizing::new(t.to_string()))),

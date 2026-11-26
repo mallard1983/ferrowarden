@@ -66,7 +66,7 @@ const METRICS_TEST_TOKEN: &str = "tls-test-metrics-token-0123456789";
 fn metrics_router() -> axum::Router {
     let mut cfg: Config = ::config::Config::builder()
         .add_source(::config::File::from_str(
-            "unlock_mode = \"manual\"\n",
+            "unlock_mode = \"manual\"\n[vault]\nbackend = \"bw-serve\"\n",
             ::config::FileFormat::Toml,
         ))
         .build()
