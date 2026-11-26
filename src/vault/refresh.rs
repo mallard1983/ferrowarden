@@ -1,11 +1,10 @@
-//! Credential cache refresh and lock-state tracking, for either backend.
+//! Credential cache refresh and lock-state tracking.
 //!
-//! bw serve keeps a local copy of the vault that is only updated by
-//! `POST /sync`, and it can lock or restart independently of ferrowarden; the
-//! native backend holds its own copy and locks itself when the account's key
-//! changes. The refresher periodically syncs, reloads the credential cache
-//! and keeps ferrowarden's lock state honest. In file unlock mode it also
-//! re-unlocks the vault after it was locked by re-reading the password file.
+//! The native backend holds its own copy of the vault and locks itself when
+//! the account's key changes. The refresher periodically syncs, reloads the
+//! credential cache and keeps ferrowarden's lock state honest. In file unlock
+//! mode it also re-unlocks the vault after it was locked by re-reading the
+//! password file.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,17 +37,7 @@ pub async fn refresh_credentials(state: &AppState) -> FerroResult<()> {
         emit_sync_failed(state, "sync");
     }
 
-    // The first list after a fresh login/unlock can fail transiently while the
-    // CLI finishes one-time state migrations (observed once with CLI
-    // 2026.11.0 as a 500). Retry once before reporting an error.
-    let listed = match vault.list_credentials().await {
-        Err(FerroError::Internal(msg)) => {
-            tracing::warn!(error = %msg, "Listing vault items failed; retrying once");
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            vault.list_credentials().await
-        }
-        other => other,
-    };
+    let listed = vault.list_credentials().await;
 
     match listed {
         Ok(listing) => {
@@ -129,10 +118,10 @@ async fn unlock_from_file_inner(state: &AppState) -> FerroResult<()> {
 }
 
 /// File mode only: unlock the vault again right away, instead of waiting for
-/// the next refresh — e.g. when a request finds the vault locked because bw
-/// serve restarted. Attempts are serialized, and a caller that waited while
-/// another task re-unlocked simply sees the vault unlocked. Returns true when
-/// the vault is unlocked afterwards.
+/// the next refresh — e.g. when a request finds the vault locked. Attempts
+/// are serialized, and a caller that waited while another task re-unlocked
+/// simply sees the vault unlocked. Returns true when the vault is unlocked
+/// afterwards.
 pub async fn reunlock_if_possible(state: &AppState) -> bool {
     if state.config.unlock_mode != UnlockMode::File {
         return false;

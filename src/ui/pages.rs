@@ -60,7 +60,7 @@ pub struct StatusPage<'a> {
     pub nav: Option<Nav<'a>>,
     pub account_email: &'a str,
     pub vault_locked: bool,
-    /// `bw-serve` or `native`.
+    /// Always `native`.
     pub vault_backend: &'a str,
     pub credential_count: usize,
     pub last_sync: &'a str,

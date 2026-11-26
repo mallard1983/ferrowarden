@@ -119,7 +119,7 @@ For all files and dimensions, see [ASSET_CATALOG.md](ASSET_CATALOG.md). For mark
 
 ## 9. Upstream relationship
 
-Ferrowarden is a sidecar that works with Vaultwarden through the Bitwarden CLI (`bw serve`). It is its **own** project. The Ferrowarden identity must not imply that Vaultwarden, Bitwarden, or their maintainers designed, sponsor or officially endorse it unless they have explicitly confirmed that relationship.
+Ferrowarden is a sidecar that works with Vaultwarden through the Bitwarden client protocol, which it speaks itself. It is its **own** project. The Ferrowarden identity must not imply that Vaultwarden, Bitwarden, or their maintainers designed, sponsor or officially endorse it unless they have explicitly confirmed that relationship.
 
 ## 10. Governance
 

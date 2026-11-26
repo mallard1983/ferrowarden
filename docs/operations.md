@@ -6,9 +6,9 @@ Ferrowarden starts locked regardless of mode. The vault must be unlocked before 
 
 ### File Mode (`unlock_mode = "file"`)
 
-Ferrowarden reads the master password from the path specified in `unlock_file`, uses it to unlock the vault (the native backend logs in with the API key, syncs, and derives the vault keys from it; the deprecated bw-serve backend sends it to `bw serve`'s `POST /unlock` endpoint), zeroes the value from memory, and then begins serving.
+Ferrowarden reads the master password from the path specified in `unlock_file`, uses it to unlock the vault (Ferrowarden logs in with the API key, syncs, and derives the vault keys from it), zeroes the value from memory, and then begins serving.
 
-This all happens before the HTTP server starts accepting connections. If the unlock fails (wrong password, Vaultwarden unreachable, the API key rejected; or `bw serve` unreachable with the deprecated backend), Ferrowarden exits with an error. No requests are possible until the issue is corrected and the process is restarted.
+This all happens before the HTTP server starts accepting connections. If the unlock fails (wrong password, Vaultwarden unreachable, the API key rejected), Ferrowarden exits with an error. No requests are possible until the issue is corrected and the process is restarted.
 
 **Use this mode when:**
 - Running in Docker with a Docker secret or a bind-mounted password file
@@ -36,15 +36,14 @@ curl -X POST https://<ferrowarden-host>:3000/v1/unlock \
 
 ---
 
-## Switching the vault backend
+## Checking the vault backend
 
-`vault.backend` is `native` (the default) or `bw-serve` (deprecated, removed in the next release) ([native-vault.md](native-vault.md)). Switching is a configuration change and a restart; neither backend stores anything between runs.
+`vault.backend` is `native`, the only value ([native-vault.md](native-vault.md)); the `bw-serve` backend was removed in 0.3.0, and a configuration that still names it fails at startup with a pointer to the [upgrade note](native-vault.md#upgrading-from-bw-serve). Ferrowarden stores nothing between runs.
 
-1. **To native** (from a 0.1.0 deployment or the deprecated override). Use the 0.2.0 `docker-compose.yml` without `docker-compose.bw-serve.yml`: it gives the ferrowarden service the `bw_client_id` / `bw_client_secret` secrets and sets `FERROWARDEN_VAULT_CLIENT_ID_FILE`, `FERROWARDEN_VAULT_CLIENT_SECRET_FILE`, `FERROWARDEN_VAULT__URL` and `FERROWARDEN_VAULT__CA_FILE` (`ui.vaultwarden_*` still work as deprecated aliases). Outside Compose, set those yourself. The unlock mode is unchanged. The full upgrade steps are in the [0.2.0 release notes](release-notes/v0.2.0.md#upgrading).
-2. **Check.** `GET /v1/admin/status` reports `"vault_backend": "native"`, so does the startup event and the admin UI's status page. A `vault_sync` event with an `excluded` count means some items were left out: see its `excluded_reasons`. Most reasons mean an item could not be read safely; `hidden_password` means its collection hides passwords from this account (`vault.allow_hidden_passwords` is off, [native-vault.md](native-vault.md#hidden-passwords-collections-that-hide-them)).
-3. **Back (temporary).** `docker compose -f docker-compose.yml -f docker-compose.bw-serve.yml up -d`, or set `FERROWARDEN_VAULT__BACKEND=bw-serve` and run `bw-serve` yourself. Ferrowarden logs a deprecation warning at every start.
+1. **After an upgrade or a change.** `GET /v1/admin/status` reports `"vault_backend": "native"`, and so do the startup event, the `ferrowarden_build_info` metric and the admin UI's status page. The value is always `native` now; the field stays so that dashboards and SIEM rules keep working. A `vault_sync` event with an `excluded` count means some items were left out: see its `excluded_reasons`. Most reasons mean an item could not be read safely; `hidden_password` means its collection hides passwords from this account (`vault.allow_hidden_passwords` is off, [native-vault.md](native-vault.md#hidden-passwords-collections-that-hide-them)).
+2. **From a 0.1.0 deployment.** Follow the [0.2.0 release notes](release-notes/v0.2.0.md#upgrading) first: it gives the ferrowarden service the `bw_client_id` / `bw_client_secret` secrets and sets `FERROWARDEN_VAULT_CLIENT_ID_FILE`, `FERROWARDEN_VAULT_CLIENT_SECRET_FILE`, `FERROWARDEN_VAULT__URL` and `FERROWARDEN_VAULT__CA_FILE` (`ui.vaultwarden_*` still work as deprecated aliases). Outside Compose, set those yourself. Then upgrade.
 
-Settings of the other backend are ignored, and Ferrowarden logs a warning if it sees them. With the native backend, the account's password or key changing locks the vault (`vault_lock`, cause `vault_key_changed` or `security_stamp_changed`): in file mode update the password file, then restart.
+A leftover `bw_serve_url` is ignored, with a warning at startup. The account's password or key changing locks the vault (`vault_lock`, cause `vault_key_changed` or `security_stamp_changed`): in file mode update the password file, then restart.
 
 ---
 
@@ -461,7 +460,7 @@ The admin UI status page shows the same test as a button, with the enabled sende
 
 ### Ferrowarden exits at startup with "the native vault backend ... requires the Vaultwarden API key"
 
-You are on the native backend (the default since 0.2.0) and it does not have what it needs: `FERROWARDEN_VAULT_CLIENT_ID[_FILE]` and `FERROWARDEN_VAULT_CLIENT_SECRET[_FILE]` (your Vaultwarden personal API key), and `vault.url` (`FERROWARDEN_VAULT__URL`) if Vaultwarden is not at `https://vaultwarden`. This is what a 0.1.0 configuration meets first. The bundled `docker-compose.yml` sets all of them; if you maintain your own Compose file, copy the `FERROWARDEN_VAULT_*` lines and the `bw_client_id` / `bw_client_secret` secrets from it. To stay on the deprecated backend for now, set `FERROWARDEN_VAULT__BACKEND=bw-serve` (see [native-vault.md](native-vault.md#switching)).
+The native vault backend (the only one) does not have what it needs: `FERROWARDEN_VAULT_CLIENT_ID[_FILE]` and `FERROWARDEN_VAULT_CLIENT_SECRET[_FILE]` (your Vaultwarden personal API key), and `vault.url` (`FERROWARDEN_VAULT__URL`) if Vaultwarden is not at `https://vaultwarden`. This is what a 0.1.0 configuration meets first. The bundled `docker-compose.yml` sets all of them; if you maintain your own Compose file, copy the `FERROWARDEN_VAULT_*` lines and the `bw_client_id` / `bw_client_secret` secrets from it.
 
 ### Ferrowarden exits at startup because Vaultwarden is unreachable
 
@@ -497,7 +496,7 @@ $key   = -join (1..48 | ForEach-Object { $rng.GetBytes($buf); $chars[$buf[0] % $
 ### `503 Service Unavailable` on all requests
 
 The vault is locked. Check `GET /v1/admin/status`. If `locked: true`:
-- **File mode**: Check the startup logs for unlock errors. The password file may be wrong or the file may be missing. If the vault locked (the account's password or keys changed, or, with the deprecated bw-serve backend, bw serve restarted), Ferrowarden notices on the next refresh (`refresh_interval_secs`, default 5 minutes) and re-unlocks it automatically from the password file.
+- **File mode**: Check the startup logs for unlock errors. The password file may be wrong or the file may be missing. If the vault locked (the account's password or keys changed), Ferrowarden notices on the next refresh (`refresh_interval_secs`, default 5 minutes) and re-unlocks it automatically from the password file.
 - **Manual mode**: The vault needs to be unlocked via `POST /v1/unlock`.
 
 ### `422 Unprocessable Entity` — unknown credential
@@ -513,7 +512,7 @@ The error names the credential and host. The target does not match any URI on th
 
 ### `403 Forbidden` — target not allowed
 
-The target resolved to a private or internal address that is not in `allowed_targets`, or it is the vault endpoint (Vaultwarden, or bw serve with the deprecated backend; always refused). Add the host name, IP or CIDR to `FERROWARDEN_ALLOWED_TARGETS` and restart Ferrowarden.
+The target resolved to a private or internal address that is not in `allowed_targets`, or it is the vault endpoint (Vaultwarden; always refused). Add the host name, IP or CIDR to `FERROWARDEN_ALLOWED_TARGETS` and restart Ferrowarden.
 
 ### `409 Conflict` — ambiguous credential
 
@@ -537,33 +536,17 @@ docker compose logs ferrowarden
 - TLS errors: Vaultwarden's certificate was not issued by the CA in `internal-pki`; run `docker compose run --rm internal-certs`, restart `vaultwarden`, then restart `ferrowarden`.
 - A wrong master password in `secrets/bw_master_password` is an unlock failure (`vault_unlock`, reason `unlock_failed`), not a login failure.
 
-### bw-serve login fails at startup (deprecated backend)
-
-```sh
-docker compose logs bw-serve
-```
-
-bw-serve only runs `bw login` when the CLI is not already logged in, so restarts with a persistent `bw-data` volume work (the test stack keeps the data directory on a `tmpfs` instead and logs in again on every start). The container's root filesystem is read-only; the CLI's data directory is its only writable path. If `BW_SERVER_URL` changed (e.g. the move to `https://vaultwarden`), the entrypoint logs out and reconfigures first.
-
-- `Insecure URL not allowed. All URLs must use HTTPS.` — `BW_SERVER_URL` is `http://`. Use `https://vaultwarden`.
-- `ERROR: internal CA certificate not found at /pki/ca.crt` — the `internal-pki` volume is not mounted, or `internal-certs` has not run (`docker compose up -d` runs it automatically).
-- TLS errors such as `unable to verify the first certificate` — Vaultwarden's certificate was not issued by the CA in `internal-pki`; run `docker compose run --rm internal-certs` and restart `vaultwarden` and `bw-serve`.
-
 ### Admin web UI
 
 The optional UI is described in [admin-ui.md](admin-ui.md). Common problems:
 
 - **"HTTPS is required" instead of the sign-in form** — the request did not arrive over HTTPS. Serve the UI behind a TLS proxy that sends `X-Forwarded-Proto: https` and list the proxy in `trusted_proxies`, enable Ferrowarden's own TLS, or (local testing only) set `ui.insecure_http`.
 - **"Too many attempts"** — the per-IP (5 failures) or global (10 failures) lockout is active for 15 minutes. Behind a proxy, check `trusted_proxies`: without it every client looks like the proxy. Restarting Ferrowarden clears the lockouts.
-- **"Ferrowarden could not complete the sign-in with Vaultwarden"** — the account email is unknown (with the deprecated `bw serve` backend it comes from `bw serve`, which may not be logged in), Vaultwarden is unreachable at `vault.url`, or its certificate is not trusted. Check `docker compose exec ferrowarden ls -l /ca-public` shows `ca.crt` (run `docker compose up -d` so the `internal-certs` one-shot populates `internal-ca-public`), and set `FERROWARDEN_LOG_LEVEL=ferrowarden=debug` to see Vaultwarden's own message in the log.
+- **"Ferrowarden could not complete the sign-in with Vaultwarden"** — the account email is unknown (Ferrowarden could not reach Vaultwarden to read it), Vaultwarden is unreachable at `vault.url`, or its certificate is not trusted. Check `docker compose exec ferrowarden ls -l /ca-public` shows `ca.crt` (run `docker compose up -d` so the `internal-certs` one-shot populates `internal-ca-public`), and set `FERROWARDEN_LOG_LEVEL=ferrowarden=debug` to see Vaultwarden's own message in the log.
 - **"Request rejected"** — a CSRF or same-origin check failed, for example because the proxy rewrites `Host` without sending `X-Forwarded-Host`, or the page was open for over 15 minutes before submitting.
 - **"This account requires a second factor that the admin UI cannot complete"** — the account's only second factors are WebAuthn, Duo or a recovery code. Add an authenticator app, email or YubiKey in the web vault.
 
-### Ferrowarden fails with "error decoding response body"; bw-serve logs `Blocking request with disallowed Host` (deprecated backend)
-
-`bw serve` only accepts requests addressed to `localhost` or to the `--hostname` it was started with. `BW_SERVE_HOSTNAME` must be the host name in `FERROWARDEN_BW_SERVE_URL` (`bw-serve` in Docker Compose).
-
-### Login with a hand-written tool fails after upgrading the CLI
+### Login with a hand-written tool fails after a client upgrade
 
 Current Bitwarden clients raise an account's PBKDF2 iterations (e.g. 100,000 → 600,000) automatically on login. Anything that derives the master password hash itself must read the count from `POST /identity/accounts/prelogin` instead of assuming it; the bundled setup and seeder scripts do.
 
@@ -572,9 +555,9 @@ Current Bitwarden clients raise an account's PBKDF2 iterations (e.g. 100,000 →
 `internal-certs` (`ferrowarden internal-certs`, from the Ferrowarden image) runs on every `docker compose up` and re-issues Vaultwarden's certificate when it is within 30 days of expiry (it is valid for 825 days), when it is missing, when its names no longer match `VAULTWARDEN_CERT_SANS`, or when it was not signed by the current CA. The CA is kept. To renew without restarting the stack, run `docker compose up internal-certs` (or `docker compose run --rm internal-certs`). Vaultwarden only loads the certificate at start, so restart it after a renewal: `docker compose restart vaultwarden`. The output says what it did (`Internal CA exists`, `Vaultwarden certificate is valid`, or the reason it issued a new one). See [tls.md](tls.md#the-internal-ca-how-it-is-made).
 
 Common causes:
-- Vaultwarden is not fully started when the login is attempted (bw-serve or Ferrowarden) — check Vaultwarden is healthy
+- Vaultwarden is not fully started when the login is attempted — check Vaultwarden is healthy
 - `bw_client_id` or `bw_client_secret` are wrong — verify them against Vaultwarden's API Key settings
-- Server URL is incorrect — verify `vault.url` (or `BW_SERVER_URL` with bw-serve) matches your Vaultwarden instance
+- Server URL is incorrect — verify `vault.url` matches your Vaultwarden instance
 
 ---
 
@@ -605,4 +588,4 @@ chmod 600 secrets/*
 docker compose up -d
 ```
 
-Ferrowarden stores nothing about the vault between runs: it signs in with the API key from the secret files and syncs on every start, so there is nothing else to restore. (With the deprecated bw-serve backend, its login survives restarts in the `bw-data` volume; if that is lost, bw-serve logs in again on next start.)
+Ferrowarden stores nothing about the vault between runs: it signs in with the API key from the secret files and syncs on every start, so there is nothing else to restore.

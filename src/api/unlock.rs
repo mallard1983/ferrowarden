@@ -23,7 +23,7 @@ pub struct UnlockPayload {
 /// POST /v1/unlock
 ///
 /// Manual unlock mode only. The operator POSTs the master password once after
-/// boot. The password is zeroed immediately after bw serve confirms unlock.
+/// boot. The password is zeroed immediately after the vault confirms unlock.
 /// Returns 404 in file unlock mode — the endpoint does not exist.
 pub async fn unlock(
     State(state): State<Arc<AppState>>,

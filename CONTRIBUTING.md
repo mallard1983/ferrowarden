@@ -26,7 +26,7 @@ Prerequisites: Rust (stable), Docker with Compose v2, `openssl` (ships with Git 
 git clone https://github.com/mallard1983/ferrowarden.git
 cd ferrowarden
 
-# Build a throwaway test stack (Vaultwarden, Ferrowarden with both vault backends, mock API)
+# Build a throwaway test stack (Vaultwarden, Ferrowarden, mock API)
 # with a test account and fake credentials; writes .env.test
 ./scripts/dev-setup.sh            # Linux/macOS
 .\scripts\dev-setup.ps1           # Windows (PowerShell 7)
@@ -46,6 +46,7 @@ cargo test --bins                            # unit tests
 # Integration tests against the running test stack
 set -a; . ./.env.test; set +a                # PowerShell: .\scripts\load-env.ps1
 cargo test --test integration -- --test-threads=1
+cargo test --test mcp -- --test-threads=1
 ```
 
 ## Guidelines for changes

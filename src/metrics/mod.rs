@@ -238,7 +238,7 @@ impl Metrics {
         );
         registry.register(
             "vault_excluded_items",
-            "Items the native backend left out at its last rebuild because they could not be read safely (0 for bw serve)",
+            "Items the native backend left out at its last rebuild because they could not be read safely",
             m.vault_excluded.clone(),
         );
         registry.register_with_unit(

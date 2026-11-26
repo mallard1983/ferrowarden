@@ -4,7 +4,7 @@ use crate::config::{Config, UnlockMode};
 fn policy(allowed: &str) -> Arc<TargetPolicy> {
     Arc::new(TargetPolicy::from_config(&Config {
         bind_addr: "127.0.0.1:3000".to_string(),
-        bw_serve_url: "http://127.0.0.1:8087".to_string(),
+        bw_serve_url: None,
         unlock_mode: UnlockMode::Manual,
         unlock_file: None,
         admin_key: "a".repeat(32).into(),
@@ -27,10 +27,7 @@ fn policy(allowed: &str) -> Arc<TargetPolicy> {
         events: Default::default(),
         ui: Default::default(),
         notify: Default::default(),
-        vault: crate::config::VaultConfig {
-            backend: crate::config::VaultBackend::BwServe,
-            ..Default::default()
-        },
+        vault: crate::config::VaultConfig::default(),
         metrics: Default::default(),
     }))
 }

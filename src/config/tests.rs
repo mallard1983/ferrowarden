@@ -3,7 +3,7 @@ use super::*;
 fn base_config(mode: UnlockMode) -> Config {
     Config {
         bind_addr: "127.0.0.1:3000".to_string(),
-        bw_serve_url: "http://127.0.0.1:8087".to_string(),
+        bw_serve_url: None,
         unlock_mode: mode,
         unlock_file: None,
         admin_key: "a".repeat(32).into(),
@@ -27,7 +27,7 @@ fn base_config(mode: UnlockMode) -> Config {
         ui: Default::default(),
         notify: Default::default(),
         vault: VaultConfig {
-            backend: VaultBackend::BwServe,
+            credentials: vault_creds(Some("test-id"), Some("test-secret")),
             ..Default::default()
         },
         metrics: Default::default(),
@@ -56,22 +56,122 @@ fn the_default_backend_needs_its_settings_and_the_error_says_where_to_look() {
     assert!(err.contains(ENV_VAULT_CLIENT_SECRET), "{err}");
     assert!(err.contains("vault.url"), "{err}");
     assert!(err.contains("docs/native-vault.md"), "{err}");
-    assert!(err.contains("bw-serve"), "{err}");
+    assert!(!err.contains("bw-serve"), "{err}");
     cfg.vault.credentials = vault_creds(Some("i"), Some("s"));
     assert!(cfg.validate().is_ok());
 }
 
+/// Parse `[vault]` the way startup does: from a TOML file's text.
+fn from_toml(toml: &str) -> Result<Config, String> {
+    config::Config::builder()
+        .add_source(config::File::from_str(toml, config::FileFormat::Toml))
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .map_err(|e| e.to_string())
+}
+
+/// Parse the way startup does: from `FERROWARDEN_*` variables.
+fn from_env(vars: &[(&str, &str)]) -> Result<Config, String> {
+    let env = vars
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect::<std::collections::HashMap<_, _>>();
+    config::Config::builder()
+        .add_source(
+            config::Environment::with_prefix("FERROWARDEN")
+                .prefix_separator("_")
+                .separator("__")
+                .ignore_empty(true)
+                .source(Some(env)),
+        )
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .map_err(|e| e.to_string())
+}
+
 #[test]
-fn bw_serve_is_deprecated_and_still_selectable() {
-    let v: VaultConfig = serde_json::from_str(r#"{"backend":"bw-serve"}"#).unwrap();
-    assert_eq!(v.backend, VaultBackend::BwServe);
-    let w = v.validate(false, false).unwrap();
+fn the_removed_bw_serve_backend_is_a_startup_error_with_a_pointer() {
+    // Direct, from a config file and from the environment: never a silent
+    // fallback to native.
+    let direct = serde_json::from_str::<VaultConfig>(r#"{"backend":"bw-serve"}"#)
+        .unwrap_err()
+        .to_string();
+    let file = from_toml(
+        r#"unlock_mode = "manual"
+[vault]
+backend = "bw-serve"
+"#,
+    )
+    .unwrap_err();
+    let env = from_env(&[
+        ("FERROWARDEN_UNLOCK_MODE", "manual"),
+        ("FERROWARDEN_VAULT__BACKEND", "bw-serve"),
+    ])
+    .unwrap_err();
+    for err in [direct, file, env] {
+        assert!(err.contains("removed in 0.3.0"), "{err}");
+        assert!(
+            err.contains("docs/native-vault.md#upgrading-from-bw-serve"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn native_is_the_only_accepted_backend_value() {
+    let v: VaultConfig = serde_json::from_str(r#"{"backend":"native"}"#).unwrap();
+    assert_eq!(v.backend, VaultBackend::Native);
+    for bad in ["nope", "Native", "bw_serve", ""] {
+        let err = serde_json::from_str::<VaultConfig>(&format!(r#"{{"backend":"{bad}"}}"#))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("vault.backend"), "{bad}: {err}");
+        assert!(!err.contains("removed in 0.3.0"), "{bad}: {err}");
+    }
+    let cfg = from_toml(
+        r#"unlock_mode = "manual"
+[vault]
+backend = "native"
+"#,
+    )
+    .unwrap();
+    assert_eq!(cfg.vault.backend, VaultBackend::Native);
+}
+
+#[test]
+fn a_leftover_bw_serve_url_is_a_warning_not_an_error() {
+    // From a file and from the environment it is read, so that it can be warned about.
+    let cfg = from_toml(
+        r#"unlock_mode = "manual"
+bw_serve_url = "http://bw-serve:8087"
+"#,
+    )
+    .unwrap();
+    assert!(cfg.bw_serve_url.is_some());
+    let cfg = from_env(&[
+        ("FERROWARDEN_UNLOCK_MODE", "manual"),
+        ("FERROWARDEN_BW_SERVE_URL", "http://bw-serve:8087"),
+    ])
+    .unwrap();
+    assert!(cfg.bw_serve_url.is_some());
+    assert!(from_toml(r#"unlock_mode = "manual""#)
+        .unwrap()
+        .bw_serve_url
+        .is_none());
+
+    let mut base = base_config(UnlockMode::Manual);
+    assert!(base.vault.validate(false).unwrap().is_empty());
+    let w = base.vault.validate(true).unwrap();
     assert_eq!(w.len(), 1);
     assert!(
-        w[0].contains("deprecated") && w[0].contains("docs/native-vault.md#switching"),
+        w[0].contains("bw_serve_url") && w[0].contains("ignored") && w[0].contains("0.3.0"),
         "{w:?}"
     );
-    assert!(base_config(UnlockMode::Manual).validate().is_ok());
+    // And the whole configuration still validates with it set.
+    base.bw_serve_url = Some("http://bw-serve:8087".to_string());
+    assert!(base.validate().is_ok());
 }
 
 #[test]
@@ -215,12 +315,18 @@ fn the_admin_key_file_is_read_without_touching_the_environment() {
     std::env::remove_var("FERROWARDEN_ADMIN_KEY");
     std::env::set_var("FERROWARDEN_ADMIN_KEY_FILE", &path);
     std::env::set_var("FERROWARDEN_TLS_ENABLED", "false");
-    std::env::set_var("FERROWARDEN_VAULT__BACKEND", "bw-serve");
+    std::env::set_var("FERROWARDEN_VAULT_CLIENT_ID", "load-test-id");
+    std::env::set_var("FERROWARDEN_VAULT_CLIENT_SECRET", "load-test-secret");
     std::env::set_var("FERROWARDEN_UNLOCK_MODE", "manual");
     let loaded = Config::load();
     // The key stays out of the process environment.
     let leaked = std::env::var("FERROWARDEN_ADMIN_KEY");
     let in_env_values = std::env::vars().any(|(_, v)| v == key);
+
+    // The removed backend fails the whole load, from the environment too.
+    std::env::set_var("FERROWARDEN_VAULT__BACKEND", "bw-serve");
+    let removed = Config::load().unwrap_err().to_string();
+    std::env::remove_var("FERROWARDEN_VAULT__BACKEND");
 
     // A missing file is an error, not a silent empty key.
     std::env::set_var("FERROWARDEN_ADMIN_KEY_FILE", dir.path().join("nope"));
@@ -233,7 +339,8 @@ fn the_admin_key_file_is_read_without_touching_the_environment() {
         "FERROWARDEN_ADMIN_KEY",
         "FERROWARDEN_ADMIN_KEY_FILE",
         "FERROWARDEN_TLS_ENABLED",
-        "FERROWARDEN_VAULT__BACKEND",
+        "FERROWARDEN_VAULT_CLIENT_ID",
+        "FERROWARDEN_VAULT_CLIENT_SECRET",
         "FERROWARDEN_UNLOCK_MODE",
     ] {
         std::env::remove_var(name);
@@ -242,6 +349,10 @@ fn the_admin_key_file_is_read_without_touching_the_environment() {
     assert_eq!(loaded.unwrap().admin_key.as_str(), key);
     assert!(leaked.is_err(), "the key must not be exported");
     assert!(!in_env_values);
+    assert!(
+        removed.contains("removed in 0.3.0") && removed.contains("#upgrading-from-bw-serve"),
+        "{removed}"
+    );
     assert!(missing.contains("does not exist"), "{missing}");
     assert_eq!(preferred.unwrap().admin_key.as_str(), direct);
 }
@@ -663,7 +774,6 @@ fn vault_defaults_to_native_and_the_documented_url() {
     assert_eq!(v.url, "https://vaultwarden");
     assert_eq!(v.ca_file, "");
     assert_eq!(VaultBackend::Native.as_str(), "native");
-    assert_eq!(VaultBackend::BwServe.as_str(), "bw-serve");
     assert!(base_config(UnlockMode::Manual).validate().is_ok());
 }
 
@@ -706,26 +816,6 @@ fn vault_backend_comes_from_the_file_or_the_environment() {
     assert_eq!(cfg.vault.ca_file, "/ca/ca.crt");
     assert!(cfg.vault.credentials.client_secret.is_none());
 
-    // bw-serve stays selectable from the environment.
-    let mut env = std::collections::HashMap::new();
-    env.insert("FERROWARDEN_UNLOCK_MODE".to_string(), "manual".to_string());
-    env.insert(
-        "FERROWARDEN_VAULT__BACKEND".to_string(),
-        "bw-serve".to_string(),
-    );
-    let cfg: Config = config::Config::builder()
-        .add_source(
-            config::Environment::with_prefix("FERROWARDEN")
-                .prefix_separator("_")
-                .separator("__")
-                .ignore_empty(true)
-                .source(Some(env)),
-        )
-        .build()
-        .unwrap()
-        .try_deserialize()
-        .unwrap();
-    assert_eq!(cfg.vault.backend, VaultBackend::BwServe);
     // And unset, the default is native.
     assert_eq!(VaultBackend::default(), VaultBackend::Native);
 }
@@ -764,23 +854,6 @@ fn hidden_passwords_are_refused_unless_the_operator_opts_in() {
 }
 
 #[test]
-fn allowing_hidden_passwords_with_bw_serve_warns_that_it_does_nothing() {
-    let mut v = VaultConfig {
-        backend: VaultBackend::BwServe,
-        ..Default::default()
-    };
-    assert_eq!(v.validate(false, false).unwrap().len(), 1); // the deprecation
-    v.allow_hidden_passwords = true;
-    let w = v.validate(false, false).unwrap();
-    assert_eq!(w.len(), 2);
-    assert!(w[1].contains("allow_hidden_passwords") && w[1].contains("bw-serve"));
-    // With the native backend it is meaningful: no warning.
-    v.backend = VaultBackend::Native;
-    v.credentials = vault_creds(Some("i"), Some("s"));
-    assert!(v.validate(false, false).unwrap().is_empty());
-}
-
-#[test]
 fn native_mode_needs_a_valid_url_and_the_api_key() {
     let native = |url: &str, id: Option<&str>, secret: Option<&str>| {
         let mut cfg = base_config(UnlockMode::Manual);
@@ -808,28 +881,6 @@ fn native_mode_needs_a_valid_url_and_the_api_key() {
         assert!(err.contains(ENV_VAULT_CLIENT_ID), "{err}");
         assert!(err.contains(ENV_VAULT_CLIENT_SECRET), "{err}");
     }
-}
-
-#[test]
-fn bw_serve_mode_does_not_need_or_check_the_native_settings() {
-    let mut cfg = base_config(UnlockMode::Manual);
-    cfg.vault.url = "http://not-https-and-never-used".to_string();
-    assert!(cfg.validate().is_ok());
-}
-
-#[test]
-fn ignored_settings_produce_warnings_in_either_mode() {
-    let mut v = VaultConfig {
-        backend: VaultBackend::BwServe,
-        ..Default::default()
-    };
-    let w = v.validate(false, true).unwrap();
-    assert!(w[1].contains("ignored"), "{w:?}");
-    v.backend = VaultBackend::Native;
-    v.credentials = vault_creds(Some("i"), Some("s"));
-    assert!(v.validate(false, true).unwrap().is_empty());
-    let w = v.validate(true, true).unwrap();
-    assert!(w[0].contains("bw_serve_url is ignored"), "{w:?}");
 }
 
 #[test]

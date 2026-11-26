@@ -30,7 +30,7 @@ axum = { version = "0.8", features = ["json"] }
 # TLS support via rustls (ring backend for easier cross-platform builds)
 axum-server = { version = "0.9", features = ["tls-rustls-ring"] }
 
-# HTTP client (for forwarding requests and bw serve calls)
+# HTTP client (for forwarding requests and the native vault backend's Vaultwarden calls)
 # rustls-tls: use rustls instead of native-tls/openssl — avoids OpenSSL build
 # deps in Docker and aligns with the axum-server TLS backend choice.
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }

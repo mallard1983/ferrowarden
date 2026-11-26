@@ -4,7 +4,7 @@
  *
  * Logs in to the test account with its master password and creates its
  * personal API key (client_id + client_secret), which the native vault
- * backend, bw serve and the seeder use. Node.js built-in modules only.
+ * backend and the seeder use. Node.js built-in modules only.
  *
  * The KDF (PBKDF2 or Argon2id) is read from prelogin: it is whatever the
  * account was registered with (bw-register.js, TEST_KDF), never assumed.
@@ -61,7 +61,7 @@ async function main() {
 
   fs.mkdirSync(secretsDir, { recursive: true });
   // Default file mode (umask): scripts/dev-setup.* make the files readable to
-  // the other test containers (bw serve, ferrowarden), which run as other UIDs.
+  // the other test containers (ferrowarden), which run as other UIDs.
   fs.writeFileSync(path.join(secretsDir, 'bw_client_id'), clientId);
   fs.writeFileSync(path.join(secretsDir, 'bw_client_secret'), clientSecret);
   console.log('[apikey] API key created');

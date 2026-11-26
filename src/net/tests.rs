@@ -2,9 +2,14 @@ use super::*;
 use crate::config::UnlockMode;
 
 fn cfg(allowed: &str, allow_private: bool) -> Config {
+    // Vaultwarden at 127.0.0.1:8087, the endpoint agents may never reach.
+    let vault = crate::config::VaultConfig {
+        url: "http://127.0.0.1:8087".to_string(),
+        ..Default::default()
+    };
     Config {
         bind_addr: "127.0.0.1:3000".to_string(),
-        bw_serve_url: "http://127.0.0.1:8087".to_string(),
+        bw_serve_url: None,
         unlock_mode: UnlockMode::Manual,
         unlock_file: None,
         admin_key: "a".repeat(32).into(),
@@ -27,10 +32,7 @@ fn cfg(allowed: &str, allow_private: bool) -> Config {
         events: Default::default(),
         ui: Default::default(),
         notify: Default::default(),
-        vault: crate::config::VaultConfig {
-            backend: crate::config::VaultBackend::BwServe,
-            ..Default::default()
-        },
+        vault,
         metrics: Default::default(),
     }
 }
@@ -81,7 +83,7 @@ fn classification() {
 #[tokio::test]
 async fn blocks_vault_backend_even_when_private_allowed() {
     let p = TargetPolicy::from_config(&cfg("127.0.0.0/8", true));
-    let url = Url::parse("http://127.0.0.1:8087/object/password/x").unwrap();
+    let url = Url::parse("http://127.0.0.1:8087/identity/x").unwrap();
     assert!(matches!(
         p.check_url(&url).await,
         Err(FerroError::TargetBlocked(_))
@@ -94,9 +96,9 @@ async fn blocks_vault_backend_even_when_private_allowed() {
 #[tokio::test]
 async fn blocks_vault_backend_by_host_name() {
     let mut c = cfg("", true);
-    c.bw_serve_url = "http://bw-serve:8087".to_string();
+    c.vault.url = "http://vaultwarden:8087".to_string();
     let p = TargetPolicy::from_config(&c);
-    let url = Url::parse("http://BW-SERVE:8087/object/password/x").unwrap();
+    let url = Url::parse("http://VAULTWARDEN:8087/identity/x").unwrap();
     assert!(matches!(
         p.check_url(&url).await,
         Err(FerroError::TargetBlocked(_))

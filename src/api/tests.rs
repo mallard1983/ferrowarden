@@ -26,7 +26,7 @@ fn build_with(
 ) -> (Router, Arc<AppState>) {
     let cfg = Config {
         bind_addr: "127.0.0.1:3000".to_string(),
-        bw_serve_url: "http://127.0.0.1:8087".to_string(),
+        bw_serve_url: None,
         unlock_mode: UnlockMode::Manual,
         unlock_file: None,
         admin_key: "a".repeat(32).into(),
@@ -49,10 +49,7 @@ fn build_with(
         events: Default::default(),
         ui: Default::default(),
         notify: Default::default(),
-        vault: crate::config::VaultConfig {
-            backend: crate::config::VaultBackend::BwServe,
-            ..Default::default()
-        },
+        vault: crate::config::VaultConfig::default(),
         metrics: Default::default(),
     };
     let state = Arc::new(AppState::new(cfg, Arc::new(EventLog::buffer_only(100))));
@@ -1133,12 +1130,16 @@ async fn preview_needs_a_credential_list_when_the_vault_is_locked() {
     // Locked, no cache: 503, like GET /v1/credentials.
     let (s, _) = admin(&app, "POST", &path, Some("{}")).await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
-    // Locked with a cache: answers from the cache.
+    // Unlocked with a cache: answers from the cache.
     seed(&state).await;
-    state.set_locked("test").await;
+    state.set_unlocked().await;
     let (s, j) = admin(&app, "POST", &path, Some("{}")).await;
     assert_eq!(s, StatusCode::OK, "{j}");
     assert_eq!(j["credentials"].as_array().unwrap().len(), 3);
+    // Locking drops the cache with the keys: 503 again.
+    state.set_locked("test").await;
+    let (s, _) = admin(&app, "POST", &path, Some("{}")).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
@@ -1316,10 +1317,7 @@ async fn startup_event_reports_whether_hidden_passwords_are_allowed() {
 async fn startup_event_and_admin_status_name_the_vault_backend() {
     let (_app, state) = app_with_state("");
     let e = serde_json::to_value(crate::startup_event(&state.config, 0, 0)).unwrap();
-    assert_eq!(e["ferrowarden"]["details"]["vault_backend"], "bw-serve");
-    let mut config = state.config.clone();
-    config.vault.backend = crate::config::VaultBackend::Native;
-    let e = serde_json::to_value(crate::startup_event(&config, 0, 0)).unwrap();
+    // Always `native` now; the field stays so dashboards and SIEM rules keep working.
     assert_eq!(e["ferrowarden"]["details"]["vault_backend"], "native");
 
     let app = router(state);
@@ -1337,7 +1335,7 @@ async fn startup_event_and_admin_status_name_the_vault_backend() {
     let body: serde_json::Value =
         serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 4096).await.unwrap())
             .unwrap();
-    assert_eq!(body["vault_backend"], "bw-serve");
+    assert_eq!(body["vault_backend"], "native");
 }
 // ── POST /v1/admin/notify/test ────────────────────────────────────────────
 

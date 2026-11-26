@@ -825,7 +825,7 @@
     {
       "type": "stat",
       "title": "Items left out",
-      "description": "Items the native backend could not read safely at its last rebuild (always 0 with bw serve).",
+      "description": "Items the native backend could not read safely at its last rebuild.",
       "id": 15,
       "datasource": {
         "type": "prometheus",

@@ -209,8 +209,8 @@ async fn list(
     policy: &KeyPolicy,
     detailed: bool,
 ) -> FerroResult<(Value, usize)> {
-    // In file mode, try to unlock again right away (e.g. after a bw serve
-    // restart) instead of failing until the next refresh.
+    // In file mode, try to unlock again right away (e.g. after the vault
+    // locked) instead of failing until the next refresh.
     if state.is_locked().await && !crate::vault::refresh::reunlock_if_possible(state).await {
         return Err(FerroError::VaultLocked);
     }

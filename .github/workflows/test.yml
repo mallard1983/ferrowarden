@@ -63,15 +63,13 @@ jobs:
   # Requires Docker Compose. Runs on pull requests and the default branch.
   #
   # Two jobs from one definition, in parallel, each with a stack of its own:
-  #   - "Integration tests": Vaultwarden 1.37.5 (the current release), an
-  #     account with PBKDF2 and the Bitwarden CLI 2026.11.0. This is the
-  #     required status check of the same name; do not rename it.
+  #   - "Integration tests": Vaultwarden 1.37.5 (the current release) and an
+  #     account with PBKDF2. This is the required status check of the same
+  #     name; do not rename it.
   #   - "Integration tests (Vaultwarden 1.36.0, Argon2id)": the previous minor
-  #     release, an Argon2id account and the CLI of its time. A newer CLI
-  #     cannot sync a 1.36.0 vault (its SDK rejects a cipher the server
-  #     sends), so the CLI version is part of the pair. See docs/cicd.md.
-  # Each runs every suite below: both instances' integration suites, the
-  # equivalence suite, the MCP suite and the secret gate.
+  #     release and an Argon2id account. See docs/cicd.md.
+  # Each runs every suite below: the integration suite (which includes the
+  # seed-data checks), the MCP suite and the secret gate.
   #
   # Runs scripts/dev-setup.sh as the runner user (UID 1001): the test stack
   # handles non-1000 UIDs (see docker-compose.test.yml, vault-setup).
@@ -87,16 +85,13 @@ jobs:
         include:
           - name: Integration tests
             vaultwarden: "1.37.5"
-            bw_cli: "2026.11.0"
             kdf: pbkdf2
           - name: Integration tests (Vaultwarden 1.36.0, Argon2id)
             vaultwarden: "1.36.0"
-            bw_cli: "2026.6.0"
             kdf: argon2id
     # Read by docker-compose.test.yml and scripts/dev-setup.sh.
     env:
       VAULTWARDEN_VERSION: ${{ matrix.vaultwarden }}
-      BW_CLI_VERSION: ${{ matrix.bw_cli }}
       TEST_KDF: ${{ matrix.kdf }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -127,34 +122,16 @@ jobs:
           chmod +x scripts/dev-setup.sh
           scripts/dev-setup.sh
 
-      # The test stack runs two Ferrowarden instances against one Vaultwarden
-      # account (docs/native-vault.md): `ferrowarden` with bw serve (port 3000)
-      # and `ferrowarden-native` with the native vault backend (port 3003).
-      # FERROWARDEN_KEEP_GATE_SECRETS keeps the run-generated tokens of every
-      # step below for the secret gate; the file is cleared once, here.
-      - name: Run integration tests (bw serve backend)
+      # The test stack runs one Ferrowarden against the Vaultwarden account
+      # (docs/native-vault.md), on port 3000. The integration suite includes
+      # the checks of the listing and of every offered placeholder against the
+      # seed data (tests/seed). FERROWARDEN_KEEP_GATE_SECRETS keeps the
+      # run-generated tokens for the secret gate; the file is cleared once,
+      # here.
+      - name: Run integration tests
         run: |
           rm -f target/integration-secrets.txt
           set -a; source .env.test; set +a
-          export FERROWARDEN_KEEP_GATE_SECRETS=1
-          cargo test --test integration -- --nocapture --test-threads=1
-
-      # Equivalence of the two backends (tests/equivalence.rs): identical
-      # credential listings, and every offered placeholder substitutes the same
-      # value (or fails the same way) through both instances. Values are never
-      # printed. The gate for ever making `native` the default backend.
-      - name: Run the backend equivalence suite
-        run: |
-          set -a; source .env.test; set +a
-          export FERROWARDEN_KEEP_GATE_SECRETS=1 FERROWARDEN_EQUIVALENCE_REQUIRED=1
-          cargo test --test equivalence -- --nocapture --test-threads=1
-
-      # The whole integration suite again, against the native instance. No test
-      # is skipped: the container-hardening test inspects the `ferrowarden`
-      # service whichever instance the suite targets (docs/cicd.md).
-      - name: Run integration tests (native backend)
-        run: |
-          set -a; source .env.test.native; set +a
           export FERROWARDEN_KEEP_GATE_SECRETS=1
           cargo test --test integration -- --nocapture --test-threads=1
 
@@ -166,8 +143,8 @@ jobs:
           cargo test --test mcp -- --nocapture --test-threads=1
 
       # Secret gate: no seeded secret value, agent key, admin key, master
-      # password or Vaultwarden API key may appear in the logs or the security
-      # event file of either Ferrowarden instance.
+      # password or Vaultwarden API key may appear in the logs, the security
+      # event file or the metrics scrape of Ferrowarden.
       - name: Check logs and events for secret values
         run: bash scripts/check-no-secrets.sh
 
@@ -176,40 +153,37 @@ jobs:
       # environment. /proc/<pid>/environ of a container process is readable by
       # root on the host only, hence sudo. The key is compared with
       # `grep -qF -f` and never printed.
-      # The native instance also holds the Vaultwarden API key: its environment
-      # must name the secret files, never hold the values.
-      - name: Check the admin key is not in the process environment
+      # Ferrowarden also holds the Vaultwarden API key and the master password:
+      # its environment must name the secret files, never hold the values.
+      - name: Check the secrets are not in the process environment
         run: |
           set -euo pipefail
           [ -s secrets/ferrowarden_admin_key ]
-          for service in ferrowarden ferrowarden-native; do
-            cid="$(docker compose -f docker-compose.test.yml ps -q "$service")"
-            pid="$(docker inspect -f '{{.State.Pid}}' "$cid")"
-            [ "$pid" -gt 0 ]
-            env_file="$(mktemp)"
-            sudo cat "/proc/$pid/environ" | tr '\0' '\n' > "$env_file"
-            # Control: this really is ferrowarden's environment, and it names
-            # the secret file (a path) instead of holding the secret.
-            grep -q '^FERROWARDEN_ADMIN_KEY_FILE=/run/secrets/ferrowarden_admin_key$' "$env_file"
-            if grep -qF -f secrets/ferrowarden_admin_key "$env_file"; then
-              echo "the admin key is in the $service process environment" >&2
+          service=ferrowarden
+          cid="$(docker compose -f docker-compose.test.yml ps -q "$service")"
+          pid="$(docker inspect -f '{{.State.Pid}}' "$cid")"
+          [ "$pid" -gt 0 ]
+          env_file="$(mktemp)"
+          sudo cat "/proc/$pid/environ" | tr '\0' '\n' > "$env_file"
+          # Control: this really is ferrowarden's environment, and it names
+          # the secret files (paths) instead of holding the secrets.
+          grep -q '^FERROWARDEN_ADMIN_KEY_FILE=/run/secrets/ferrowarden_admin_key$' "$env_file"
+          grep -q '^FERROWARDEN_VAULT_CLIENT_SECRET_FILE=/run/secrets/bw_client_secret$' "$env_file"
+          if grep -qF -f secrets/ferrowarden_admin_key "$env_file"; then
+            echo "the admin key is in the $service process environment" >&2
+            exit 1
+          fi
+          if grep -q '^FERROWARDEN_ADMIN_KEY=' "$env_file"; then
+            echo "FERROWARDEN_ADMIN_KEY is set in the $service process environment" >&2
+            exit 1
+          fi
+          for f in bw_client_id bw_client_secret bw_master_password; do
+            if grep -qF -f "secrets/$f" "$env_file"; then
+              echo "$f is in the $service process environment" >&2
               exit 1
             fi
-            if grep -q '^FERROWARDEN_ADMIN_KEY=' "$env_file"; then
-              echo "FERROWARDEN_ADMIN_KEY is set in the $service process environment" >&2
-              exit 1
-            fi
-            if [ "$service" = ferrowarden-native ]; then
-              grep -q '^FERROWARDEN_VAULT_CLIENT_SECRET_FILE=/run/secrets/bw_client_secret$' "$env_file"
-              for f in bw_client_id bw_client_secret bw_master_password; do
-                if grep -qF -f "secrets/$f" "$env_file"; then
-                  echo "$f is in the $service process environment" >&2
-                  exit 1
-                fi
-              done
-            fi
-            rm -f "$env_file"
           done
+          rm -f "$env_file"
           echo "OK: the process environments hold the paths of the secret files, not the secrets."
 
       # The image is the binary and the minimal passwd/group on scratch: no

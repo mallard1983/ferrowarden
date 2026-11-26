@@ -157,7 +157,7 @@ In a JSON body, values are substituted into the parsed structure, so a credentia
 - **The key's credential scope** covers every placeholder's credential name (`403`, reason `credential_out_of_scope`). This runs before the vault, the target or DNS is touched, and **before the unknown-credential check**: an out-of-scope name returns the same `403`, with the same message format and the same security event, whether or not a credential of that name exists, so an agent cannot use it to discover what is in the vault. The message is `Credential <name> is not available to this agent key`, where `<name>` is the placeholder the agent sent.
 - Every placeholder names exactly one vault login item (`422` unknown, `409` ambiguous).
 - Each credential is bound to the target: the target's host (and scheme/port, if the item's URI states them) matches one of the URIs on the vault item (`403`). See [Security Model §13](security.md#13-credential-host-binding).
-- The target is allowed by the outbound policy: never the vault endpoint (Vaultwarden, or bw serve); private/internal addresses only if listed in `allowed_targets` (`403`). See [Security Model §14](security.md#14-outbound-target-policy-ssrf-protection).
+- The target is allowed by the outbound policy: never the vault endpoint (Vaultwarden); private/internal addresses only if listed in `allowed_targets` (`403`). See [Security Model §14](security.md#14-outbound-target-policy-ssrf-protection).
 
 **Response `200 OK`**
 ```json
@@ -188,7 +188,7 @@ Every credential value used in the request is redacted (`[REDACTED]`) wherever i
 | `409 Conflict` | Placeholder name matches more than one vault item, or a field name appears more than once on the item |
 | `422 Unprocessable Entity` | Malformed placeholder, unknown credential, or a value/field the item does not have |
 | `502 Bad Gateway` | Forward to target failed (connection error, timeout) or response exceeded `max_response_bytes`. The message never includes the target URL. |
-| `503 Service Unavailable` | Vault is locked, or Vaultwarden is unreachable (bw serve with the deprecated backend) |
+| `503 Service Unavailable` | Vault is locked |
 
 ---
 
@@ -224,7 +224,7 @@ On success Ferrowarden also syncs with Vaultwarden and reloads the credential li
 | `400 Bad Request` | Malformed JSON, duplicate or unknown fields, or missing `password` |
 | `401 Unauthorized` | Invalid admin key, or the vault backend rejected the master password |
 | `404 Not Found` | Unlock mode is `file` |
-| `503 Service Unavailable` | Vaultwarden unreachable (bw serve with the deprecated backend) |
+| `503 Service Unavailable` | Vaultwarden unreachable |
 
 ---
 
@@ -503,7 +503,7 @@ Current operational status.
 }
 ```
 
-`vault_backend` is `native` (the default) or `bw-serve` (deprecated) (`vault.backend`, [native-vault.md](native-vault.md)).
+`vault_backend` is always `native` (`vault.backend`, [native-vault.md](native-vault.md)); the field stays so that dashboards and SIEM rules keep working.
 
 ---
 

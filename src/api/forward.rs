@@ -76,7 +76,8 @@ pub async fn forward(
     };
 
     if let Err(FerroError::VaultLocked) = &result {
-        // bw serve is locked — typically it restarted. Reflect that so
+        // The vault is locked (the account's key changed, or it was locked
+        // behind our back). Reflect that so
         // /v1/admin/status is honest, and in file mode unlock it again now and
         // retry once rather than failing until the next refresh. The retry
         // cannot duplicate an outbound call: VaultLocked only ever occurs

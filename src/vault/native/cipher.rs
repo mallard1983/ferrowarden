@@ -222,7 +222,7 @@ fn not_found(label: &str) -> FerroError {
 }
 
 /// A failure while decrypting a requested value. The reason is not shown to
-/// the agent (the same generic error bw serve gives); the log gets the fixed
+/// the agent (one generic error for every cause); the log gets the fixed
 /// code, never the item's name or any data.
 fn unreadable(code: &'static str) -> FerroError {
     tracing::warn!(reason = code, "A vault value could not be decrypted");

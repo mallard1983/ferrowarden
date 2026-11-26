@@ -264,7 +264,7 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // File mode: read and use the password before accepting any requests.
-    // unlock_from_file also syncs bw serve and loads the credential cache.
+    // unlock_from_file also syncs the vault and loads the credential cache.
     if config.unlock_mode == UnlockMode::File {
         tracing::info!(
             "File unlock mode: reading password from {:?}",
@@ -280,7 +280,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Manual unlock mode: POST /v1/unlock with admin key to unlock the vault");
     }
 
-    // Periodic sync/refresh; also re-unlocks in file mode if bw serve restarts.
+    // Periodic sync/refresh; also re-unlocks in file mode after the vault locks.
     spawn_refresher(state.clone());
 
     if config.enforce_credential_hosts {
@@ -297,7 +297,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("API served under the configured api_prefix");
     }
     if config.allow_private_targets {
-        tracing::warn!("allow_private_targets = true: agents may reach private/internal addresses (bw serve is still blocked)");
+        tracing::warn!("allow_private_targets = true: agents may reach private/internal addresses (Vaultwarden is still blocked)");
     }
 
     let router = api::router(state.clone());

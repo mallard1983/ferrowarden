@@ -2,12 +2,12 @@
 //!
 //! The agent chooses the URL of every forwarded request, so without a policy
 //! it could point ferrowarden at anything ferrowarden can reach — most
-//! importantly bw serve itself (`GET /object/password/<name>` returns a
-//! plaintext password) or a cloud metadata endpoint.
+//! importantly Vaultwarden itself (which holds the whole encrypted vault) or a
+//! cloud metadata endpoint.
 //!
 //! Rules, applied to every address a target resolves to:
 //!   * unspecified, multicast and broadcast addresses are never allowed;
-//!   * the bw serve endpoint (host name, and resolved IP + port) is never
+//!   * the Vaultwarden endpoint (host name, and resolved IP + port) is never
 //!     allowed, whatever else is configured;
 //!   * neither are the notifier endpoints (Gotify, ntfy, webhook URLs): an
 //!     agent must not be able to post fake notifications or flood the
@@ -178,7 +178,7 @@ pub struct TargetPolicy {
     allow_private: bool,
     allowed_cidrs: Vec<Cidr>,
     allowed_hosts: Vec<String>,
-    /// bw serve host name (lower-cased) and port — never a valid target.
+    /// Vaultwarden host name (lower-cased) and port — never a valid target.
     vault_host: Option<String>,
     vault_port: Option<u16>,
     /// Host (lower-cased) and port of every notifier URL — never a valid
@@ -196,13 +196,9 @@ impl TargetPolicy {
                 None => allowed_hosts.push(entry.to_ascii_lowercase()),
             }
         }
-        // The vault endpoint agents may never reach: bw serve, or in native
-        // mode Vaultwarden itself (which holds the whole encrypted vault).
-        let vault_url = match cfg.vault.backend {
-            crate::config::VaultBackend::BwServe => &cfg.bw_serve_url,
-            crate::config::VaultBackend::Native => &cfg.vault.url,
-        };
-        let vault = Url::parse(vault_url).ok();
+        // The vault endpoint agents may never reach: Vaultwarden itself, which
+        // holds the whole encrypted vault.
+        let vault = Url::parse(&cfg.vault.url).ok();
         Self {
             allow_private: cfg.allow_private_targets,
             allowed_cidrs,
@@ -222,7 +218,7 @@ impl TargetPolicy {
         host.parse::<IpAddr>().is_err() && self.notifiers.iter().any(|(h, _)| h == host)
     }
 
-    /// Resolve the bw serve host and the notifier hosts.
+    /// Resolve the Vaultwarden host and the notifier hosts.
     async fn denied_addrs(&self) -> DeniedAddrs {
         let mut out = DeniedAddrs {
             vault: self.vault_addrs().await,
@@ -247,7 +243,7 @@ impl TargetPolicy {
         self.allowed_hosts.iter().any(|h| h == host)
     }
 
-    /// Resolve the bw serve host to the addresses it is reachable on.
+    /// Resolve the Vaultwarden host to the addresses it is reachable on.
     async fn vault_addrs(&self) -> Vec<IpAddr> {
         let (Some(host), Some(port)) = (&self.vault_host, self.vault_port) else {
             return Vec::new();
@@ -321,7 +317,7 @@ impl TargetPolicy {
             .port_or_known_default()
             .ok_or_else(|| FerroError::InvalidTargetUrl("Target URL has no port".to_string()))?;
 
-        // A named bw serve host is blocked on every port. An IP-literal one is
+        // A named Vaultwarden host is blocked on every port. An IP-literal one is
         // handled by the IP + port check below, since other services may
         // legitimately share that IP (e.g. 127.0.0.1).
         if self.vault_host.as_deref() == Some(host.as_str()) && host.parse::<IpAddr>().is_err() {

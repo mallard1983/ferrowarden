@@ -4,7 +4,7 @@ use crate::config::{Config, UnlockMode};
 fn test_config() -> Config {
     Config {
         bind_addr: "127.0.0.1:3000".to_string(),
-        bw_serve_url: "http://127.0.0.1:8087".to_string(),
+        bw_serve_url: None,
         unlock_mode: UnlockMode::Manual,
         unlock_file: None,
         admin_key: "a".repeat(32).into(),
@@ -27,10 +27,7 @@ fn test_config() -> Config {
         events: Default::default(),
         ui: Default::default(),
         notify: Default::default(),
-        vault: crate::config::VaultConfig {
-            backend: crate::config::VaultBackend::BwServe,
-            ..Default::default()
-        },
+        vault: crate::config::VaultConfig::default(),
         metrics: Default::default(),
     }
 }
@@ -64,17 +61,17 @@ async fn set_locked_restores_lock() {
 async fn vault_lock_event_is_emitted_on_the_transition_only() {
     let state = test_state();
     // Already locked at start: no transition, no event.
-    state.set_locked("bw_serve_locked").await;
+    state.set_locked("vault_locked").await;
     assert!(state.events.recent(10).is_empty());
 
     state.set_unlocked().await;
-    state.set_locked("bw_serve_locked").await;
-    state.set_locked("bw_serve_locked").await;
+    state.set_locked("vault_locked").await;
+    state.set_locked("vault_locked").await;
     let events = state.events.recent(10);
     assert_eq!(events.len(), 1);
     let v = serde_json::to_value(&*events[0]).unwrap();
     assert_eq!(v["event"]["action"], "vault_lock");
-    assert_eq!(v["ferrowarden"]["details"]["cause"], "bw_serve_locked");
+    assert_eq!(v["ferrowarden"]["details"]["cause"], "vault_locked");
 }
 
 #[tokio::test]
