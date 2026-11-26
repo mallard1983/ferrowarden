@@ -482,11 +482,13 @@ impl EventsConfig {
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum VaultBackend {
-    /// The Bitwarden CLI's `bw serve` REST API (`bw_serve_url`). The default.
-    #[default]
+    /// The Bitwarden CLI's `bw serve` REST API (`bw_serve_url`). Deprecated:
+    /// removed in the release after 0.2.0.
     BwServe,
     /// The Bitwarden client protocol implemented in Rust directly against
-    /// Vaultwarden: no `bw`, no Node. Needs `vault.url` and an API key.
+    /// Vaultwarden: no `bw`, no Node. Needs `vault.url` and an API key. The
+    /// default.
+    #[default]
     Native,
 }
 
@@ -553,7 +555,7 @@ impl VaultCredentials {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct VaultConfig {
-    /// `bw-serve` (default) or `native`.
+    /// `native` (default) or `bw-serve` (deprecated).
     pub backend: VaultBackend,
     /// Vaultwarden base URL: how Ferrowarden reaches the server. Used by the
     /// native backend and, with the admin UI, to verify the master password at
@@ -577,6 +579,9 @@ pub struct VaultConfig {
     #[serde(skip)]
     pub credentials: VaultCredentials,
 }
+
+/// Logged at startup when `vault.backend = bw-serve`.
+pub const BW_SERVE_DEPRECATED: &str = "the bw-serve backend is deprecated and will be removed in the next release; see docs/native-vault.md#switching";
 
 pub const DEFAULT_VAULT_URL: &str = "https://vaultwarden";
 
@@ -677,9 +682,14 @@ impl VaultConfig {
                 if self.credentials.client_id.is_none() || self.credentials.client_secret.is_none()
                 {
                     return Err(FerroError::Config(format!(
-                        "vault.backend = native requires the Vaultwarden API key: set \
-                         {ENV_VAULT_CLIENT_ID} (or {ENV_VAULT_CLIENT_ID}_FILE) and \
-                         {ENV_VAULT_CLIENT_SECRET} (or {ENV_VAULT_CLIENT_SECRET}_FILE)"
+                        "the native vault backend (the default since 0.2.0) requires the \
+                         Vaultwarden API key: set {ENV_VAULT_CLIENT_ID} (or \
+                         {ENV_VAULT_CLIENT_ID}_FILE) and {ENV_VAULT_CLIENT_SECRET} (or \
+                         {ENV_VAULT_CLIENT_SECRET}_FILE), and vault.url \
+                         (FERROWARDEN_VAULT__URL) if Vaultwarden is not at \
+                         {DEFAULT_VAULT_URL}. See docs/native-vault.md. To stay on the \
+                         deprecated bw serve backend for now, set vault.backend = \
+                         \"bw-serve\" (FERROWARDEN_VAULT__BACKEND=bw-serve)"
                     )));
                 }
                 if bw_serve_url_set {
@@ -687,6 +697,7 @@ impl VaultConfig {
                 }
             }
             VaultBackend::BwServe => {
+                warnings.push(BW_SERVE_DEPRECATED.to_string());
                 if self.allow_hidden_passwords {
                     warnings.push(
                         "vault.allow_hidden_passwords has no effect with vault.backend = bw-serve (bw serve withholds the password of such items itself)"

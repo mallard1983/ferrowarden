@@ -9,7 +9,7 @@ How much isolation you put around Ferrowarden is your decision, and it should ma
 | What it is | The shipped `docker-compose.yml`, as is | The same stack on a dedicated VM, optionally under gVisor, with outbound firewall rules |
 | Effort | None beyond [setup](setup.md) | A VM, a firewall policy, optionally a different container runtime |
 | Kernel | Shared with the host and everything else on it | The VM's own; nothing else runs on it |
-| Defends against | A bug in Ferrowarden or `bw serve` that gives an attacker code execution inside a container | The same, plus a container escape reaching other workloads, plus data leaving to destinations you did not intend |
+| Defends against | A bug in Ferrowarden that gives an attacker code execution inside a container | The same, plus a container escape reaching other workloads, plus data leaving to destinations you did not intend |
 | Does not defend against | A kernel or runtime vulnerability that escapes the container; a compromise of the Docker host | A compromise of the hypervisor; a compromised Ferrowarden using the hosts you allowed it to reach |
 
 Neither profile makes a compromised Ferrowarden harmless. Ferrowarden has to decrypt a credential to use it, so an attacker who controls the process can use whatever it can reach. The profiles limit what that attacker can *do next* and how far they can get. [Security Model](security.md) states the threat model and the limits.
@@ -42,18 +42,15 @@ Neither profile makes a compromised Ferrowarden harmless. Ferrowarden has to dec
 
 If you point `FERROWARDEN_EVENTS__FILE` somewhere else, mount a volume there that UID 999 can write. A path in the image, such as `/tmp/...`, fails at startup under `read_only: true`.
 
-### What the `bw-serve` container has
+### What the Vaultwarden container has
 
-`bw serve` is the largest attack surface in the stack: Node.js and the Bitwarden CLI's npm dependency tree, holding the decrypted vault while unlocked. It is on an internal-only network, and it gets the same restrictions as Ferrowarden:
+The default stack has two long-running containers, Ferrowarden and Vaultwarden. There is no `bw-serve` container: the largest attack surface of 0.1.0 (Node.js and the Bitwarden CLI's npm dependency tree, holding the decrypted vault while unlocked) is gone from the default deployment. The Vaultwarden container is a third-party image that binds port 443 as root; it gets `no-new-privileges` and nothing more.
 
-- `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges`, `pids_limit: 128`, `mem_limit: 1g`.
-- Its one writable path is the CLI's data directory, `/home/node/.config/Bitwarden CLI` (a single `data.json`: the login state and the encrypted local vault cache). Production keeps that on the `bw-data` volume so the CLI keeps its device identity across restarts; the test stack uses a `tmpfs` there, because it logs in again with the API key on every start, which the entrypoint handles.
-
-**Be clear about the limit:** the `bw-serve` image is a stock Node image. It still has a shell, `curl` and the rest of a Debian userland, because its entrypoint is a shell script and its health check uses `curl`. The restrictions above are what contain it, not the absence of tools. The Vaultwarden container is a third-party image that binds port 443 as root; it gets `no-new-privileges` and nothing more.
+If you stay on the deprecated `bw-serve` backend (`docker-compose.bw-serve.yml`), that container keeps its hardening: `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges`, `pids_limit: 128`, `mem_limit: 1g`, and one writable path, the CLI's data directory, on the `bw-data` volume. Be clear about the limit: it is a stock Node image with a shell, `curl` and a Debian userland; the restrictions contain it, not the absence of tools.
 
 ### What Standard protects against, and what it does not
 
-It protects against the common outcomes of a bug in Ferrowarden or `bw serve`: no shell to run, no tools to fetch, no way to persist (read-only filesystem), no privileged operations (no capabilities, no privilege escalation), no fork bombs or memory exhaustion. It also means the admin key is not exposed through the environment to anything that can read `/proc/<pid>/environ` or `docker inspect`.
+It protects against the common outcomes of a bug in Ferrowarden: no shell to run, no tools to fetch, no way to persist (read-only filesystem), no privileged operations (no capabilities, no privilege escalation), no fork bombs or memory exhaustion. It also means the admin key is not exposed through the environment to anything that can read `/proc/<pid>/environ` or `docker inspect`.
 
 It does **not** protect against an escape from the container. A container shares the host's kernel: a kernel or container-runtime vulnerability reachable from inside the container is a vulnerability of the whole host. Docker's default seccomp profile narrows the kernel surface, but it is a filter on one shared kernel. A process that already holds the admin key and the vault in memory also does not need a shell to misuse them: it can call any service Ferrowarden can reach.
 
@@ -62,7 +59,7 @@ It does **not** protect against an escape from the container. A container shares
 ```sh
 # Flags on the running containers.
 docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}}' \
-  $(docker compose ps -q ferrowarden bw-serve)
+  $(docker compose ps -q ferrowarden)
 # true [ALL] [no-new-privileges:true]   (once per container)
 
 # The image has no shell.
@@ -116,8 +113,6 @@ Practical points:
    services:
      ferrowarden:
        runtime: runsc
-     bw-serve:
-       runtime: runsc
    ```
 
    ```sh
@@ -128,7 +123,7 @@ Practical points:
 3. Verify the runtime is in use:
 
    ```sh
-   docker inspect -f '{{.HostConfig.Runtime}}' $(docker compose ps -q ferrowarden bw-serve)
+   docker inspect -f '{{.HostConfig.Runtime}}' $(docker compose ps -q ferrowarden)
    # runsc   (once per container)
 
    # A process inside a gVisor sandbox sees gVisor's kernel, not the host's.
@@ -147,7 +142,7 @@ What should be able to leave the VM:
 | Source | Needs to reach | Everything else |
 |---|---|---|
 | `ferrowarden` (the `agent-facing` network) | DNS; the hosts of the APIs your agents call (the `allowed_targets` and the credentials' URIs); your push notifier and SIEM syslog endpoint if configured | Drop and log |
-| `bw-serve` and `ferrowarden` (`vault-internal`) | Each other and `vaultwarden`. This network is `internal: true`: Docker gives it no route out | Already isolated |
+| `ferrowarden` and `vaultwarden` (`vault-internal`) | Each other (plus `bw-serve`, with the deprecated backend). This network is `internal: true`: Docker gives it no route out | Already isolated |
 | `vaultwarden` (the `vault-web` bridge) | Nothing for normal operation. Outbound is only needed for optional features (icon fetching, push relay, SMTP); turn those off in Vaultwarden or allow only their hosts | Drop |
 | The VM itself | OS updates, NTP, your backup target | Drop |
 

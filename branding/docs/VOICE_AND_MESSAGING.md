@@ -12,7 +12,7 @@
 
 **Short paragraph:** Ferrowarden is a credential proxy that runs alongside Vaultwarden. Agents submit API requests with placeholders like `{{vault:name}}`; Ferrowarden resolves the secrets, forwards the request to the destination, and scrubs credential values from the response. The agent uses a scoped proxy token instead of direct vault access.
 
-**More technical description:** Ferrowarden mediates outbound API calls from AI agents using credentials stored in Vaultwarden and resolved through a Bitwarden CLI vault API layer. It applies access controls to agent keys and destinations, replaces named placeholders during forwarding, and attempts to prevent credential values from leaking into agent-visible responses.
+**More technical description:** Ferrowarden mediates outbound API calls from AI agents using credentials stored in Vaultwarden and read directly from the vault by Ferrowarden (the native backend, with no Bitwarden CLI in the path). It applies access controls to agent keys and destinations, replaces named placeholders during forwarding, and attempts to prevent credential values from leaking into agent-visible responses.
 
 ## The problem we are solving
 
@@ -55,7 +55,7 @@ Prefer short declarative sentences, examples with real syntax, and concise reaso
 
 ## Claims discipline
 
-The repository README describes credential storage in Vaultwarden, `bw serve` as the vault API layer, proxy-scoped agent keys, outbound target checks, and response scrubbing. Marketing copy may explain those design choices, but it must not turn design intent into universal guarantees or invent independently verified security certifications.
+The repository README describes credential storage in Vaultwarden, the native vault backend (decrypt-on-demand, no decrypted values on the network), proxy-scoped agent keys, outbound target checks, and response scrubbing. Marketing copy may explain those design choices, but it must not turn design intent into universal guarantees or invent independently verified security certifications.
 
 Do **not** claim:
 

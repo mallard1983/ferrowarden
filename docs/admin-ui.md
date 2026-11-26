@@ -119,7 +119,7 @@ Pangolin: create a resource that targets `http://ferrowarden:3001` (or `https://
 
 ## Signing in
 
-`GET /ui/login` shows one field, the master password. There is **no email field**: Ferrowarden signs in as the account it already serves (the email `bw serve` reports), and only that account.
+`GET /ui/login` shows one field, the master password. There is **no email field**: Ferrowarden signs in as the account it already serves (the email the vault backend reports), and only that account.
 
 What happens when you submit:
 
@@ -272,6 +272,6 @@ Events never contain the password, the hash, a code, a token, a cookie or anythi
 - Sessions do not survive a restart.
 - No second-factor "remember this device" (Ferrowarden never sends `twoFactorRemember`).
 - WebAuthn, Duo and recovery-code sign-in are not supported.
-- The UI needs `bw serve` to be logged in: the account email comes from it.
+- The UI needs the vault backend to know the account email (the native backend looks it up from Vaultwarden; the deprecated bw-serve backend needs `bw serve` to be logged in).
 
 See also [Security Model §16](security.md#16-the-admin-web-ui) and [Operations](operations.md).

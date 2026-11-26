@@ -10,7 +10,7 @@
 
 **The credential boundary for AI agents.** Ferrowarden is a source-available credential proxy that sits alongside Vaultwarden. AI agents send requests using `{{vault:name}}` placeholders; Ferrowarden resolves credentials and forwards requests, without returning the secret values to the agent by design.
 
-Ferrowarden resolves the credential through the Bitwarden CLI's vault API (`bw serve`; an opt-in [native backend](docs/native-vault.md) reads the vault itself, with no CLI), makes the outbound call, and scrubs known credential values from the response. The agent uses a scoped proxy key instead of direct vault access.
+Ferrowarden resolves the credential by reading the vault itself (the [native backend](docs/native-vault.md): it keeps the vault encrypted and decrypts only the field a request needs, with no Bitwarden CLI or Node.js), makes the outbound call, and scrubs known credential values from the response. The agent uses a scoped proxy key instead of direct vault access.
 
 Ferrowarden is a **sidecar to [Vaultwarden](https://github.com/dani-garcia/vaultwarden)**, not a fork or replacement vault: Vaultwarden keeps storing your credentials. Ferrowarden is an independent project and is not affiliated with or endorsed by the Vaultwarden or Bitwarden projects.
 
@@ -41,24 +41,20 @@ Ferrowarden narrows how credentials are exposed; it does not remove every risk. 
   ┌─────────────────────────────────────────────────────────────┐
   │                        Host / Docker                         │
   │                                                             │
-  │   ┌───────────┐    bw serve API    ┌──────────────────────┐ │
-  │   │ Vaultwarden│◄──────────────────│    bw serve          │ │
-  │   │ (storage)  │  (localhost only) │  (vault API layer)   │ │
-  │   └───────────┘                   └──────────┬───────────┘ │
-  │                                              │              │
-  │                                   ┌──────────▼───────────┐  │
-  │                                   │    Ferrowarden       │  │
-  │                                   │  (credential proxy)  │  │
-  │                                   └──────────┬───────────┘  │
-  └──────────────────────────────────────────────┼─────────────┘
-                                                 │ :3000
-                                        ┌────────▼────────┐
-                                        │   AI Agent      │
-                                        │ (Claude, etc.)  │
-                                        └─────────────────┘
+  │   ┌───────────┐   encrypted vault   ┌─────────────────────┐ │
+  │   │ Vaultwarden│◄───────────────────│    Ferrowarden      │ │
+  │   │ (storage)  │  HTTPS, internal   │ (credential proxy)  │ │
+  │   └───────────┘  network only       └──────────┬──────────┘ │
+  │                                                │            │
+  └────────────────────────────────────────────────┼───────────┘
+                                                   │ :3000
+                                          ┌────────▼────────┐
+                                          │   AI Agent      │
+                                          │ (Claude, etc.)  │
+                                          └─────────────────┘
 ```
 
-The agent connects only to Ferrowarden. You manage credentials in Vaultwarden's web vault (published on `:8443`, or behind your reverse proxy), which works with Bitwarden-compatible clients. `bw serve`, which holds the unlocked vault, runs on an internal-only Docker network and is not published to the host or to other networks.
+The agent connects only to Ferrowarden. You manage credentials in Vaultwarden's web vault (published on `:8443`, or behind your reverse proxy), which works with Bitwarden-compatible clients. Ferrowarden holds the vault as ciphertext and decrypts only the one field a request needs, so no decrypted value ever crosses a network and there is no `bw serve` or Node.js in the deployment.
 
 ---
 
@@ -71,7 +67,7 @@ cd ferrowarden
 
 ### Try it in five minutes (test stack)
 
-The setup scripts build a complete throwaway stack — Vaultwarden, bw serve, Ferrowarden and a mock API — with a test account and fake credentials, then write the keys you need to `.env.test`:
+The setup scripts build a complete throwaway stack — Vaultwarden, Ferrowarden (with both vault backends) and a mock API — with a test account and fake credentials, then write the keys you need to `.env.test`:
 
 ```sh
 ./scripts/dev-setup.sh            # Linux/Mac
@@ -83,6 +79,8 @@ cargo test --test integration -- --test-threads=1
 ```
 
 ### Production deployment
+
+Upgrading from 0.1.0? The default stack no longer has a `bw-serve` container: see the [upgrade note](docs/release-notes/v0.2.0.md#upgrading).
 
 The full walkthrough, with Linux and Windows commands for every step, is in **[docs/setup.md](docs/setup.md)**. In outline:
 
@@ -98,9 +96,8 @@ mkdir -p secrets
 touch secrets/bw_client_id secrets/bw_client_secret
 echo -n "your-vault-master-password" > secrets/bw_master_password
 openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48 > secrets/ferrowarden_admin_key
-# Linux hosts only — the containers run as UID 999 (ferrowarden) and 1000 (bw serve):
-sudo chown 999:999   certs/server.key secrets/bw_master_password secrets/ferrowarden_admin_key
-sudo chown 1000:1000 secrets/bw_client_id secrets/bw_client_secret
+# Linux hosts only — the container runs as UID 999 (ferrowarden):
+sudo chown 999:999 certs/server.key secrets/bw_master_password secrets/ferrowarden_admin_key \n                   secrets/bw_client_id secrets/bw_client_secret
 sudo chmod 600 secrets/* && sudo chmod 400 certs/server.key
 
 # 2. Vaultwarden, with signups enabled just for creating your account.
@@ -108,7 +105,7 @@ sudo chmod 600 secrets/* && sudo chmod 400 certs/server.key
 #    it for a reverse proxy or your LAN and to set its URL).
 VAULTWARDEN_SIGNUPS_ALLOWED=true docker compose up -d vaultwarden
 #    In the web vault: create your account (same master password), then
-#    Settings → Security → Keys → View API key → write client_id and
+#    Settings → Security → Keys → View API key (your personal API key) → write client_id and
 #    client_secret into secrets/bw_client_id and secrets/bw_client_secret
 #    (with sudo on Linux, since step 1 chowned them).
 #    Add Login items; each item's Website URI is the only host it may be sent to.
@@ -181,7 +178,7 @@ What Ferrowarden is designed to do, and where it stops:
 - In Ferrowarden's process, values are held as `Zeroizing<String>`, which overwrites the memory when the value is dropped. Copies in the HTTP stack's own buffers are outside its control.
 - The agent key is accepted only by the proxy endpoints. It does not authenticate to the vault, and each key's policy is default-deny: it lists the credentials and HTTP methods the key may use.
 - Each credential is bound to the hosts in its vault item's URIs; a request that would send it to another host is refused.
-- Outbound targets are checked at DNS-resolution time: bw serve is always refused, and private/internal addresses (including cloud metadata) are refused unless listed in `allowed_targets`.
+- Outbound targets are checked at DNS-resolution time: the vault endpoint is always refused, and private/internal addresses (including cloud metadata) are refused unless listed in `allowed_targets`.
 - The admin key is enforced environment-only (minimum 32 characters); it cannot be set in a config file.
 - Every security-relevant action is recorded as a structured security event (credential names, not values; failed authentication included) and can be shipped to stdout, a rotating file or syslog ([docs/events.md](docs/events.md)).
 - Every credential value used in a request is scrubbed from the response body, headers and error messages (raw, JSON-escaped, URL-encoded and base64 forms), followed by common credential patterns.

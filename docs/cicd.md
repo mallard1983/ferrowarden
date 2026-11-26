@@ -12,7 +12,7 @@ push → build → unit tests → integration tests → (optional) build Docker 
 
 The unit tests (run with `cargo test --bins`) need only a Rust toolchain. CI also runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`. The unit job also lints `docs/openapi.yaml` with Redocly CLI (`npx --yes @redocly/cli@2.83.0 lint docs/openapi.yaml`, rules in `redocly.yaml`); run the same command locally after editing the spec.
 
-The integration tests (`tests/integration.rs`) require the full Docker Compose stack — Vaultwarden, bw-serve, ferrowarden, and mock-api — all healthy and communicating. This makes integration tests significantly harder to run in CI than unit tests, and the two are separated below so unit tests can pass without a Docker environment.
+The integration tests (`tests/integration.rs`) require the full Docker Compose stack — Vaultwarden, ferrowarden (and, for the deprecated backend, bw-serve), and mock-api — all healthy and communicating. This makes integration tests significantly harder to run in CI than unit tests, and the two are separated below so unit tests can pass without a Docker environment.
 
 ---
 
@@ -78,7 +78,7 @@ To cut a release: update the version in `Cargo.toml` and the changelog, merge, t
 
 ## The Two Vault Backends in CI
 
-The test stack runs two Ferrowarden instances against one Vaultwarden account (see [native-vault.md](native-vault.md)): `ferrowarden` with `bw serve` (port 3000) and `ferrowarden-native` with the native backend (port 3003). The integration job therefore runs, in this order:
+The test stack runs two Ferrowarden instances against one Vaultwarden account (see [native-vault.md](native-vault.md)): `ferrowarden` with the deprecated `bw serve` backend, set explicitly with `FERROWARDEN_VAULT__BACKEND=bw-serve` (port 3000), and `ferrowarden-native` with the native backend, which is the production default (port 3003). The integration job therefore runs, in this order:
 
 1. the whole integration suite against the `bw serve` instance (`.env.test`);
 2. `tests/equivalence.rs`, which compares the two instances field for field (`FERROWARDEN_EQUIVALENCE_REQUIRED=1` makes an unreachable native instance a failure instead of a skip);
@@ -177,7 +177,7 @@ cache:
 **`--test-threads=1` is required for integration tests.**
 The 11 integration tests share mock-api state and must run serially. Without this flag, two tests that modify the mock state will race.
 
-**bw-serve takes ~15 seconds to initialize.**
+**bw-serve takes ~15 seconds to initialize.** (The deprecated backend only; the native backend has no such wait.)
 The dev-setup script has a sleep and health-check loop. In CI the Docker network round-trip may be slower. If tests fail with "vault locked" or connection refused on the first few runs, increase the wait time in `scripts/dev-setup.sh`.
 
 **bw-cli version is pinned (currently 2026.11.0; 2026.5.0 for the Vaultwarden 1.36.0 job).**
@@ -191,4 +191,4 @@ If running on a Windows GitHub Actions runner, use the MSVC toolchain:
 The GNU toolchain requires MinGW and will fail to build `ring`.
 
 **Docker volume ownership.**
-The first run creates named volumes. If a previous run left behind a root-owned volume (from a failed setup), the next run's `bw-serve` or `ferrowarden` container will fail to write to it. Add `docker compose down -v` at the start of the integration test job to ensure a clean state.
+The first run creates named volumes. If a previous run left behind a root-owned volume (from a failed setup), the next run's `bw-serve` (test stack) or `ferrowarden` container will fail to write to it. Add `docker compose down -v` at the start of the integration test job to ensure a clean state.

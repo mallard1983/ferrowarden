@@ -1,7 +1,7 @@
 //! The vault Ferrowarden reads credentials from.
 //!
 //! Two backends implement the [`Vault`] trait:
-//! - [`BwServe`]: the Bitwarden CLI's `bw serve` REST API (the default).
+//! - [`BwServe`]: the Bitwarden CLI's `bw serve` REST API (deprecated).
 //! - [`native::NativeVault`]: the Bitwarden client protocol and cryptography
 //!   implemented in Rust directly against Vaultwarden (docs/native-vault.md).
 //!

@@ -2,7 +2,7 @@
 
 # Push notifications
 
-Blocked requests are the most interesting thing Ferrowarden produces. An agent that tries to send a credential to a host it is not bound to, to reach `bw serve`, or to use a revoked key is either buggy or being steered. Ferrowarden can tell you about these events as they happen, on your phone or in your chat, through Gotify, ntfy or a generic webhook.
+Blocked requests are the most interesting thing Ferrowarden produces. An agent that tries to send a credential to a host it is not bound to, to reach the vault, or to use a revoked key is either buggy or being steered. Ferrowarden can tell you about these events as they happen, on your phone or in your chat, through Gotify, ntfy or a generic webhook.
 
 Notifications are **best effort** and **optional**: nothing is sent unless you configure a sender, and a slow or broken notifier never delays or fails a request. They are an alert, not an audit trail. For history, use the [event sinks](events.md#sinks-and-configuration).
 
@@ -192,7 +192,7 @@ The notifier URLs are operator configuration and are not subject to the agent ta
 - A request to a notifier's **host name** is refused with `403` and reason `target_blocked`, on any port, even if the name is also in `allowed_targets`.
 - An **IP address** that a notifier name resolves to (or an IP-literal notifier URL) is refused on the notifier's port, in the pre-flight check and again when the connection is made. If the operator lists a different host name in `allowed_targets` that shares the notifier's address and port (as the test stack's `mock-api` and `notify-sink` aliases do), that explicit entry decides for that name.
 
-The deny list is checked in the same two places as the `bw serve` block: the pre-flight check of the target URL and the DNS resolver the outbound connection uses. Forwarded requests never follow redirects.
+The deny list is checked in the same two places as the vault-endpoint block: the pre-flight check of the target URL and the DNS resolver the outbound connection uses. Forwarded requests never follow redirects.
 
 ## Testing the setup
 

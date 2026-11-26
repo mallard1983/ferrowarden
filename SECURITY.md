@@ -30,7 +30,7 @@ Only the latest release receives security fixes.
 In scope — anything that breaks a guarantee in the [Security Model](docs/security.md), for example:
 
 - An agent obtaining a credential **value** (in a response, header, error message, log line or audit entry), or sending a credential to a host not listed in its vault item's URIs
-- Reaching `bw serve`, cloud metadata or other blocked internal targets through `/v1/forward`
+- Reaching the vault endpoint, cloud metadata or other blocked internal targets through `/v1/forward`
 - Bypassing agent or admin key authentication, or the outbound target policy
 - Credential values persisting in memory or on disk beyond what the security model describes
 - Weaknesses in the shipped Docker Compose configuration (network exposure, secrets handling, internal TLS)

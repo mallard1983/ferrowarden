@@ -157,7 +157,7 @@ In a JSON body, values are substituted into the parsed structure, so a credentia
 - **The key's credential scope** covers every placeholder's credential name (`403`, reason `credential_out_of_scope`). This runs before the vault, the target or DNS is touched, and **before the unknown-credential check**: an out-of-scope name returns the same `403`, with the same message format and the same security event, whether or not a credential of that name exists, so an agent cannot use it to discover what is in the vault. The message is `Credential <name> is not available to this agent key`, where `<name>` is the placeholder the agent sent.
 - Every placeholder names exactly one vault login item (`422` unknown, `409` ambiguous).
 - Each credential is bound to the target: the target's host (and scheme/port, if the item's URI states them) matches one of the URIs on the vault item (`403`). See [Security Model §13](security.md#13-credential-host-binding).
-- The target is allowed by the outbound policy: never bw serve; private/internal addresses only if listed in `allowed_targets` (`403`). See [Security Model §14](security.md#14-outbound-target-policy-ssrf-protection).
+- The target is allowed by the outbound policy: never the vault endpoint (Vaultwarden, or bw serve); private/internal addresses only if listed in `allowed_targets` (`403`). See [Security Model §14](security.md#14-outbound-target-policy-ssrf-protection).
 
 **Response `200 OK`**
 ```json
@@ -181,14 +181,14 @@ Every credential value used in the request is redacted (`[REDACTED]`) wherever i
 |---|---|
 | `400 Bad Request` | Malformed request JSON; duplicate or unknown JSON fields; header names that differ only by case; unparseable URL; scheme not http/https; a method outside the list above; placeholder in the URL host/port |
 | `401 Unauthorized` | Missing or invalid agent key |
-| `403 Forbidden` | Credential not bound to the target host, or target refused by the outbound policy (bw serve, private/internal address not in `allowed_targets`) |
+| `403 Forbidden` | Credential not bound to the target host, or target refused by the outbound policy (the vault endpoint, private/internal address not in `allowed_targets`) |
 | `403 Forbidden` (method) | `Method <M> is not allowed for this agent key` (the key's `methods` list does not include it) |
 | `403 Forbidden` (scope) | `Credential <name> is not available to this agent key` (no `credentials` pattern matches it; same response whether or not it exists) |
 | `403 Forbidden` (re-prompt) | The item has master password re-prompt enabled |
 | `409 Conflict` | Placeholder name matches more than one vault item, or a field name appears more than once on the item |
 | `422 Unprocessable Entity` | Malformed placeholder, unknown credential, or a value/field the item does not have |
 | `502 Bad Gateway` | Forward to target failed (connection error, timeout) or response exceeded `max_response_bytes`. The message never includes the target URL. |
-| `503 Service Unavailable` | Vault is locked, or bw serve is unreachable |
+| `503 Service Unavailable` | Vault is locked, or Vaultwarden is unreachable (bw serve with the deprecated backend) |
 
 ---
 
@@ -216,15 +216,15 @@ Returns `404 Not Found` when `unlock_mode = file` (file mode unlocks automatical
 { "status": "unlocked" }
 ```
 
-On success Ferrowarden also syncs bw serve with Vaultwarden and reloads the credential list. This endpoint shares the admin rate limit (30/min, burst 5).
+On success Ferrowarden also syncs with Vaultwarden and reloads the credential list. This endpoint shares the admin rate limit (30/min, burst 5).
 
 **Errors**
 | Status | Condition |
 |---|---|
 | `400 Bad Request` | Malformed JSON, duplicate or unknown fields, or missing `password` |
-| `401 Unauthorized` | Invalid admin key, or bw serve rejected the master password |
+| `401 Unauthorized` | Invalid admin key, or the vault backend rejected the master password |
 | `404 Not Found` | Unlock mode is `file` |
-| `503 Service Unavailable` | bw serve unreachable |
+| `503 Service Unavailable` | Vaultwarden unreachable (bw serve with the deprecated backend) |
 
 ---
 
@@ -497,13 +497,13 @@ Current operational status.
 ```json
 {
   "locked": false,
-  "vault_backend": "bw-serve",
+  "vault_backend": "native",
   "credential_count": 12,
   "agent_key_count": 2
 }
 ```
 
-`vault_backend` is `bw-serve` or `native` (`vault.backend`, [native-vault.md](native-vault.md)).
+`vault_backend` is `native` (the default) or `bw-serve` (deprecated) (`vault.backend`, [native-vault.md](native-vault.md)).
 
 ---
 

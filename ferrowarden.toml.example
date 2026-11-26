@@ -26,15 +26,17 @@ bind_addr = "0.0.0.0:3000"
 
 # ── Vault ────────────────────────────────────────────────────────────────────
 
-# Which backend reads the vault: "bw-serve" (default) or "native".
-#   bw-serve: the Bitwarden CLI's `bw serve` REST API, at bw_serve_url below.
+# Which backend reads the vault: "native" (default) or "bw-serve" (deprecated,
+# removed in the release after 0.2.0).
 #   native:   Ferrowarden speaks the Bitwarden protocol to Vaultwarden itself
 #             (no bw CLI, no Node): it keeps the vault as ciphertext and decrypts
 #             one value per request. Needs [vault] url and the Vaultwarden API key
 #             (FERROWARDEN_VAULT_CLIENT_ID_FILE / FERROWARDEN_VAULT_CLIENT_SECRET_FILE).
 #             See docs/native-vault.md and the trade-off in docs/security.md.
+#   bw-serve: DEPRECATED. The Bitwarden CLI's `bw serve` REST API, at
+#             bw_serve_url below. Ferrowarden logs a warning at every start.
 # [vault]
-# backend = "native"                      # FERROWARDEN_VAULT__BACKEND
+# backend = "native"                      # FERROWARDEN_VAULT__BACKEND (the default)
 # url = "https://vaultwarden"             # FERROWARDEN_VAULT__URL; https:// (http only for localhost)
 # ca_file = "/ca-public/ca.crt"           # FERROWARDEN_VAULT__CA_FILE; extra CA (PEM), never the CA key
 #                                         # (replaces ui.vaultwarden_url / ui.vaultwarden_ca_file)
@@ -43,12 +45,14 @@ bind_addr = "0.0.0.0:3000"
 #   passwords" (the server marks its items viewPassword = false). By default
 #   the native backend leaves such items out (reason hidden_password in the
 #   vault_sync event); true makes them usable by agents (a startup warning and
-#   the startup event say so). bw serve withholds those passwords itself, so
-#   the setting has no effect there. See docs/native-vault.md.
+#   the startup event say so). The deprecated bw serve withholds those
+#   passwords itself, so the setting has no effect there. See
+#   docs/native-vault.md.
 # In native mode bw_serve_url below is ignored. The API key comes only from the
 # environment or secret files, never from this file.
 
-# URL of the bw serve process (backend = "bw-serve").
+# DEPRECATED (backend = "bw-serve" only; removed in the release after 0.2.0).
+# URL of the bw serve process.
 # bw serve must only be reachable from ferrowarden — never expose its port
 # externally. In Docker Compose this is the service name. On a bare host
 # it must be 127.0.0.1 (localhost).
@@ -56,7 +60,11 @@ bw_serve_url = "http://127.0.0.1:8087"
 
 # How the vault master password is supplied at startup.
 # "file"   — ferrowarden reads the password from unlock_file once at boot,
-#            calls bw serve's POST /unlock, then zeros the value from memory.
+#            unlocks the vault with it (the native backend derives the keys
+#            from it; the deprecated bw serve gets POST /unlock), then zeros
+#            the value from memory. In this mode one process holds both the
+#            API key and the master password; "manual" is the hardened option
+#            (docs/security.md).
 #            Use this in Docker with a Docker secret or a chmod 400 bind mount.
 # "manual" — ferrowarden starts locked. The operator POSTs the master password
 #            to POST /v1/unlock (admin auth required) after each restart.
@@ -97,14 +105,14 @@ enforce_credential_hosts = true
 
 # Private, loopback, link-local (cloud metadata) and other internal addresses
 # are blocked as targets by default. List the internal targets agents need:
-# CIDRs, single IPs, or host names, comma-separated. bw serve is always blocked.
+# CIDRs, single IPs, or host names, comma-separated. The vault endpoint is always blocked.
 # allowed_targets = "192.168.1.0/24,proxmox.lan"
 
 # Allow ALL private/internal targets. Prefer allowed_targets.
 allow_private_targets = false
 
-# Seconds between bw serve syncs / credential cache refreshes. The refresher
-# also re-unlocks bw serve in file mode if it restarted. 0 disables it.
+# Seconds between vault syncs / credential cache refreshes. The refresher
+# also re-unlocks the vault in file mode if it locked. 0 disables it.
 refresh_interval_secs = 300
 
 # Forwarded request timeout (seconds) and maximum response size (bytes).

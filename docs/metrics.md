@@ -102,7 +102,7 @@ Every name starts with `ferrowarden_`. Types are as exposed (the counter `events
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `ferrowarden_build_info` | gauge, always 1 | `version`, `vault_backend` | Version and vault backend (`bw-serve` or `native`) |
+| `ferrowarden_build_info` | gauge, always 1 | `version`, `vault_backend` | Version and vault backend (`native` or the deprecated `bw-serve`) |
 | `ferrowarden_events_total` | counter | `action`, `outcome`, `reason` | Every [security event](events.md) by its action, outcome (`success`, `failure`, `unknown`) and reason code (empty when none) |
 | `ferrowarden_forward_requests_total` | counter | `outcome`, `reason`, `key` | Forward requests. `outcome` is `success` or `failure`; `reason` is the [reason code](events.md#reason-codes) of a failure (`target_blocked`, `credential_host_not_allowed`, `unknown_credential`, `vault_locked`, `upstream_error`, ...); `key` is the agent key's **name** (empty if the request had none) |
 | `ferrowarden_forward_duration_seconds` | histogram | `outcome` | Time to serve a forward, in seconds. Buckets 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 |

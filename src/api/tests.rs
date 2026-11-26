@@ -49,7 +49,10 @@ fn build_with(
         events: Default::default(),
         ui: Default::default(),
         notify: Default::default(),
-        vault: Default::default(),
+        vault: crate::config::VaultConfig {
+            backend: crate::config::VaultBackend::BwServe,
+            ..Default::default()
+        },
         metrics: Default::default(),
     };
     let state = Arc::new(AppState::new(cfg, Arc::new(EventLog::buffer_only(100))));

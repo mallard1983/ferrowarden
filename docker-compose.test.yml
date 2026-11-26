@@ -152,6 +152,8 @@ services:
     environment:
       FERROWARDEN_UNLOCK_MODE: "file"
       FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
+      # The deprecated bw-serve backend (kept for one release, docs/native-vault.md).
+      FERROWARDEN_VAULT__BACKEND: "bw-serve"
       FERROWARDEN_BW_SERVE_URL: "http://bw-serve:8087"
       FERROWARDEN_BIND_ADDR: "0.0.0.0:3000"
       FERROWARDEN_ADMIN_KEY_FILE: "/run/secrets/ferrowarden_admin_key"
