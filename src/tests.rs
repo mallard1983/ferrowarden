@@ -44,17 +44,21 @@ fn usage_starts_with_the_description() {
 
 // ── The metrics listener ──────────────────────────────────────────────────────
 
+/// A server certificate for 127.0.0.1 / localhost, signed by `TEST_CA`.
 const METRICS_CERT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/src/testdata/healthcheck-server.crt"
+    "/src/testdata/tls-test-server.crt"
 );
 const METRICS_KEY: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/src/testdata/healthcheck-server.key"
+    "/src/testdata/tls-test-server.key"
 );
-const OTHER_CERT: &str = concat!(
+/// The CA that signed `METRICS_CERT` (its private key was not kept).
+const TEST_CA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/tls-test-ca.crt");
+/// An unrelated CA: a client that trusts only this one must refuse the server.
+const OTHER_CA: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/src/testdata/healthcheck-other.crt"
+    "/src/testdata/tls-test-other-ca.crt"
 );
 const METRICS_TEST_TOKEN: &str = "tls-test-metrics-token-0123456789";
 
@@ -97,12 +101,13 @@ async fn wait_until_listening(addr: SocketAddr) {
     panic!("nothing listens on {addr}");
 }
 
-/// A client that accepts any certificate but records the one it was shown
-/// (the test certificate is a self-signed CA, which a verifying client
-/// refuses as an end-entity certificate).
-fn recording_client() -> reqwest::Client {
+/// A client that fully verifies the server against `ca_file` only (no
+/// built-in roots) and records the certificate it was shown.
+fn verifying_client(ca_file: &str) -> reqwest::Client {
+    let ca = reqwest::Certificate::from_pem(&std::fs::read(ca_file).unwrap()).unwrap();
     reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+        .tls_built_in_root_certs(false)
+        .add_root_certificate(ca)
         .tls_info(true)
         .build()
         .unwrap()
@@ -141,9 +146,10 @@ async fn the_metrics_listener_serves_tls_with_the_configured_certificate() {
     wait_until_listening(addr).await;
     let url = format!("https://{addr}/metrics");
 
-    // The server shows the configured certificate (and not the other one),
-    // and the token still decides.
-    let client = recording_client();
+    // A client that trusts the test CA verifies the server in full (chain,
+    // name 127.0.0.1, validity) and is shown the configured certificate; the
+    // token still decides.
+    let client = verifying_client(TEST_CA);
     let ok = client
         .get(&url)
         .bearer_auth(METRICS_TEST_TOKEN)
@@ -152,7 +158,6 @@ async fn the_metrics_listener_serves_tls_with_the_configured_certificate() {
         .unwrap();
     assert_eq!(ok.status(), 200);
     assert_eq!(presented(&ok), der_of(METRICS_CERT));
-    assert_ne!(presented(&ok), der_of(OTHER_CERT));
     assert_eq!(
         ok.headers()["content-type"],
         "application/openmetrics-text; version=1.0.0; charset=utf-8"
@@ -162,8 +167,15 @@ async fn the_metrics_listener_serves_tls_with_the_configured_certificate() {
     assert_eq!(denied.status(), 401);
     assert_eq!(denied.headers()["www-authenticate"], "Bearer");
 
-    // A client that verifies the certificate against the system roots
-    // refuses it, and plain HTTP to the TLS port gets nothing.
+    // A client that trusts only an unrelated CA refuses the server, and so
+    // does one using the system roots; plain HTTP to the TLS port gets
+    // nothing.
+    assert!(verifying_client(OTHER_CA)
+        .get(&url)
+        .bearer_auth(METRICS_TEST_TOKEN)
+        .send()
+        .await
+        .is_err());
     assert!(reqwest::Client::new()
         .get(&url)
         .bearer_auth(METRICS_TEST_TOKEN)
