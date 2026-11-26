@@ -100,6 +100,44 @@ docker compose cp internal-certs:/pki/ca.crt ./vault-ca.crt  # then trust vault-
 docker compose restart vaultwarden
 ```
 
+### The internal CA: how it is made
+
+The internal CA and the web vault's certificate are made by `ferrowarden internal-certs`, a subcommand of the same static binary that runs the proxy. The `internal-certs` service in `docker-compose.yml` runs it once on every `docker compose up`, from the Ferrowarden image. The default deployment therefore contains no Node.js, no shell and no openssl for this job, and the code that handles the CA key is the code you already audit.
+
+It reads the same settings as the shell script it replaced (set them in the service's `environment:`, or `VAULTWARDEN_CERT_SANS` in `.env`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PKI_DIR` | `/pki` | The `internal-pki` volume: CA, certificate, keys. |
+| `CA_PUBLIC_DIR` | `/ca-public` | The `internal-ca-public` volume: a copy of `ca.crt`, nothing else. Ferrowarden mounts this one. |
+| `VW_HOSTNAME` | `vaultwarden` | The certificate's subject and first name. |
+| `VW_EXTRA_SANS` | empty | Comma-separated extra names and IP addresses. An entry with `:` is an IPv6 address, an entry of only digits and dots is an IPv4 address, anything else is a DNS name. Spaces are ignored and empty entries skipped. An entry that does not parse is an error that names it, and nothing is written. |
+
+Files in `PKI_DIR`, as before:
+
+| File | Mode | What it is |
+|---|---|---|
+| `ca.crt` | 0644 | The CA certificate: ECDSA P-256, `CN=ferrowarden-internal-ca`, valid 10 years, `CA:TRUE, pathlen:0`. |
+| `ca.key` | 0600 | The CA private key (PKCS#8). It never leaves this volume. |
+| `vaultwarden.crt` | 0644 | The server certificate: ECDSA P-256, valid 825 days, `serverAuth` only, the names above as SANs. |
+| `vaultwarden.key` | 0600 | The server private key (PKCS#8). |
+| `vaultwarden.sans` | 0644 | The SAN list the certificate was issued for, for example `DNS:vaultwarden,DNS:localhost,IP:127.0.0.1`. |
+
+Every file is written to a temporary file in the same directory, synced and renamed, so a reader never sees a half-written file, and a private key is created with mode 0600 from its first byte. Only `ca.crt` is copied to `CA_PUBLIC_DIR`, on every run. Nothing it prints or logs contains key material.
+
+**Renewal rules.** The CA is created once and reused. That includes a CA made by an earlier release with openssl: an existing install keeps its CA, so Ferrowarden and anything you imported `ca.crt` into keep trusting it, and a certificate issued now under that CA verifies against it. The server certificate is issued again when:
+
+- `vaultwarden.crt` or `vaultwarden.key` is missing;
+- it would not verify against the current `ca.crt` 30 days from now: it is expiring, expired, or was signed by another CA (checked with rustls-webpki, for server authentication and for every configured name);
+- `vaultwarden.sans` differs from the configured names; or
+- the CA was just created.
+
+Each run says which: `[certs] Internal CA exists`, `[certs] Vaultwarden certificate is valid`, or the reason followed by `[certs] Issuing Vaultwarden certificate for ...`. Vaultwarden loads its certificate at start, so restart it after a renewal (`docker compose restart vaultwarden`).
+
+**Regenerating.** Delete `ca.crt` and `ca.key` from the `internal-pki` volume (or remove the volume) and run `docker compose up -d` again: a new CA and certificate are made and the public copy follows. Ferrowarden picks up the new CA on restart. Anyone who imported the old `ca.crt` must import the new one.
+
+**The one-shot's hardening.** It runs with no network (`network_mode: none`), a read-only root filesystem, every capability dropped and `no-new-privileges`. It runs as root only because the `internal-pki` volume (also those made by earlier releases) is root-owned with mode-0600 keys and Vaultwarden runs as root; as root without `CAP_DAC_OVERRIDE` or `CAP_CHOWN` it can only write files it owns.
+
 ---
 
 ## Option B: Built-in TLS with a Local Certificate Authority

@@ -60,7 +60,7 @@ Ferrowarden logs in to Vaultwarden with the account's API key, syncs, and derive
 
 Trade-off: in file unlock mode one process holds both the API key and the master password. [security.md](security.md#native-backend-one-process-holds-both-secrets) covers it, and manual unlock mode as the hardened option.
 
-A one-shot `internal-certs` service issues Vaultwarden's certificate from a private CA kept in the `internal-pki` volume, so the connection between Ferrowarden and Vaultwarden is HTTPS and verified against that CA ([Security Model §6a](security.md#6a-internal-tls-between-ferrowarden-and-vaultwarden)).
+A one-shot `internal-certs` service (`ferrowarden internal-certs`, the same binary and image as the proxy: no Node.js, no shell, no openssl) issues Vaultwarden's certificate from a private CA kept in the `internal-pki` volume, so the connection between Ferrowarden and Vaultwarden is HTTPS and verified against that CA ([Security Model §6a](security.md#6a-internal-tls-between-ferrowarden-and-vaultwarden)).
 
 ### bw serve (deprecated)
 

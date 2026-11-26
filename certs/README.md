@@ -4,7 +4,7 @@ Place your TLS certificate and private key here before starting Ferrowarden with
 
 This directory is listed in `.gitignore` — only this README is tracked. **Never commit certificate files or private keys.**
 
-These files are for the **agent-facing** TLS listener only. The internal CA and Vaultwarden certificate used between `bw serve` and Vaultwarden are generated automatically into the `internal-pki` Docker volume by the `internal-certs` service — nothing to place here.
+These files are for the **agent-facing** TLS listener only. The internal CA and Vaultwarden certificate used between Ferrowarden and Vaultwarden are generated automatically into the `internal-pki` Docker volume by the `internal-certs` service (`ferrowarden internal-certs`, see [docs/tls.md](../docs/tls.md#the-internal-ca-how-it-is-made)) — nothing to place here.
 
 ---
 

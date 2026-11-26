@@ -28,6 +28,16 @@ fn healthcheck_is_a_subcommand_without_arguments() {
 }
 
 #[test]
+fn internal_certs_is_a_subcommand_without_arguments() {
+    assert_eq!(parse(&["internal-certs"]), Cli::InternalCerts);
+    assert_eq!(
+        parse(&["internal-certs", "--force"]),
+        Cli::Unknown("--force".into())
+    );
+    assert!(USAGE.contains("internal-certs"));
+}
+
+#[test]
 fn anything_else_is_unknown() {
     assert_eq!(parse(&["serve"]), Cli::Unknown("serve".into()));
     assert_eq!(parse(&["-v"]), Cli::Unknown("-v".into()));

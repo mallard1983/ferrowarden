@@ -8,6 +8,7 @@ mod metrics;
 mod middleware;
 mod net;
 mod notify;
+mod pki;
 mod policy;
 mod proxy;
 mod state;
@@ -87,7 +88,7 @@ fn startup_event(
 
 /// What the command line asks for. Ferrowarden takes no options: configuration
 /// comes from `ferrowarden.toml` and `FERROWARDEN_*` environment variables.
-/// The one subcommand is `healthcheck`.
+/// The subcommands are `healthcheck` and `internal-certs`.
 #[derive(Debug, PartialEq, Eq)]
 enum Cli {
     /// No arguments: run the proxy.
@@ -97,12 +98,15 @@ enum Cli {
     /// `healthcheck`: probe the running server's `/health` and exit 0 or 1.
     /// This is the container health check (the image has no `curl`).
     Healthcheck,
+    /// `internal-certs`: create or renew the internal CA and the Vaultwarden
+    /// certificate, then exit. The one-shot service of the default deployment.
+    InternalCerts,
     /// An argument that is not recognised.
     Unknown(String),
 }
 
 /// Parse the arguments after the program name. The first argument decides;
-/// `healthcheck` takes no arguments of its own.
+/// the subcommands take no arguments of their own.
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Cli {
     let mut args = args.into_iter();
     match args.next().as_deref() {
@@ -113,6 +117,10 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Cli {
             None => Cli::Healthcheck,
             Some(extra) => Cli::Unknown(extra),
         },
+        Some("internal-certs") => match args.next() {
+            None => Cli::InternalCerts,
+            Some(extra) => Cli::Unknown(extra),
+        },
         Some(other) => Cli::Unknown(other.to_string()),
     }
 }
@@ -120,7 +128,7 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Cli {
 const USAGE: &str = "\
 Ferrowarden \u{2014} proxy authenticated API calls for agents using named vault credentials.
 
-Usage: ferrowarden [healthcheck | --help | --version]
+Usage: ferrowarden [healthcheck | internal-certs | --help | --version]
 
 Ferrowarden takes no other options. Configuration comes from ferrowarden.toml
 and FERROWARDEN_* environment variables; see docs/setup.md for the full list.
@@ -131,6 +139,13 @@ Commands:
                  line on stderr. Uses the same configuration as the server,
                  needs no secrets, and verifies the server's TLS certificate.
                  This is the container health check.
+  internal-certs Create or renew the private CA and the Vaultwarden certificate
+                 for the internal Docker network, then exit (0 on success).
+                 Reads PKI_DIR (default /pki), CA_PUBLIC_DIR (default
+                 /ca-public), VW_HOSTNAME (default vaultwarden) and
+                 VW_EXTRA_SANS (comma-separated names and IPs). An existing CA
+                 is kept. This is the one-shot service of the default
+                 deployment; see docs/tls.md.
 
 Options:
   -h, --help     Print this help and exit
@@ -150,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Cli::Healthcheck => std::process::exit(healthcheck::run().await),
+        Cli::InternalCerts => std::process::exit(pki::run_from_env()),
         Cli::Unknown(arg) => {
             eprintln!("ferrowarden: unrecognized argument {arg:?}\n\n{USAGE}");
             std::process::exit(2);
