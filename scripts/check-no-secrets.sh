@@ -6,7 +6,8 @@
 #
 # It collects every secret the test stack knows about:
 #   - passwords, notes, custom field values and TOTP seeds from
-#     tests/seed/credentials.json
+#     tests/seed/credentials.json, and the password, username and note of the
+#     item whose collection hides passwords (tests/seed/hidden.json)
 #   - the test agent key, admin key and notifier webhook token from .env.test
 #     (and the native instance's agent key from .env.test.native, if present)
 #   - the vault master password from secrets/bw_master_password (if present)
@@ -48,6 +49,7 @@ cd "$(dirname "$0")/.."
 
 COMPOSE_FILE="docker-compose.test.yml"
 SEED_FILE="tests/seed/credentials.json"
+HIDDEN_FILE="tests/seed/hidden.json"
 ENV_FILE=".env.test"
 MASTER_PW_FILE="secrets/bw_master_password"
 NATIVE_ENV_FILE=".env.test.native"
@@ -77,6 +79,7 @@ native_path() {
 }
 
 [ -f "$SEED_FILE" ] || fail "$SEED_FILE not found"
+[ -f "$HIDDEN_FILE" ] || fail "$HIDDEN_FILE not found"
 [ -f "$ENV_FILE" ] || fail "$ENV_FILE not found (run scripts/dev-setup.sh first)"
 
 PYTHON="$(command -v python3 || command -v python || true)"
@@ -84,7 +87,7 @@ PYTHON="$(command -v python3 || command -v python || true)"
 
 # ── 1. Collect secrets: one "label<TAB>value" per line ───────────────────────
 secrets="$work/secrets.tsv"
-"$PYTHON" -I - "$SEED_FILE" <<'PY' | tr -d '\r' > "$secrets"
+"$PYTHON" -I - "$SEED_FILE" "$HIDDEN_FILE" <<'PY' | tr -d '\r' > "$secrets"
 import json, sys
 
 sys.stdout.reconfigure(newline="\n", encoding="utf-8")  # no CRLF on Windows: it would break the match
@@ -104,6 +107,9 @@ def emit(label, value):
 
 with open(sys.argv[1], encoding="utf-8") as f:
     items = json.load(f)
+with open(sys.argv[2], encoding="utf-8") as f:
+    hidden = json.load(f)  # the item whose collection hides passwords
+items.append(hidden)
 for item in items:
     name = item.get("name", "?")
     emit(f"{name}: value", item.get("value"))
@@ -115,6 +121,9 @@ for item in items:
         if field.get("name") == "ferrowarden_uris":
             continue
         emit(f"{name}: field {field.get('name', '?')}", field.get("value"))
+# Its username is kept out of logs and events like a secret (the other
+# items' usernames are deliberately not treated as secret).
+emit(f"{hidden.get('name', '?')}: username", hidden.get("username"))
 PY
 
 env_value() { sed -n "s/^$1=//p" "$ENV_FILE" | head -n 1 | tr -d '\r'; }

@@ -10,7 +10,8 @@
  * organisation items, and the item types Ferrowarden does not offer.
  *
  * Flow:
- *   1. Derive master key and hash (PBKDF2), log in, decrypt the user key and
+ *   1. Derive master key and hash (PBKDF2 or Argon2id, as the account has
+ *      it), log in, decrypt the user key and
  *      the RSA private key.
  *   2. Sync, and find or create the test organisation and its collection
  *      (only when a seed entry asks for `org`).
@@ -40,8 +41,6 @@
  */
 
 const crypto = require('crypto');
-const http   = require('http');
-const https  = require('https');
 const fs     = require('fs');
 
 const serverUrl         = process.env.BW_SERVER_URL;
@@ -58,89 +57,14 @@ if (!serverUrl || !email || !password) {
   process.exit(1);
 }
 
-// -- Crypto helpers ------------------------------------------------------------
+// -- Crypto helpers (bw-lib.js) ------------------------------------------------
 
-function pbkdf2(pass, salt, iterations, keylen) {
-  return crypto.pbkdf2Sync(pass, salt, iterations, keylen, 'sha256');
-}
-
-function hkdfExpand(prk, info, length) {
-  const infoBytes = Buffer.from(info, 'utf8');
-  const n = Math.ceil(length / 32);
-  let okm = Buffer.alloc(0);
-  let t   = Buffer.alloc(0);
-  for (let i = 1; i <= n; i++) {
-    const hmac = crypto.createHmac('sha256', prk);
-    hmac.update(t);
-    hmac.update(infoBytes);
-    hmac.update(Buffer.from([i]));
-    t   = hmac.digest();
-    okm = Buffer.concat([okm, t]);
-  }
-  return okm.slice(0, length);
-}
-
-// Decrypt Bitwarden CipherString type 2: "2.<iv_b64>|<ct_b64>|<mac_b64>"
-// key: 64 bytes (first 32 = AES key, last 32 = HMAC key)
-function decryptCipherString(key, cipherString) {
-  const parts  = cipherString.split('.');
-  const inner  = parts[1] || parts[0];
-  const [ivB64, ctB64, macB64] = inner.split('|');
-  const encKey = key.slice(0, 32);
-  const macKey = key.slice(32, 64);
-  const iv     = Buffer.from(ivB64,  'base64');
-  const ct     = Buffer.from(ctB64,  'base64');
-  const mac    = Buffer.from(macB64, 'base64');
-  const expectedMac = crypto.createHmac('sha256', macKey).update(Buffer.concat([iv, ct])).digest();
-  if (!crypto.timingSafeEqual(mac, expectedMac)) throw new Error('MAC verification failed');
-  const decipher = crypto.createDecipheriv('aes-256-cbc', encKey, iv);
-  return Buffer.concat([decipher.update(ct), decipher.final()]);
-}
-
-// Encrypt to Bitwarden CipherString type 2: "2.<iv_b64>|<ct_b64>|<mac_b64>"
-// key: 64 bytes (first 32 = AES key, last 32 = HMAC key)
-function encryptCipherString(key, plaintext) {
-  const encKey = key.slice(0, 32);
-  const macKey = key.slice(32, 64);
-  const iv     = crypto.randomBytes(16);
-  const cipher = crypto.createCipheriv('aes-256-cbc', encKey, iv);
-  const ct     = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const mac    = crypto.createHmac('sha256', macKey).update(Buffer.concat([iv, ct])).digest();
-  return `2.${iv.toString('base64')}|${ct.toString('base64')}|${mac.toString('base64')}`;
-}
-
-// RSA-OAEP with SHA-1, what Bitwarden clients write as EncString type 4.
-function rsaUnwrap(privateKey, encString) {
-  const data = Buffer.from(encString.split('.')[1].split('|')[0], 'base64');
-  return crypto.privateDecrypt(
-    { key: privateKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha1' }, data);
-}
+const lib = require('./bw-lib.js');
+const { decryptCipherString, encryptCipherString, rsaUnwrap } = lib;
 
 // -- HTTP helpers ----------------------------------------------------------------
 
-const transport = serverUrl.startsWith('https:') ? https : http;
-
-function request(method, path, body, headers = {}) {
-  const url = new URL(path, serverUrl);
-  const opts = {
-    hostname: url.hostname,
-    port: url.port || (url.protocol === 'https:' ? 443 : 80),
-    path: url.pathname + url.search,
-    method,
-    headers: { ...headers },
-  };
-  if (body) opts.headers['Content-Length'] = Buffer.byteLength(body);
-  return new Promise((resolve, reject) => {
-    const req = transport.request(opts, (res) => {
-      const chunks = [];
-      res.on('data', (c) => chunks.push(c));
-      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
-    });
-    req.on('error', reject);
-    if (body) req.write(body);
-    req.end();
-  });
-}
+const { request } = lib.makeClient(serverUrl);
 
 let accessToken = null;
 const authHeaders = (extra = {}) => ({ Authorization: `Bearer ${accessToken}`, ...CLIENT_HEADERS, ...extra });
@@ -156,49 +80,20 @@ const getAuthed = (path) => request('GET', path, null, authHeaders());
 async function seed() {
   const credentials = JSON.parse(fs.readFileSync(credentialsFile, 'utf8'));
 
-  // 1. Derive master key and hash, using the account's current KDF settings.
-  //    Never assume an iteration count: current Bitwarden clients raise it
-  //    (e.g. 100,000 -> 600,000) automatically after login.
-  const pre = await request('POST', '/identity/accounts/prelogin', JSON.stringify({ email }),
-    { 'Content-Type': 'application/json' });
-  if (pre.status !== 200) {
-    console.error(`[seed] prelogin failed (${pre.status}): ${pre.body}`);
+  // 1. Log in with the account's current KDF settings, read from prelogin.
+  //    Never assume an iteration count (current Bitwarden clients raise it
+  //    automatically after login) or the KDF itself: the account may be
+  //    PBKDF2 or Argon2id (TEST_KDF at registration, bw-register.js).
+  let login;
+  try {
+    login = await lib.loginWithPassword({ request }, email, password, 'ferrowarden-seeder');
+  } catch (e) {
+    console.error(`[seed] ${e.message}`);
     return 1;
   }
-  const preData = JSON.parse(pre.body);
-  const kdfType = preData.kdf ?? preData.Kdf;
-  const kdfIterations = preData.kdfIterations ?? preData.KdfIterations;
-  if (kdfType !== 0) {
-    console.error(`[seed] Unsupported KDF type ${kdfType} (only PBKDF2-SHA256 is implemented)`);
-    return 1;
-  }
-  const masterKey  = pbkdf2(Buffer.from(password), Buffer.from(email.toLowerCase()), kdfIterations, 32);
-  const masterHash = pbkdf2(masterKey, Buffer.from(password), 1, 32).toString('base64');
-
-  // 2. Stretch the master key (same as during registration)
-  const stretchKey = Buffer.concat([
-    hkdfExpand(masterKey, 'enc', 32),
-    hkdfExpand(masterKey, 'mac', 32),
-  ]);
-
-  // 3. Obtain access token (must be form-encoded, not JSON)
-  const deviceId = crypto.randomUUID();
-  const params   = new URLSearchParams({
-    grant_type: 'password', username: email, password: masterHash,
-    scope: 'api offline_access', client_id: 'web',
-    deviceType: '6', deviceIdentifier: deviceId, deviceName: 'ferrowarden-seeder',
-  });
-  const tokenResForm = await request('POST', '/identity/connect/token', params.toString(), {
-    'Content-Type': 'application/x-www-form-urlencoded',
-    'Content-Length': Buffer.byteLength(params.toString()),
-  });
-
-  if (tokenResForm.status !== 200) {
-    console.error(`[seed] Auth failed (${tokenResForm.status}): ${tokenResForm.body}`);
-    return 1;
-  }
-
-  const tokenData   = JSON.parse(tokenResForm.body);
+  console.log(`[seed] Account KDF: ${lib.describeKdf(login.kdf)}`);
+  const stretchKey  = login.stretchKey;
+  const tokenData   = login.data;
   accessToken       = tokenData.access_token;
   const encKeyStr   = tokenData.Key || tokenData.key;
   const encPrivStr  = tokenData.PrivateKey || tokenData.privateKey;
@@ -235,8 +130,7 @@ async function seed() {
     if (!privateKey) { console.error('[seed] account has no RSA key'); return 1; }
     const orgKeyBytes = crypto.randomBytes(64);
     const pub = crypto.createPublicKey(privateKey);
-    const encOrgKey = '4.' + crypto.publicEncrypt(
-      { key: pub, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha1' }, orgKeyBytes).toString('base64');
+    const encOrgKey = lib.rsaWrap(pub, orgKeyBytes);
     const kp = crypto.generateKeyPairSync('rsa', {
       modulusLength: 2048,
       publicKeyEncoding: { type: 'spki', format: 'der' },
@@ -275,7 +169,9 @@ async function seed() {
 
   // The key that encrypts an item's fields: its own key if it has one,
   // otherwise the user's (or the organisation's) key.
-  const baseKeyFor = (orgId) => (orgId ? orgKey : symKey);
+  // Items of any other organisation (the restricted one of bw-seed-hidden.js)
+  // are not this seeder's: no key, so they are skipped.
+  const baseKeyFor = (orgId) => (orgId ? (org && orgId === org.id ? orgKey : null) : symKey);
   const itemKeyOf = (c) => {
     const base = baseKeyFor(c.organizationId);
     if (!base) return null;

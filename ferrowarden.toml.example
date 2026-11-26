@@ -38,6 +38,13 @@ bind_addr = "0.0.0.0:3000"
 # url = "https://vaultwarden"             # FERROWARDEN_VAULT__URL; https:// (http only for localhost)
 # ca_file = "/ca-public/ca.crt"           # FERROWARDEN_VAULT__CA_FILE; extra CA (PEM), never the CA key
 #                                         # (replaces ui.vaultwarden_url / ui.vaultwarden_ca_file)
+# allow_hidden_passwords = false          # FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS
+#   An organisation collection can be shared with this account as "Hide
+#   passwords" (the server marks its items viewPassword = false). By default
+#   the native backend leaves such items out (reason hidden_password in the
+#   vault_sync event); true makes them usable by agents (a startup warning and
+#   the startup event say so). bw serve withholds those passwords itself, so
+#   the setting has no effect there. See docs/native-vault.md.
 # In native mode bw_serve_url below is ignored. The API key comes only from the
 # environment or secret files, never from this file.
 

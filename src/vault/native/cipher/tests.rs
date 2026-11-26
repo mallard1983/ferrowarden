@@ -39,6 +39,7 @@ fn login(k: &SymKey) -> RawCipher {
         key: None,
         deleted_date: None,
         archived_date: None,
+        view_password: None,
         login: Some(RawLogin {
             username: e(k, "USER"),
             password: e(k, "PASS"),
@@ -382,4 +383,15 @@ fn debug_of_the_key_ring_shows_no_key() {
     let dbg = format!("{:?}", v.ring);
     assert!(dbg.contains("KeyRing") && !dbg.contains("SymKey"));
     let _ = v.org;
+}
+
+#[test]
+fn only_an_explicit_false_hides_the_password() {
+    let k = key(1);
+    let mut c = login(&k);
+    assert!(!is_password_hidden(&c), "absent: an older server");
+    c.view_password = Some(true);
+    assert!(!is_password_hidden(&c));
+    c.view_password = Some(false);
+    assert!(is_password_hidden(&c));
 }

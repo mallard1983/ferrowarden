@@ -71,7 +71,7 @@ pub async fn refresh_credentials(state: &AppState) -> FerroResult<()> {
                     // names or values.
                     tracing::warn!(
                         excluded = report.total(),
-                        "Vault items were left out because they could not be read safely"
+                        "Vault items were left out (not readable safely, or their collection hides the password)"
                     );
                     event = event
                         .detail("excluded", report.total())

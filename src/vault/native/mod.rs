@@ -84,6 +84,9 @@ pub struct NativeVault {
     client_secret: Zeroizing<String>,
     /// Safety-net full sync period; `None` when the refresher is disabled.
     full_sync_every: Option<Duration>,
+    /// `vault.allow_hidden_passwords`: keep items whose collection hides
+    /// passwords from this account (refused by default).
+    allow_hidden_passwords: bool,
     /// Serializes unlock, lock and sync: the state is only written by the
     /// holder, so a sync can read, work without holding the state lock, and
     /// swap the result in.
@@ -116,6 +119,7 @@ impl NativeVault {
             client_id: id.clone(),
             client_secret: secret.clone(),
             full_sync_every,
+            allow_hidden_passwords: config.vault.allow_hidden_passwords,
             gate: Mutex::new(()),
             session: Mutex::new(None),
             state: RwLock::new(State::Locked),
@@ -217,12 +221,20 @@ fn unwrap_orgs(
 fn build_all(
     keys: &Keys<'_>,
     ciphers: Vec<RawCipher>,
+    allow_hidden_passwords: bool,
 ) -> (HashMap<String, RawCipher>, CredentialMap, ExclusionReport) {
     let mut kept = HashMap::new();
     let mut meta = CredentialMap::new();
     let mut report = ExclusionReport::default();
     for c in ciphers {
         if c.deleted_date.is_some() || c.archived_date.is_some() || !cipher::is_supported_kind(&c) {
+            continue;
+        }
+        // The owner of the collection chose to hide passwords from this
+        // account: Ferrowarden would hand them to an agent. Refused unless
+        // the operator opted in (`vault.allow_hidden_passwords`).
+        if !allow_hidden_passwords && cipher::is_password_hidden(&c) {
+            report.add(cipher::reason::HIDDEN_PASSWORD, &c.id);
             continue;
         }
         match cipher::build_metadata(keys, &c) {
@@ -347,7 +359,7 @@ impl Vault for NativeVault {
             );
         }
         let ring = KeyRing { user, rsa, org };
-        let (kept, meta, report) = build_all(&ring.view(), ciphers);
+        let (kept, meta, report) = build_all(&ring.view(), ciphers, self.allow_hidden_passwords);
 
         let now = Instant::now();
         *self.state.write().await = State::Unlocked(Box::new(Unlocked {
@@ -418,7 +430,7 @@ impl Vault for NativeVault {
                 user: &u.ring.user,
                 org: &org,
             };
-            let (kept, meta, report) = build_all(&keys, ciphers);
+            let (kept, meta, report) = build_all(&keys, ciphers, self.allow_hidden_passwords);
             (org, org_failed, kept, meta, report)
         };
         if org_failed > 0 {

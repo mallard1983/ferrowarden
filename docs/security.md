@@ -282,7 +282,11 @@ The Ferrowarden image is a static binary on `scratch`, run as UID 999 with a rea
 
 **Format drift.** New Bitwarden clients may write formats not listed here (V2 accounts use COSE EncStrings, type 7). They are refused, the affected items are excluded and counted, and everything else keeps working; the `bw-serve` backend remains the fallback. Treat a non-zero `excluded` count in a `vault_sync` event as something to look into.
 
-**Not covered:** collection permissions (`viewPassword = false`) of organisation items are not evaluated; Argon2id accounts and V2 (COSE) accounts have not been exercised end to end against a live vault.
+- **Hidden passwords.** An organisation collection shared with the account as "Hide passwords" makes the server mark its items `viewPassword: false`. Ferrowarden would give such a password to an agent, which the collection's owner meant to keep from this account, so the native backend **leaves those items out by default** (reason `hidden_password` in the `vault_sync` event: a count and item ids, never names or values; also in `ferrowarden_vault_excluded_items`). `vault.allow_hidden_passwords = true` (`FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS`) is the explicit opt-in: it logs a startup warning and the `startup` event records `vault_allow_hidden_passwords`. `bw serve` does not report `viewPassword`, but the CLI withholds such a password itself, so with `bw-serve` the item is listed without a password placeholder and the password is never released; the flag has no effect there ([native-vault.md](native-vault.md#hidden-passwords-collections-that-hide-them)).
+
+**Tested against:** Vaultwarden 1.37.5 with a PBKDF2 account and 1.36.0 with an Argon2id account, both in CI ([cicd.md](cicd.md#vaultwarden-versions-in-ci)).
+
+**Not covered:** V2 (COSE) accounts and vaults written by the web vault, extension or mobile apps have not been exercised end to end against a live vault.
 
 ---
 

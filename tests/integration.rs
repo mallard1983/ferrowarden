@@ -676,6 +676,16 @@ fn seeded_secrets() -> Vec<String> {
             }
         }
     }
+    // The item whose collection hides passwords from the test account
+    // (seeded by docker/bw-seed-hidden.js): none of its values may appear
+    // anywhere either.
+    let hidden: Value =
+        serde_json::from_str(include_str!("seed/hidden.json")).expect("hidden seed is not JSON");
+    for key in ["value", "username", "note"] {
+        if let Some(s) = hidden[key].as_str() {
+            out.push(s.to_string());
+        }
+    }
     out.retain(|s| s.len() >= 6);
     out
 }
@@ -1556,6 +1566,88 @@ async fn test_secure_note_values_and_binding() {
         )
         .await;
     assert_eq!(resp.status(), 403);
+}
+
+/// Security: an item whose collection hides passwords from the account
+/// (`viewPassword: false`, seeded by docker/bw-seed-hidden.js) never releases
+/// its password, whichever backend is running, and nothing is sent to the
+/// target.
+///
+/// The native backend leaves the whole item out (`vault.allow_hidden_passwords`
+/// is off): it is not listed and not usable, and the startup event says the
+/// opt-in is off. `bw serve` does not report `viewPassword`, but the CLI
+/// itself withholds such a password: the item is listed without a password
+/// placeholder (docs/native-vault.md).
+#[tokio::test]
+async fn test_item_with_a_hidden_password_never_releases_it() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+    let hidden: Value = serde_json::from_str(include_str!("seed/hidden.json")).unwrap();
+    let name = hidden["name"].as_str().unwrap();
+    let password = hidden["value"].as_str().unwrap();
+
+    let status: Value = env
+        .client
+        .get(format!("{}/v1/admin/status", env.fw_url))
+        .header("X-Admin-Key", &env.admin_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let native = status["vault_backend"] == "native";
+
+    let detail: Vec<Value> = env
+        .client
+        .get(format!("{}/v1/credentials?detail=true", env.fw_url))
+        .header("X-Agent-Key", &env.agent_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entry = detail.iter().find(|d| d["name"] == name);
+    if native {
+        assert!(entry.is_none(), "{name} must not be offered");
+    } else {
+        let entry = entry.expect("bw serve lists the item");
+        assert!(
+            entry.get("placeholder").is_none(),
+            "no password placeholder is offered"
+        );
+    }
+
+    // The password placeholder never substitutes; nothing is forwarded.
+    let resp = env
+        .forward(
+            "POST",
+            "/api/hidden",
+            json!({ "X-Pw": format!("{{{{vault:{name}}}}}") }),
+            Some(json!({ "p": format!("{{{{vault:{name}:password}}}}") })),
+        )
+        .await;
+    assert!(
+        resp.status().is_client_error(),
+        "the password of a hidden-password item must be refused, got {}",
+        resp.status()
+    );
+    assert!(
+        env.all_captured_requests().await.is_empty(),
+        "must not forward"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(!body.contains(password), "the password is in the response");
+
+    // The audit log never holds it either.
+    let events = serde_json::to_string(&env.events(1000).await).unwrap();
+    assert!(!events.contains(password), "the password is in the events");
+    for field in ["username", "note"] {
+        if let Some(v) = hidden[field].as_str() {
+            assert!(!events.contains(v), "its {field} is in the events");
+        }
+    }
 }
 
 /// Security: items with master password re-prompt are refused, and nothing
@@ -4549,8 +4641,16 @@ async fn test_metrics_show_the_traffic_and_the_state() {
         "last sync {last}, now {now}"
     );
 
+    // The seeded hidden-password item is left out by the native backend and
+    // counted; bw serve has no exclusions.
+    let excluded = after.gauge("ferrowarden_vault_excluded_items");
+    if backend == "native" {
+        assert!(excluded >= 1.0, "the hidden-password item is not counted");
+    } else {
+        assert_eq!(excluded, 0.0);
+    }
+
     // The rest exist, with the labels the documentation lists.
-    assert!(after.gauge("ferrowarden_vault_excluded_items") >= 0.0);
     assert!(after.gauge("ferrowarden_ui_sessions") >= 0.0);
     assert!(after.gauge("ferrowarden_events_dropped_total") >= 0.0);
     assert!(after.gauge("ferrowarden_metrics_events_dropped_total") >= 0.0);
