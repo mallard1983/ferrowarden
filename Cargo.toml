@@ -1,6 +1,6 @@
 [package]
 name = "ferrowarden"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A credential proxy for AI agents — substitutes Vaultwarden secrets into API calls without exposing values to the agent"
 license = "FSL-1.1-ALv2"
