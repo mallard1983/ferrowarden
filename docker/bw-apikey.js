@@ -64,8 +64,8 @@ async function main() {
   // the other test containers (bw serve, ferrowarden), which run as other UIDs.
   fs.writeFileSync(path.join(secretsDir, 'bw_client_id'), clientId);
   fs.writeFileSync(path.join(secretsDir, 'bw_client_secret'), clientSecret);
-  console.log(`[apikey] API key created: ${clientId}`);
-  console.log(`[apikey] Wrote ${secretsDir}/bw_client_id and ${secretsDir}/bw_client_secret`);
+  console.log('[apikey] API key created');
+  console.log('[apikey] Wrote bw_client_id and bw_client_secret to the secrets directory');
   return 0;
 }
 
