@@ -1293,6 +1293,23 @@ async fn startup_event_reports_the_metrics_settings() {
 }
 
 #[tokio::test]
+async fn startup_event_reports_whether_hidden_passwords_are_allowed() {
+    let (_app, state) = app_with_state("");
+    let e = serde_json::to_value(crate::startup_event(&state.config, 0, 0)).unwrap();
+    assert_eq!(
+        e["ferrowarden"]["details"]["vault_allow_hidden_passwords"],
+        false
+    );
+    let mut config = state.config.clone();
+    config.vault.allow_hidden_passwords = true;
+    let e = serde_json::to_value(crate::startup_event(&config, 0, 0)).unwrap();
+    assert_eq!(
+        e["ferrowarden"]["details"]["vault_allow_hidden_passwords"],
+        true
+    );
+}
+
+#[tokio::test]
 async fn startup_event_and_admin_status_name_the_vault_backend() {
     let (_app, state) = app_with_state("");
     let e = serde_json::to_value(crate::startup_event(&state.config, 0, 0)).unwrap();

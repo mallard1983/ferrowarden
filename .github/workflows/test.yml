@@ -62,13 +62,42 @@ jobs:
   # ── Integration tests ─────────────────────────────────────────────────────────
   # Requires Docker Compose. Runs on pull requests and the default branch.
   #
+  # Two jobs from one definition, in parallel, each with a stack of its own:
+  #   - "Integration tests": Vaultwarden 1.37.5 (the current release), an
+  #     account with PBKDF2 and the Bitwarden CLI 2026.11.0. This is the
+  #     required status check of the same name; do not rename it.
+  #   - "Integration tests (Vaultwarden 1.36.0, Argon2id)": the previous minor
+  #     release, an Argon2id account and the CLI of its time. A newer CLI
+  #     cannot sync a 1.36.0 vault (its SDK rejects a cipher the server
+  #     sends), so the CLI version is part of the pair. See docs/cicd.md.
+  # Each runs every suite below: both instances' integration suites, the
+  # equivalence suite, the MCP suite and the secret gate.
+  #
   # Runs scripts/dev-setup.sh as the runner user (UID 1001): the test stack
   # handles non-1000 UIDs (see docker-compose.test.yml, vault-setup).
   integration:
-    name: Integration tests
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     # Only run on PRs and the default branch to save runner minutes
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    strategy:
+      # One failing configuration must not hide the result of the other.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Integration tests
+            vaultwarden: "1.37.5"
+            bw_cli: "2026.11.0"
+            kdf: pbkdf2
+          - name: Integration tests (Vaultwarden 1.36.0, Argon2id)
+            vaultwarden: "1.36.0"
+            bw_cli: "2026.5.0"
+            kdf: argon2id
+    # Read by docker-compose.test.yml and scripts/dev-setup.sh.
+    env:
+      VAULTWARDEN_VERSION: ${{ matrix.vaultwarden }}
+      BW_CLI_VERSION: ${{ matrix.bw_cli }}
+      TEST_KDF: ${{ matrix.kdf }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -216,11 +245,3 @@ jobs:
       - name: Tear down stack
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
-
-  # TODO(#36): run the backend suites against the previous Vaultwarden minor
-  # (VAULTWARDEN_VERSION=1.36.0 is a real tag and the seeder and the native
-  # backend work against it), as a second job. Not done because the pinned
-  # Bitwarden CLI (2026.11.0) cannot sync a 1.36.0 vault (its SDK rejects a
-  # cipher the server sends), so the bw serve side of the equivalence suite
-  # cannot run there. It needs either a CLI release that supports both servers
-  # or a native-only setup mode in scripts/dev-setup.*. See docs/cicd.md.

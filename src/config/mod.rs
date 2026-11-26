@@ -564,6 +564,14 @@ pub struct VaultConfig {
     /// public roots. Never replaces certificate verification. Replaces
     /// `ui.vaultwarden_ca_file`, which still works as an alias.
     pub ca_file: String,
+    /// Keep items whose collection hides passwords from this account
+    /// ("Hide passwords", `viewPassword: false`). Default `false`: such items
+    /// are left out (reason `hidden_password` in the `vault_sync` event),
+    /// because Ferrowarden would hand the password to an agent that the
+    /// collection's owner meant to keep from it. Native backend only: `bw
+    /// serve` reports no `viewPassword` and withholds such passwords itself.
+    /// `FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS`.
+    pub allow_hidden_passwords: bool,
     /// The native backend's API key (`FERROWARDEN_VAULT_CLIENT_ID[_FILE]`,
     /// `FERROWARDEN_VAULT_CLIENT_SECRET[_FILE]`).
     #[serde(skip)]
@@ -578,6 +586,7 @@ impl Default for VaultConfig {
             backend: VaultBackend::default(),
             url: DEFAULT_VAULT_URL.to_string(),
             ca_file: String::new(),
+            allow_hidden_passwords: false,
             credentials: VaultCredentials::default(),
         }
     }
@@ -678,6 +687,12 @@ impl VaultConfig {
                 }
             }
             VaultBackend::BwServe => {
+                if self.allow_hidden_passwords {
+                    warnings.push(
+                        "vault.allow_hidden_passwords has no effect with vault.backend = bw-serve (bw serve withholds the password of such items itself)"
+                            .to_string(),
+                    );
+                }
                 if native_vars_set {
                     warnings.push(format!(
                         "vault.backend = bw-serve: {ENV_VAULT_CLIENT_ID} and \

@@ -1,0 +1,7 @@
+{
+  "name": "hidden_password_item",
+  "value": "test-hidden-pass-55555555",
+  "username": "test-hidden-user-55555555",
+  "note": "test-hidden-note-55555555",
+  "uris": ["http://mock-api:7777"]
+}

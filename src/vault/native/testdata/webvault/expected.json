@@ -1,0 +1,166 @@
+{
+  "source": "Vaultwarden 1.37.5 web vault (bundled with the 1.37.5 image), account capture2@example.test, Argon2id m=32 MiB t=6 p=4; values decrypted by bw CLI 2026.11.0",
+  "email": "capture2@example.test",
+  "password": "Testing12345!",
+  "prelogin": {
+    "kdf": 1,
+    "kdfIterations": 6,
+    "kdfMemory": 32,
+    "kdfParallelism": 4,
+    "kdfSettings": {
+      "iterations": 6,
+      "kdfType": 1,
+      "memory": 32,
+      "parallelism": 4
+    },
+    "salt": null
+  },
+  "offered": [
+    {
+      "id": "c904ef8f-5b9b-4470-b7aa-5d9bf22612d5",
+      "name": "wv_login_full",
+      "type": 1,
+      "org": false,
+      "username": "wv-user-1001",
+      "password": "wv-pass1001",
+      "totp": "JBSWY3DPEHPK3PXP",
+      "notes": "wv-notes-1001",
+      "uris": [
+        "http://mock-api:7777"
+      ],
+      "fields": [
+        {
+          "name": "wv_text",
+          "value": "wv-field-text-1001",
+          "type": 0,
+          "linkedId": null
+        },
+        {
+          "name": "wv_hidden",
+          "value": "wv-field-hidden-1001",
+          "type": 1,
+          "linkedId": null
+        },
+        {
+          "name": "wv_enabled",
+          "value": "true",
+          "type": 2,
+          "linkedId": null
+        },
+        {
+          "name": "wv_linked",
+          "value": null,
+          "type": 3,
+          "linkedId": 100
+        }
+      ]
+    },
+    {
+      "id": "576174b1-ce6d-428b-8ce9-af75623dca42",
+      "name": "wv_login_otpauth",
+      "type": 1,
+      "org": false,
+      "username": null,
+      "password": "wv-pass-1002",
+      "totp": "otpauth://totp/Capture:wv?secret=JBSWY3DPEHPK3PXP&algorithm=SHA256&digits=8&period=60",
+      "notes": null,
+      "uris": [
+        "http://mock-api:7777"
+      ],
+      "fields": []
+    },
+    {
+      "id": "69520151-9a8c-4d6e-8338-e88832ceb949",
+      "name": "wv_login_unbound",
+      "type": 1,
+      "org": false,
+      "username": "wv-login-unbound",
+      "password": "wv-pass-1003",
+      "totp": null,
+      "notes": null,
+      "uris": [
+        "https://api.example.com"
+      ],
+      "fields": []
+    },
+    {
+      "id": "aca11186-6e42-4256-842f-cf4ca9e889a6",
+      "name": "wv_note",
+      "type": 2,
+      "org": false,
+      "username": null,
+      "password": null,
+      "totp": null,
+      "notes": "wv-note-body-1004",
+      "uris": [],
+      "fields": [
+        {
+          "name": "ferrowarden_uris",
+          "value": "http://mock-api:7777",
+          "type": 0,
+          "linkedId": null
+        }
+      ]
+    },
+    {
+      "id": "bc40b61a-3289-4f9a-a95c-743b04496846",
+      "name": "wv_org_login",
+      "type": 1,
+      "org": true,
+      "username": "wv-org-user-2001",
+      "password": "wv-org-pass-2001",
+      "totp": null,
+      "notes": "",
+      "uris": [
+        "http://mock-api:7777"
+      ],
+      "fields": []
+    },
+    {
+      "id": "cb779b7d-c91b-4f99-9f17-35644b9caa62",
+      "name": "wv_org_note",
+      "type": 2,
+      "org": true,
+      "username": null,
+      "password": null,
+      "totp": null,
+      "notes": "wv-org-note-2002",
+      "uris": [],
+      "fields": [
+        {
+          "name": "ferrowarden_uris",
+          "value": "http://mock-api:7777",
+          "type": 0,
+          "linkedId": null
+        }
+      ]
+    }
+  ],
+  "not_offered_kinds": [
+    {
+      "id": "386211fb-266e-4b73-8b7e-6deb92e3dec2",
+      "name": "wv_card",
+      "type": 3
+    },
+    {
+      "id": "c1cf47a0-22cd-4032-956d-d516b407da60",
+      "name": "wv_identity",
+      "type": 4
+    },
+    {
+      "id": "38c79860-3c91-4c49-b462-a1296ab019a7",
+      "name": "wv_ssh",
+      "type": 5
+    }
+  ],
+  "skipped": [
+    {
+      "id": "e14675ce-4639-4e33-ab62-7e6de4484921",
+      "why": "trash"
+    },
+    {
+      "id": "f44959ac-3837-4d11-bcec-3397cf0e1d86",
+      "why": "archived"
+    }
+  ]
+}

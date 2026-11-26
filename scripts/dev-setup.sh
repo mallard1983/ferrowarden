@@ -9,7 +9,8 @@
 # What this script does:
 #   1. Generates secrets (master password, admin key) if they don't exist
 #   2. Starts Vaultwarden with signups enabled
-#   3. Runs vault-setup: registers the Vaultwarden account and writes
+#   3. Runs vault-setup: registers the Vaultwarden account (and a second one
+#      that owns the restricted organisation) and writes
 #      bw_client_id + bw_client_secret to secrets/
 #   4. Disables Vaultwarden signups
 #   5. Runs vault-seeder: populates the vault with test credentials
@@ -22,6 +23,14 @@
 #
 # Usage:
 #   ./scripts/dev-setup.sh
+#
+# Environment (all optional; they reach docker-compose.test.yml):
+#   VAULTWARDEN_VERSION  Vaultwarden release to run (default: the one in the
+#                        compose file, 1.37.5)
+#   BW_CLI_VERSION       Bitwarden CLI release bw serve runs (default 2026.11.0);
+#                        it must be contemporary with VAULTWARDEN_VERSION
+#   TEST_KDF             pbkdf2 (default) or argon2id: the KDF the test accounts
+#                        are registered with (64 MiB, 3 iterations, parallelism 4)
 #
 # To reset and start over:
 #   docker compose -f docker-compose.test.yml down -v
@@ -178,6 +187,14 @@ if [ ! -f ./certs/server.crt ] || [ ! -f ./certs/server.key ]; then
 else
     echo "  Skipping: certs/server.crt and certs/server.key already exist"
 fi
+
+# ── Build the images ──────────────────────────────────────────────────────────
+# Explicitly, so a changed BW_CLI_VERSION (or a stale image from an earlier
+# run) cannot be reused: Compose builds an image only when it is missing.
+
+echo ""
+echo "[1c/7] Building the images (BW_CLI_VERSION=${BW_CLI_VERSION:-2026.11.0})..."
+$COMPOSE --profile setup build
 
 # ── Start Vaultwarden (signups enabled for initial account creation) ──────────
 

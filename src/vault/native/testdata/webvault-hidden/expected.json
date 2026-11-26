@@ -1,0 +1,22 @@
+{
+  "source": "Vaultwarden 1.37.5 web vault, account capture3@example.test (PBKDF2), a confirmed User of WV Capture Org whose collection wv-collection is read-only with Hide passwords. The same two org items as testdata/webvault (same ids); bw CLI 2026.11.0 lists them with login.password null.",
+  "email": "capture3@example.test",
+  "password": "Password12345!",
+  "prelogin": {
+    "kdf": 0,
+    "kdfIterations": 600000,
+    "kdfMemory": null,
+    "kdfParallelism": null,
+    "kdfSettings": {
+      "iterations": 600000,
+      "kdfType": 0,
+      "memory": null,
+      "parallelism": null
+    },
+    "salt": null
+  },
+  "hidden_ids": [
+    "bc40b61a-3289-4f9a-a95c-743b04496846",
+    "cb779b7d-c91b-4f99-9f17-35644b9caa62"
+  ]
+}

@@ -16,6 +16,8 @@
 # Environment:
 #   BW_SERVER_URL  — Vaultwarden base URL (e.g. https://vaultwarden)
 #   SETUP_EMAIL    — Vault account email (default: admin@ferrowarden.test)
+#   HIDDEN_OWNER_EMAIL — Owner of the restricted organisation, a second account
+#                        (default: org-owner@ferrowarden.test)
 
 set -e
 
@@ -60,4 +62,9 @@ SETUP_MASTER_PASSWORD="$(cat /run/secrets/bw_master_password)"
 export SETUP_MASTER_PASSWORD SETUP_EMAIL BW_SERVER_URL CREDENTIALS_FILE
 
 echo "Seeding credentials from $CREDENTIALS_FILE ..."
-exec node /usr/local/share/ferrowarden/bw-seed.js
+node /usr/local/share/ferrowarden/bw-seed.js
+
+# An item whose collection hides passwords from the account, owned by the
+# second account that vault-setup registered (docs/native-vault.md).
+echo "Seeding the hidden-password item ..."
+exec node /usr/local/share/ferrowarden/bw-seed-hidden.js

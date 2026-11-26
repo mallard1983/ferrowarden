@@ -230,6 +230,9 @@ services:
       # FERROWARDEN_VAULT__BACKEND: "native"
       # FERROWARDEN_VAULT_CLIENT_ID_FILE: "/run/secrets/bw_client_id"
       # FERROWARDEN_VAULT_CLIENT_SECRET_FILE: "/run/secrets/bw_client_secret"
+      # Items whose collection hides passwords from this account are left out by
+      # default; "true" makes them usable by agents (docs/native-vault.md).
+      # FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS: "false"
       FERROWARDEN_BIND_ADDR: "0.0.0.0:3000"
       # The admin key is read from this Docker secret file by ferrowarden
       # itself; it is never placed in the process environment.

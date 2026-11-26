@@ -14,6 +14,13 @@
 //!    memory and never printed; a mismatch is reported by placeholder label and
 //!    by which side differs.
 //!
+//! One difference is deliberate and asserted rather than compared: the item
+//! whose collection hides passwords from the account (`viewPassword: false`,
+//! `hidden_password_item`). The native backend leaves it out; `bw serve` does
+//! not report `viewPassword`, but the CLI withholds such a password itself, so
+//! its listing has the item without a password placeholder (see
+//! `split_hidden`). Neither side ever releases the password.
+//!
 //! TOTP codes are compared inside one time window (the probes wait for a safe
 //! moment and a mismatch is retried once, for a window boundary).
 //!
@@ -220,6 +227,40 @@ fn record_secret_for_gate(value: &str) {
     }
 }
 
+/// The seeded item whose collection hides passwords (tests/seed/hidden.json).
+const HIDDEN_ITEM: &str = "hidden_password_item";
+
+/// A listing (names, or detailed entries) without the hidden-password item,
+/// and the item's entry if there was one.
+fn split_hidden(listing: &Value) -> (Value, Option<Value>) {
+    let mut kept = Vec::new();
+    let mut hidden = None;
+    for entry in listing.as_array().expect("listing is an array") {
+        let name = entry.as_str().or_else(|| entry["name"].as_str());
+        if name == Some(HIDDEN_ITEM) {
+            hidden = Some(entry.clone());
+        } else {
+            kept.push(entry.clone());
+        }
+    }
+    (Value::Array(kept), hidden)
+}
+
+/// What the two backends are known to do differently with the hidden-password
+/// item: the native one does not list it, the bw serve one lists it without a
+/// password placeholder.
+fn assert_hidden_item_handling(bw: Option<&Value>, native: Option<&Value>) {
+    assert!(
+        native.is_none(),
+        "the native backend must leave the hidden-password item out"
+    );
+    let bw = bw.expect("bw serve lists the hidden-password item: is the stack seeded?");
+    assert!(
+        bw.is_string() || bw.get("placeholder").is_none(),
+        "bw serve must not offer a password placeholder for it"
+    );
+}
+
 /// Which selector a placeholder uses, for the per-kind counts.
 fn kind_of(placeholder: &str) -> &'static str {
     if placeholder.contains(":field:") {
@@ -275,10 +316,15 @@ async fn credential_listings_are_identical() {
     };
     let [bw, native] = &rig.sides;
 
-    let plain_bw = rig.get_json(bw, "/v1/credentials").await;
-    let plain_native = rig.get_json(native, "/v1/credentials").await;
-    let detail_bw = rig.get_json(bw, "/v1/credentials?detail=true").await;
-    let detail_native = rig.get_json(native, "/v1/credentials?detail=true").await;
+    let (plain_bw, plain_bw_hidden) = split_hidden(&rig.get_json(bw, "/v1/credentials").await);
+    let (plain_native, plain_native_hidden) =
+        split_hidden(&rig.get_json(native, "/v1/credentials").await);
+    let (detail_bw, detail_bw_hidden) =
+        split_hidden(&rig.get_json(bw, "/v1/credentials?detail=true").await);
+    let (detail_native, detail_native_hidden) =
+        split_hidden(&rig.get_json(native, "/v1/credentials?detail=true").await);
+    assert_hidden_item_handling(plain_bw_hidden.as_ref(), plain_native_hidden.as_ref());
+    assert_hidden_item_handling(detail_bw_hidden.as_ref(), detail_native_hidden.as_ref());
 
     // Report any difference by credential name and key, never a whole value.
     let mut diffs = Vec::new();
@@ -361,7 +407,7 @@ async fn every_offered_placeholder_substitutes_the_same_value() {
         return;
     };
     let [bw, native] = &rig.sides;
-    let listing = rig.get_json(bw, "/v1/credentials?detail=true").await;
+    let (listing, _) = split_hidden(&rig.get_json(bw, "/v1/credentials?detail=true").await);
     let mut probes = offered_placeholders(&listing);
 
     // Placeholders that must fail the same way on both sides.
@@ -385,6 +431,13 @@ async fn every_offered_placeholder_substitutes_the_same_value() {
             "{{vault:fx_edge_empty_username:username}}",
         ),
         ("archived item", "{{vault:fx_archived}}"),
+        // Neither side releases the password of an item whose collection
+        // hides it.
+        ("hidden password", "{{vault:hidden_password_item}}"),
+        (
+            "hidden password, explicit",
+            "{{vault:hidden_password_item:password}}",
+        ),
     ] {
         probes.push((format!("negative: {label}"), p.to_string()));
     }

@@ -150,6 +150,10 @@ pub struct RawCipher {
     pub deleted_date: Option<String>,
     #[serde(rename = "archivedDate", default)]
     pub archived_date: Option<String>,
+    /// `false` when the item's collection hides passwords from this member
+    /// ("Hide passwords"). Absent (an older server) counts as visible.
+    #[serde(rename = "viewPassword", default)]
+    pub view_password: Option<bool>,
     #[serde(default)]
     pub login: Option<RawLogin>,
     #[serde(default)]

@@ -677,6 +677,53 @@ fn vault_backend_comes_from_the_file_or_the_environment() {
 }
 
 #[test]
+fn hidden_passwords_are_refused_unless_the_operator_opts_in() {
+    assert!(!VaultConfig::default().allow_hidden_passwords);
+    let from_file: VaultConfig =
+        serde_json::from_str(r#"{"allow_hidden_passwords":true}"#).unwrap();
+    assert!(from_file.allow_hidden_passwords);
+    assert!(
+        !serde_json::from_str::<VaultConfig>("{}")
+            .unwrap()
+            .allow_hidden_passwords
+    );
+
+    let mut env = std::collections::HashMap::new();
+    env.insert("FERROWARDEN_UNLOCK_MODE".to_string(), "manual".to_string());
+    env.insert(
+        "FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS".to_string(),
+        "true".to_string(),
+    );
+    let cfg: Config = config::Config::builder()
+        .add_source(
+            config::Environment::with_prefix("FERROWARDEN")
+                .prefix_separator("_")
+                .separator("__")
+                .ignore_empty(true)
+                .source(Some(env)),
+        )
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+    assert!(cfg.vault.allow_hidden_passwords);
+}
+
+#[test]
+fn allowing_hidden_passwords_with_bw_serve_warns_that_it_does_nothing() {
+    let mut v = VaultConfig::default();
+    assert!(v.validate(false, false).unwrap().is_empty());
+    v.allow_hidden_passwords = true;
+    let w = v.validate(false, false).unwrap();
+    assert_eq!(w.len(), 1);
+    assert!(w[0].contains("allow_hidden_passwords") && w[0].contains("bw-serve"));
+    // With the native backend it is meaningful: no warning.
+    v.backend = VaultBackend::Native;
+    v.credentials = vault_creds(Some("i"), Some("s"));
+    assert!(v.validate(false, false).unwrap().is_empty());
+}
+
+#[test]
 fn native_mode_needs_a_valid_url_and_the_api_key() {
     let native = |url: &str, id: Option<&str>, secret: Option<&str>| {
         let mut cfg = base_config(UnlockMode::Manual);

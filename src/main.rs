@@ -36,6 +36,10 @@ fn startup_event(
         .detail("tls_enabled", config.tls_enabled)
         .detail("vault_backend", config.vault.backend.as_str())
         .detail(
+            "vault_allow_hidden_passwords",
+            config.vault.allow_hidden_passwords,
+        )
+        .detail(
             "unlock_mode",
             match config.unlock_mode {
                 UnlockMode::File => "file",
@@ -209,6 +213,12 @@ async fn main() -> anyhow::Result<()> {
         } else {
             tracing::warn!(failed = ?failed, "Process hardening was only partly applied");
         }
+    }
+
+    if config.vault.allow_hidden_passwords {
+        tracing::warn!(
+            "vault.allow_hidden_passwords = true: items whose collection hides passwords from this account are available to agents"
+        );
     }
 
     let state = Arc::new(AppState::try_new(config.clone(), events.clone())?.with_notify(notify));

@@ -109,3 +109,21 @@ fn extract_field_values_and_links() {
         Err(FerroError::CredentialNotFound(_))
     ));
 }
+
+#[test]
+fn a_hidden_password_item_from_bw_serve_has_no_password_and_no_view_password_field() {
+    // What `bw serve` returns for an organisation item whose collection hides
+    // passwords from the account (checked against CLI 2026.11.0 and 2026.5.0):
+    // no `viewPassword` field anywhere and a null `login.password`. The CLI
+    // withholds the password itself, so Ferrowarden lists the item without a
+    // password placeholder; it cannot tell the item apart (docs/native-vault.md).
+    let map = parse(
+        r#"{"id":"h1","name":"hidden","type":1,"reprompt":0,"organizationId":"org1",
+                "collectionIds":["c1"],"notes":null,
+                "login":{"username":"U","password":null,"totp":null,
+                         "uris":[{"uri":"http://mock-api:7777","match":null}]}}"#,
+    );
+    let e = &map["hidden"][0];
+    assert!(e.has_username && !e.has_password && !e.has_notes);
+    assert_eq!(e.uris, vec!["http://mock-api:7777"]);
+}

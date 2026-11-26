@@ -89,6 +89,15 @@ pub mod reason {
     pub const MISSING_ORG_KEY: &str = "missing_org_key";
     pub const ITEM_KEY: &str = "item_key_undecryptable";
     pub const MISSING_NAME: &str = "missing_name";
+    /// The item's collection hides passwords from this account
+    /// (`viewPassword: false`) and `vault.allow_hidden_passwords` is off.
+    pub const HIDDEN_PASSWORD: &str = "hidden_password";
+}
+
+/// Whether the server marks this item's password as hidden from the account
+/// (a collection with "Hide passwords"). Only an explicit `false` counts.
+pub fn is_password_hidden(c: &RawCipher) -> bool {
+    c.view_password == Some(false)
 }
 
 /// Items of the supported kinds: login and secure note.

@@ -8,9 +8,10 @@
 # Flow:
 #   1. Wait for Vaultwarden to be ready
 #   2. Register a new account (bw-register.js — Node.js built-in crypto)
-#   3. Obtain an access token (pure HTTP + PBKDF2 via Python stdlib)
-#   4. Create an API key for bw serve / the seeder
-#   5. Write client_id and client_secret to /secrets/
+#   3. Register a second account that owns the restricted organisation, whose
+#      collection hides passwords from the first (bw-seed-hidden.js)
+#   4. Log in with the account's own KDF and create its API key
+#      (bw-apikey.js), and write client_id and client_secret to /secrets/
 #
 # Environment variables (all required):
 #   BW_SERVER_URL          — Vaultwarden base URL (e.g. https://vaultwarden)
@@ -19,6 +20,10 @@
 #   SETUP_EMAIL            — Email address for the vault account
 #   SETUP_MASTER_PASSWORD  — Master password for the vault account
 #   SETUP_MAX_WAIT         — Seconds to wait for Vaultwarden (default: 90)
+#   TEST_KDF               — pbkdf2 (default) or argon2id: the KDF both accounts
+#                            are registered with (bw-register.js)
+#   HIDDEN_OWNER_EMAIL     — The second account (default:
+#                            org-owner@ferrowarden.test; same master password)
 
 set -e
 
@@ -63,124 +68,31 @@ else
     echo "[setup] bw-register.js returned non-zero — will attempt to continue." >&2
 fi
 
-# ── 3. Derive master password hash (pure Python stdlib, no extra packages) ───
-# The Bitwarden identity token endpoint requires the master password hash,
-# not the plaintext password. The hash is PBKDF2-SHA256(masterKey, password, 1).
-# masterKey itself is PBKDF2-SHA256(password, email, <kdfIterations>).
-# The iteration count comes from Vaultwarden's prelogin endpoint: it is
-# 600,000 for accounts registered by bw-register.js, and current Bitwarden
-# clients upgrade older accounts automatically, so it must never be assumed.
-
-PRELOGIN=$(curl -sf $CURL_CA -X POST "$BW_SERVER_URL/identity/accounts/prelogin" \
-    -H "Content-Type: application/json" \
-    -d "{\"email\": \"$EMAIL\"}")
-KDF_ITERATIONS=$(python3 -c "
-import json, sys
-d = json.loads('$PRELOGIN')
-if d.get('kdf', d.get('Kdf', 0)) != 0:
-    sys.exit('unsupported KDF type (only PBKDF2-SHA256 is implemented)')
-print(d.get('kdfIterations') or d.get('KdfIterations'))
-")
-echo "[setup] Account KDF: PBKDF2-SHA256, $KDF_ITERATIONS iterations"
-
-MASTER_HASH=$(python3 - <<PYEOF
-import hashlib, base64
-email    = "$EMAIL".lower()
-password = "$MASTER_PASSWORD"
-master_key = hashlib.pbkdf2_hmac('sha256', password.encode(), email.encode(), $KDF_ITERATIONS, 32)
-master_hash = base64.b64encode(
-    hashlib.pbkdf2_hmac('sha256', master_key, password.encode(), 1, 32)
-).decode()
-print(master_hash, end='')
-PYEOF
-)
-
-# ── 4. Obtain access token from Vaultwarden identity endpoint ─────────────────
-# Standard OAuth2 resource-owner password flow as used by Bitwarden clients.
-# We identify as a generic "SDK" device (deviceType=6) so Vaultwarden does
-# not enforce email verification for this device type.
-
-DEVICE_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
-
-echo "[setup] Obtaining access token..."
-TOKEN_RESPONSE=$(curl -sf $CURL_CA -X POST "$BW_SERVER_URL/identity/connect/token" \
-    --data-urlencode "grant_type=password" \
-    --data-urlencode "username=$EMAIL" \
-    --data-urlencode "password=$MASTER_HASH" \
-    --data-urlencode "scope=api offline_access" \
-    --data-urlencode "client_id=web" \
-    --data-urlencode "deviceType=6" \
-    --data-urlencode "deviceIdentifier=$DEVICE_ID" \
-    --data-urlencode "deviceName=ferrowarden-setup")
-
-ACCESS_TOKEN=$(python3 -c "
-import sys, json
-data = json.loads('$TOKEN_RESPONSE')
-print(data.get('access_token', ''))
-" 2>/dev/null)
-
-if [ -z "$ACCESS_TOKEN" ]; then
-    echo "[setup] ERROR: failed to obtain access token." >&2
-    echo "[setup] Response: $TOKEN_RESPONSE" >&2
-    exit 1
+# The owner of the restricted organisation (bw-seed-hidden.js): a second
+# account, so that the first one is an ordinary member of that organisation
+# and a collection can hide passwords from it (owners and admins always see
+# them). Same master password, same KDF.
+HIDDEN_OWNER_EMAIL="${HIDDEN_OWNER_EMAIL:-org-owner@ferrowarden.test}"
+echo "[setup] Registering account: $HIDDEN_OWNER_EMAIL"
+if SETUP_EMAIL="$HIDDEN_OWNER_EMAIL" node /usr/local/share/ferrowarden/bw-register.js; then
+    echo "[setup] Second account registration step complete."
+else
+    echo "[setup] bw-register.js returned non-zero for the second account — will attempt to continue." >&2
 fi
 
-echo "[setup] Access token obtained."
-
-# ── 5. Create API key for programmatic access ────────────────────────────────
-# The API key (client_id + client_secret) is used by bw serve and the seeder
-# for non-interactive login. Creating it requires authenticating with the
-# master password hash — not just the access token — to confirm operator intent.
-#
-# API response format changed in Vaultwarden 2026.x:
-#   Old: {"clientId": "user.<uuid>", "clientSecret": "..."}
-#   New: {"apiKey": "<secret>", "object": "apiKey"}
-#
-# In the new format, clientId is derived as "user.<sub>" where <sub> is the
-# user UUID from the JWT access token. We decode it without verification using
-# Python's stdlib (base64 + json) since we obtained the token ourselves.
-
-echo "[setup] Creating API key..."
-APIKEY_RESPONSE=$(curl -sf $CURL_CA -X POST "$BW_SERVER_URL/api/accounts/api-key" \
-    -H "Authorization: Bearer $ACCESS_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "{\"masterPasswordHash\": \"$MASTER_HASH\"}")
-
-CLIENT_ID=$(python3 -c "
-import sys, json, base64
-data = json.loads('$APIKEY_RESPONSE')
-# New format returns apiKey only; clientId is derived from the JWT sub claim
-if 'clientId' in data:
-    print(data['clientId'])
-elif 'apiKey' in data:
-    # Decode JWT to get user UUID (no verification needed — we issued this request)
-    payload = '$ACCESS_TOKEN'.split('.')[1]
-    payload += '=' * (-len(payload) % 4)
-    sub = json.loads(base64.b64decode(payload))['sub']
-    print('user.' + sub)
-" 2>/dev/null)
-
-CLIENT_SECRET=$(python3 -c "
-import sys, json
-data = json.loads('$APIKEY_RESPONSE')
-# New format uses 'apiKey'; old format uses 'clientSecret'
-print(data.get('clientSecret') or data.get('apiKey', ''))
-" 2>/dev/null)
-
-if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
-    echo "[setup] ERROR: failed to create API key." >&2
-    echo "[setup] Response: $APIKEY_RESPONSE" >&2
-    exit 1
-fi
-
-echo "[setup] API key created: $CLIENT_ID"
-
-# ── 6. Write secrets ─────────────────────────────────────────────────────────
+# ── 4. Log in and create the API key (bw-apikey.js) ──────────────────────────
+# The identity token endpoint wants the master password hash, which depends on
+# the account's KDF (PBKDF2-SHA256 or Argon2id): bw-apikey.js reads it from
+# prelogin and derives the hash with Node's built-in crypto (the same code that
+# registered the account, bw-lib.js), logs in, and creates the API key
+# (client_id + client_secret) used by the native backend, bw serve and the
+# seeder. It writes bw_client_id and bw_client_secret to $SECRETS_DIR.
 
 mkdir -p "$SECRETS_DIR"
-printf '%s' "$CLIENT_ID"     > "$SECRETS_DIR/bw_client_id"
-printf '%s' "$CLIENT_SECRET" > "$SECRETS_DIR/bw_client_secret"
-chmod 600 "$SECRETS_DIR/bw_client_id" "$SECRETS_DIR/bw_client_secret"
+if ! node /usr/local/share/ferrowarden/bw-apikey.js; then
+    echo "[setup] ERROR: failed to log in and create the API key." >&2
+    exit 1
+fi
 
 echo "[setup] Wrote:"
 echo "  $SECRETS_DIR/bw_client_id"

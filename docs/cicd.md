@@ -85,19 +85,42 @@ The test stack runs two Ferrowarden instances against one Vaultwarden account (s
 3. the whole integration suite again against the native instance (`.env.test.native`: `FERROWARDEN_TEST_URL`, `FERROWARDEN_TEST_UI_URL` and the native instance's agent key). No test is skipped for the native backend. One test, `test_container_is_healthy_and_hardened`, inspects the `ferrowarden` service container whichever instance the suite targets, so in the second run it checks the `bw serve` instance again; the native container has the same hardening and health check in `docker-compose.test.yml` and is covered by the secret gate and the image checks;
 4. the MCP tests and the secret gate, which scans the logs and event files of both instances.
 
-### Previous Vaultwarden minor: not in CI yet (TODO, issue #36)
+### Vaultwarden versions in CI
 
-`docker-compose.test.yml` takes the Vaultwarden release from `VAULTWARDEN_VERSION` (default `1.37.5`, the one the Bitwarden CLI is verified against). It was tried with `1.36.0`, the previous minor, on a separate stack:
+The native backend implements the Bitwarden protocol itself, and `bw serve` is only as good as the CLI that runs it, so the Vaultwarden release matters to both. The integration job runs twice, in parallel, each run with a stack of its own (`strategy.matrix.include` in `.github/workflows/test.yml`; the matrix sets `VAULTWARDEN_VERSION`, `BW_CLI_VERSION` and `TEST_KDF` for `docker-compose.test.yml` and `scripts/dev-setup.sh`):
 
-- account registration needed a fix for 1.36.0 (it returns the verification token as a JSON string; `docker/bw-register.js` now handles both), and after that the seeder, including the organisation, the per-item keys and the archived item, works unchanged;
-- the **native backend works against 1.36.0**: it unlocks, syncs and the whole integration suite passes against it (67 tests);
-- the **`bw serve` side does not**: the pinned Bitwarden CLI (2026.11.0) cannot sync a 1.36.0 vault (its SDK rejects a cipher the server sends and `bw serve` exits), so the equivalence suite has nothing to compare against there.
+| Check name | Vaultwarden | Test accounts' KDF | Bitwarden CLI (`bw serve`) |
+|---|---|---|---|
+| `Integration tests` | 1.37.5 (current) | PBKDF2-SHA256, 600 000 iterations | 2026.11.0 |
+| `Integration tests (Vaultwarden 1.36.0, Argon2id)` | 1.36.0 (previous minor) | Argon2id, 64 MiB, 3 iterations, parallelism 4 | 2026.5.0 |
 
-So a job for the previous minor is left out rather than added half-working. To add it, either move to a CLI release that supports both servers, or give `scripts/dev-setup.*` a native-only mode (no `bw-serve`, no `ferrowarden` instance) and run the native integration suite there. The vault version matters to the native backend because it implements the protocol itself: until the job exists, treat a Vaultwarden upgrade as something to run `docker compose -f docker-compose.test.yml` and the equivalence suite against first.
+Both run every step: the integration suite against each instance, the equivalence suite, the MCP suite and the secret gate. `Integration tests` is the required status check on `main`; the job keeps that name (the matrix entry's `name`), and the second one has a name of its own. They fail independently (`fail-fast: false`).
+
+**The CLI is part of the pair.** `docker/bw-cli.Dockerfile` takes the CLI release from the build argument `BW_CLI_VERSION` (default 2026.11.0; `docker-compose.test.yml` passes the environment variable of the same name). The pinned CLI 2026.11.0 cannot use a 1.36.0 vault (issue #36 recorded that `bw serve` exits there; re-checked, the unlock fails because the CLI's user-key-id migration posts to an endpoint 1.36.0 does not have and gets a 404). With a CLI of 1.36.0's time the whole stack works:
+
+| CLI | Vaultwarden 1.36.0 |
+|---|---|
+| 2026.11.0 | **fails**: login works, `bw unlock` fails (key-id migration, 404), so `bw serve` cannot unlock |
+| 2026.6.0 | login, unlock and sync work (33 items listed); not run through the suites |
+| 2026.5.0 | **works**, and is the CI pair: `bw serve` unlocks and syncs, and every suite passes (below) |
+| 2026.4.2 | login, unlock and sync work (33 items listed); not run through the suites |
+
+1.36.0 was released on 2026-05-03. 2026.5.0 was the first candidate tried and it passes everything, so it is the one pinned.
+
+Run the second configuration locally the same way CI does:
+
+```sh
+docker compose -f docker-compose.test.yml down -v     # a fresh stack: the account's KDF is chosen at registration
+VAULTWARDEN_VERSION=1.36.0 BW_CLI_VERSION=2026.5.0 TEST_KDF=argon2id ./scripts/dev-setup.sh
+```
+
+(`scripts/dev-setup.*` build the images first, so changing `BW_CLI_VERSION` takes effect.) Account setup, the seeders and the API key script (`docker/bw-register.js`, `bw-apikey.js`, `bw-seed.js`, `bw-seed-hidden.js`) read the account's KDF from the server's prelogin and use Node's built-in `crypto` for PBKDF2 and Argon2id (`crypto.argon2Sync`, Node 24.7 or later; the images are `node:26-slim`), so the Argon2id account is exercised end to end: registration, API-key login, the native backend's unlock, `bw serve`'s login and the admin UI sign-in.
+
+When a Vaultwarden release comes out, move the pair forward: the new release becomes the first row, the old one the second, and each gets the newest CLI that syncs it.
 
 ## Secret Gate
 
-After the integration tests, the GitHub workflow runs `scripts/check-no-secrets.sh` while the stack is still up. It collects every secret the test stack knows about (passwords, notes, custom field values and TOTP seeds from `tests/seed/credentials.json`, the agent and admin keys from `.env.test`, the vault master password, the metrics token, and any agent token the integration tests created through the UI, which they write to `target/integration-secrets.txt`), then greps the `ferrowarden` container logs, the security event file and a scrape of each instance's Prometheus `/metrics` (fetched with the metrics token from the published ports 9095 and 9096) for each of them (fixed-string) and fails if any appears. The test stack enables the file sink at `/data/events/events.jsonl` inside the container (on the `ferrowarden-keys` volume, because the root filesystem is read-only); the script copies it out with `docker compose cp`, so no host directory is mounted and host UIDs do not matter. Secret values are never printed, only the name of the leaked item. It needs `python3` (preinstalled on `ubuntu-latest`). To see it fail, pass an extra file containing a seeded password: `bash scripts/check-no-secrets.sh some-file`.
+After the integration tests, the GitHub workflow runs `scripts/check-no-secrets.sh` while the stack is still up. It collects every secret the test stack knows about (passwords, notes, custom field values and TOTP seeds from `tests/seed/credentials.json`, the password, username and note of the hidden-password item in `tests/seed/hidden.json`, the agent and admin keys from `.env.test`, the vault master password, the metrics token, and any agent token the integration tests created through the UI, which they write to `target/integration-secrets.txt`), then greps the `ferrowarden` container logs, the security event file and a scrape of each instance's Prometheus `/metrics` (fetched with the metrics token from the published ports 9095 and 9096) for each of them (fixed-string) and fails if any appears. The test stack enables the file sink at `/data/events/events.jsonl` inside the container (on the `ferrowarden-keys` volume, because the root filesystem is read-only); the script copies it out with `docker compose cp`, so no host directory is mounted and host UIDs do not matter. Secret values are never printed, only the name of the leaked item. It needs `python3` (preinstalled on `ubuntu-latest`). To see it fail, pass an extra file containing a seeded password: `bash scripts/check-no-secrets.sh some-file`.
 
 The integration job runs against the hardened `docker-compose.test.yml` (read-only root filesystem, no capabilities, `no-new-privileges`, the `scratch` image), so the suites prove the stack works that way. Two further steps check the container itself. The first finds the container's PID on the host (`docker inspect -f '{{.State.Pid}}'`), reads `/proc/<pid>/environ` with `sudo`, and fails if it contains the admin key (compared with `grep -qF -f`, never printed) or a `FERROWARDEN_ADMIN_KEY=` variable; it also checks that the file path variable is present, so it cannot pass by reading the wrong process. The second fails if `/bin/sh` exists in the image, if the binary does not start (it is static, so no loader or libc is needed), or if the image holds anything beyond the binary, `/etc/passwd`, `/etc/group` and `/data`. `test_container_is_healthy_and_hardened` in the integration suite checks that Docker reports the container `healthy` through `ferrowarden healthcheck`, that the hardening flags are set, and that the admin key value is not in the container's configuration; it skips when docker is not available to the test. Reading another process's environment needs the host's `/proc`, so the first step runs on the Linux runner only.
 
@@ -157,7 +180,7 @@ The 11 integration tests share mock-api state and must run serially. Without thi
 **bw-serve takes ~15 seconds to initialize.**
 The dev-setup script has a sleep and health-check loop. In CI the Docker network round-trip may be slower. If tests fail with "vault locked" or connection refused on the first few runs, increase the wait time in `scripts/dev-setup.sh`.
 
-**bw-cli version is pinned (currently 2026.11.0).**
+**bw-cli version is pinned (currently 2026.11.0; 2026.5.0 for the Vaultwarden 1.36.0 job).**
 It requires HTTPS to Vaultwarden (provided by the `internal-certs` service) and checks the `Host` header on `bw serve`. Bump it deliberately and re-run the integration tests: the `bw serve` API is part of ferrowarden's contract.
 
 **Cargo build toolchain on Windows runners.**
