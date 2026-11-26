@@ -92,7 +92,7 @@ The native backend implements the Bitwarden protocol itself, and `bw serve` is o
 | Check name | Vaultwarden | Test accounts' KDF | Bitwarden CLI (`bw serve`) |
 |---|---|---|---|
 | `Integration tests` | 1.37.5 (current) | PBKDF2-SHA256, 600 000 iterations | 2026.11.0 |
-| `Integration tests (Vaultwarden 1.36.0, Argon2id)` | 1.36.0 (previous minor) | Argon2id, 64 MiB, 3 iterations, parallelism 4 | 2026.5.0 |
+| `Integration tests (Vaultwarden 1.36.0, Argon2id)` | 1.36.0 (previous minor) | Argon2id, 64 MiB, 3 iterations, parallelism 4 | 2026.6.0 |
 
 Both run every step: the integration suite against each instance, the equivalence suite, the MCP suite and the secret gate. `Integration tests` is the required status check on `main`; the job keeps that name (the matrix entry's `name`), and the second one has a name of its own. They fail independently (`fail-fast: false`).
 
@@ -101,17 +101,17 @@ Both run every step: the integration suite against each instance, the equivalenc
 | CLI | Vaultwarden 1.36.0 |
 |---|---|
 | 2026.11.0 | **fails**: login works, `bw unlock` fails (key-id migration, 404), so `bw serve` cannot unlock |
-| 2026.6.0 | login, unlock and sync work (33 items listed); not run through the suites |
-| 2026.5.0 | **works**, and is the CI pair: `bw serve` unlocks and syncs, and every suite passes (below) |
+| 2026.6.0 | **works**, and is the CI pair: every suite passes; three consecutive rounds of the bw serve integration and equivalence suites ran with no `bw serve` crash |
+| 2026.5.0 | **unreliable**: every suite can pass, but `bw serve` intermittently crashes while decrypting ("Cannot take a reference to a value marked for disposal") and then answers 500 to every request; it failed two CI runs (#43, #45) |
 | 2026.4.2 | login, unlock and sync work (33 items listed); not run through the suites |
 
-1.36.0 was released on 2026-05-03. 2026.5.0 was the first candidate tried and it passes everything, so it is the one pinned.
+1.36.0 was released on 2026-05-03. 2026.5.0 was pinned first and replaced by 2026.6.0 after its `bw serve` crashed in CI twice. The crash is in the CLI (the reference), not in Ferrowarden: the native instance answered every request in both failed runs.
 
 Run the second configuration locally the same way CI does:
 
 ```sh
 docker compose -f docker-compose.test.yml down -v     # a fresh stack: the account's KDF is chosen at registration
-VAULTWARDEN_VERSION=1.36.0 BW_CLI_VERSION=2026.5.0 TEST_KDF=argon2id ./scripts/dev-setup.sh
+VAULTWARDEN_VERSION=1.36.0 BW_CLI_VERSION=2026.6.0 TEST_KDF=argon2id ./scripts/dev-setup.sh
 ```
 
 (`scripts/dev-setup.*` build the images first, so changing `BW_CLI_VERSION` takes effect.) Account setup, the seeders and the API key script (`docker/bw-register.js`, `bw-apikey.js`, `bw-seed.js`, `bw-seed-hidden.js`) read the account's KDF from the server's prelogin and use Node's built-in `crypto` for PBKDF2 and Argon2id (`crypto.argon2Sync`, Node 24.7 or later; the images are `node:26-slim`), so the Argon2id account is exercised end to end: registration, API-key login, the native backend's unlock, `bw serve`'s login and the admin UI sign-in.
@@ -180,7 +180,7 @@ The 11 integration tests share mock-api state and must run serially. Without thi
 **bw-serve takes ~15 seconds to initialize.** (The deprecated backend only; the native backend has no such wait.)
 The dev-setup script has a sleep and health-check loop. In CI the Docker network round-trip may be slower. If tests fail with "vault locked" or connection refused on the first few runs, increase the wait time in `scripts/dev-setup.sh`.
 
-**bw-cli version is pinned (currently 2026.11.0; 2026.5.0 for the Vaultwarden 1.36.0 job).**
+**bw-cli version is pinned (currently 2026.11.0; 2026.6.0 for the Vaultwarden 1.36.0 job).**
 It requires HTTPS to Vaultwarden (provided by the `internal-certs` service, which is `ferrowarden internal-certs` from the Ferrowarden image, not the CLI image) and checks the `Host` header on `bw serve`. Bump it deliberately and re-run the integration tests: the `bw serve` API is part of ferrowarden's contract.
 
 **Cargo build toolchain on Windows runners.**
