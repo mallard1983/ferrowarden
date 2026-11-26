@@ -121,6 +121,7 @@ fn expected_class(action: Action, outcome: Outcome, reason: Option<Reason>) -> O
             reason,
             Some(
                 Reason::CredentialHostNotAllowed
+                    | Reason::SessionHostNotAllowed
                     | Reason::TargetBlocked
                     | Reason::CredentialOutOfScope
                     | Reason::MethodNotAllowed
@@ -183,6 +184,7 @@ fn the_documented_examples_classify_and_the_rest_are_ignored() {
     let c = |e: SecurityEvent| classify(&e);
     for reason in [
         Reason::CredentialHostNotAllowed,
+        Reason::SessionHostNotAllowed,
         Reason::TargetBlocked,
         Reason::CredentialOutOfScope,
         Reason::MethodNotAllowed,

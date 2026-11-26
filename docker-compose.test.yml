@@ -123,7 +123,10 @@ services:
       # notify-sink is the same container under its notifier alias. It is listed
       # on purpose: the notifier host is refused to agents by its own deny list,
       # whatever allowed_targets says, and the integration tests prove it.
-      FERROWARDEN_ALLOWED_TARGETS: "mock-api,notify-sink"
+      # mock-alt is the same container under a third name: the "other host"
+      # of the captured-session tests (a session captured at mock-api must
+      # not be sent to it).
+      FERROWARDEN_ALLOWED_TARGETS: "mock-api,notify-sink,mock-alt"
       # Short refresh so tests see vault changes quickly.
       FERROWARDEN_REFRESH_INTERVAL_SECS: "30"
       # The integration suite fires all its requests from one IP within a
@@ -202,6 +205,9 @@ services:
           # The notifier posts here. Same container, second name: the mock
           # keeps requests made under this name in a separate log.
           - notify-sink
+          # The "other origin" of the captured-session tests: same container,
+          # another host name.
+          - mock-alt
       test-net: {}      # Tests query its log from the host
     ports:
       - "127.0.0.1:7777:7777"

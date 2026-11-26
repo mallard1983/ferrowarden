@@ -67,10 +67,13 @@ Calls `POST /v1/forward`. Arguments are the `request` of the [API](api-reference
 | `url` | string | yes | The full `http` or `https` URL of the target. Placeholders are allowed in the path, query and user info, not in the scheme, host or port. |
 | `headers` | object of strings | no | Headers for the target. Placeholders are allowed in values. |
 | `body` | any JSON value | no | A string is sent as it is; any other value is sent as JSON. |
+| `capture` | array of `{ from, as, ttl_secs? }` | no | Values of the response to keep inside Ferrowarden instead of returning them: a login token. `from` is `json:/pointer`, `header:Name` or `cookie:name`; `as` is the session name. Later calls write `{{session:NAME}}` where the token belongs. See [sessions.md](sessions.md). |
 
-The input schemas are strict (`additionalProperties: false`) and a unit test checks them against `components.schemas.ProxyRequest` in [openapi.yaml](openapi.yaml), so the tool cannot drift from the API. The result has structured content (`status`, `headers`, `body`, `body_encoding`, as in the API) and a text rendering: a status line, the response headers, then the body. A base64 body is summarised in the text as "binary response body, N bytes"; the structured content has the whole body. The text is cut at 100 KB and says so; the structured content is not cut.
+The input schemas are strict (`additionalProperties: false`) and a unit test checks them against `components.schemas.ProxyRequest` and `CaptureSpec` in [openapi.yaml](openapi.yaml), so the tool cannot drift from the API. The result has structured content (`status`, `headers`, `body`, `body_encoding`, and `captures` when the call had a `capture`, as in the API) and a text rendering: a status line, the response headers, then the body, then one line per capture (`NAME: captured (expires ...)`, or the status that says why not). A base64 body is summarised in the text as "binary response body, N bytes"; the structured content has the whole body. The text is cut at 100 KB and says so; the structured content is not cut.
 
-The tool descriptions carry the rules an agent has to follow: placeholder syntax, that the listing gives ready-made placeholders, where placeholders may appear, that a credential goes only to its bound hosts, that responses have known credential values scrubbed, and what a `403` and a `422` mean.
+The tool descriptions carry the rules an agent has to follow: placeholder syntax, that the listing gives ready-made placeholders, where placeholders may appear, that a credential goes only to its bound hosts, that responses have known credential values scrubbed, how to log in with `capture` and use `{{session:NAME}}`, and what a `403` and a `422` mean.
+
+**Captured sessions through the bridge.** `capture` works as in the API: the token is kept inside Ferrowarden, so it is in neither the structured content nor the text of the result, and `{{session:NAME}}` in a later `http_request` carries it to the same origin only. The bridge has no tool to list or delete sessions (`GET /v1/sessions` and `DELETE /v1/sessions/{name}` are API-only in this release): a session ends at its expiry, or when the operator revokes the key or changes its policy.
 
 ### Errors
 
@@ -98,7 +101,7 @@ If Ferrowarden cannot be reached at all (connection, TLS or timeout), the tool e
 - **HTTPS.** Certificates are always verified. A private CA is added with `FERROWARDEN_CA_FILE`, on top of the built-in roots. Plain `http://` is limited to loopback unless you set `FERROWARDEN_MCP_ALLOW_HTTP=1`.
 - **stdout is the protocol channel.** Nothing but MCP messages is written to it once the server runs (`--help` and `--version` print and exit before that). Logs and startup errors go to stderr. The binary is built with clippy's `print_stdout` lint denied, and a test starts the real binary and checks that every stdout line is a JSON-RPC message.
 - **Logs.** Plain text on stderr, level `warn` by default. At `info` there is one line per call: tool name, Ferrowarden's status, request id and duration. Request and response headers and bodies, URL paths and queries, the key and the base URL path are never logged. `FERROWARDEN_MCP_LOG` takes a level only, so the HTTP and TLS libraries cannot be switched to a verbose level that might show URLs.
-- **No admin operations.** The program has two tools and uses only the agent endpoints. It cannot create keys, read the audit log or change a policy.
+- **No admin operations.** The program has two tools and uses only the agent endpoints (`GET /v1/credentials` and `POST /v1/forward`). It cannot create keys, read the audit log or change a policy.
 - **Limits.** The bridge adds no new secret exposure, but it does not change what Ferrowarden can and cannot do: the [security model](security.md) lists the limits of scrubbing and host binding. A target that is allowed to receive a credential has it.
 
 ## Using it with an agent harness

@@ -46,7 +46,9 @@ fn detail_offers_ready_placeholders_that_parse_back() {
     {
         let occ = scan(p).unwrap();
         assert_eq!(occ.len(), 1);
-        assert_eq!(occ[0].placeholder.item, "Proxmox (prod)");
+        assert!(
+            matches!(&occ[0].token, crate::proxy::placeholder::Token::Vault(p) if p.item == "Proxmox (prod)")
+        );
     }
 }
 

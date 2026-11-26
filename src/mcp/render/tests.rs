@@ -45,11 +45,43 @@ fn big_body_is_truncated_in_text_only() {
         headers: BTreeMap::new(),
         body: body.clone(),
         body_encoding: "utf8".into(),
+        captures: Vec::new(),
     };
     let text = r.text();
     assert!(text.len() < MAX_TEXT_BYTES + 300);
     assert!(text.contains("[truncated"));
     assert_eq!(r.body, body);
+}
+
+#[test]
+fn captures_are_listed_in_the_text_without_values() {
+    let value = json!({
+        "status": 200, "headers": {}, "body": "{\"jwt\":\"[CAPTURED:portainer]\"}",
+        "body_encoding": "utf8",
+        "captures": [
+            {"as": "portainer", "status": "captured", "expires_at": "2026-01-01T12:30:00Z"},
+            {"as": "csrf", "status": "not_found"},
+            {"status": "captured"}
+        ]
+    });
+    let r = ForwardedResponse::from_value(&value).unwrap();
+    assert_eq!(
+        r.captures,
+        [
+            "portainer: captured (expires 2026-01-01T12:30:00Z)",
+            "csrf: not_found"
+        ]
+    );
+    let text = r.text();
+    assert!(text.contains("[CAPTURED:portainer]"));
+    assert!(text.contains("- portainer: captured (expires 2026-01-01T12:30:00Z)"));
+    assert!(text.contains("- csrf: not_found"));
+    // Without captures the text has no such section.
+    let plain = json!({"status": 200, "headers": {}, "body": "x", "body_encoding": "utf8"});
+    assert!(!ForwardedResponse::from_value(&plain)
+        .unwrap()
+        .text()
+        .contains("Captured sessions"));
 }
 
 #[test]

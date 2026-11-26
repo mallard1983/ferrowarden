@@ -165,7 +165,9 @@ paths:
 
         A `200` means Ferrowarden forwarded the request and got an answer. The target's own status, including a `404` or `500` from the target, is in the `status` field of the body. Redirects are not followed.
 
-        Checks run before anything is sent, and a failure stops the request with no outbound call. In order: the body is well formed and every placeholder parses (`400`, `422`); the key's method policy allows the method (`403`); the key's credential scope covers every placeholder (`403`, the same answer whether or not the credential exists); every placeholder names one usable vault item (`422`, `409`, `403` for a re-prompt item); each credential is bound to the target host (`403`); the target passes the outbound policy (`403`).
+        Checks run before anything is sent, and a failure stops the request with no outbound call. In order: the body is well formed, every `capture` entry is valid and every placeholder parses (`400`, `422`); the key's method policy allows the method (`403`); the key's credential scope covers every `{{vault:...}}` placeholder (`403`, the same answer whether or not the credential exists); every vault placeholder names one usable vault item (`422`, `409`, `403` for a re-prompt item); each credential is bound to the target host (`403`); the target passes the outbound policy (`403`); every `{{session:NAME}}` names a live session of this key that was captured from the target's origin (`422` unknown or expired, `403` another origin).
+
+        With `capture`, the login token in the response never reaches the agent. See `CaptureSpec` and `ProxyResponse.captures`, and `docs/sessions.md`.
 
         A target that times out, refuses the connection or returns more than the operator's response limit is reported as `502`. A request body larger than 2 MiB is reported as `400`.
       security:
@@ -195,6 +197,26 @@ paths:
                       X-Api-Key: "{{vault:'Example Service (prod)':field:'api secret'}}"
                     body:
                       name: example
+              login:
+                summary: Log in and keep the token inside Ferrowarden
+                value:
+                  request:
+                    method: POST
+                    url: https://portainer.example.com/api/auth
+                    body:
+                      username: "{{vault:portainer:username}}"
+                      password: "{{vault:portainer}}"
+                  capture:
+                    - from: "json:/jwt"
+                      as: portainer
+              useSession:
+                summary: Use the captured session
+                value:
+                  request:
+                    method: GET
+                    url: https://portainer.example.com/api/endpoints
+                    headers:
+                      Authorization: "Bearer {{session:portainer}}"
       responses:
         "200":
           description: The target answered. See `status` for the target's status code.
@@ -214,13 +236,25 @@ paths:
                       content-type: application/json
                     body: '{"items":[]}'
                     body_encoding: utf8
+                login:
+                  summary: A login whose token was captured
+                  value:
+                    status: 200
+                    headers:
+                      content-type: application/json
+                    body: '{"jwt":"[CAPTURED:portainer]"}'
+                    body_encoding: utf8
+                    captures:
+                      - as: portainer
+                        status: captured
+                        expires_at: "2026-01-01T12:30:00Z"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           description: |
-            The request was refused on policy grounds. The message says which check: the method is not allowed for this key, the credential is not available to this key, the credential is not bound to the target host, the item has master password re-prompt enabled, or the target is not allowed by the outbound policy.
+            The request was refused on policy grounds. The message says which check: the method is not allowed for this key, the credential is not available to this key, the credential is not bound to the target host, the item has master password re-prompt enabled, the target is not allowed by the outbound policy, or a `{{session:NAME}}` was captured from another origin than the target (`session_host_not_allowed`).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -251,7 +285,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "422":
-          description: A placeholder is malformed, or names a credential or field the vault does not have.
+          description: |
+            A placeholder is malformed, or names a credential or field the vault does not have, or a `{{session:NAME}}` names a session that is not there (`unknown_session`, which is the same answer whether the session is absent, expired or captured by another agent key).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -276,6 +311,77 @@ paths:
                 $ref: "#/components/schemas/Error"
         "503":
           $ref: "#/components/responses/VaultLocked"
+  /v1/sessions:
+    get:
+      operationId: listSessions
+      tags: [agent]
+      summary: List this key's captured sessions
+      description: |
+        The live sessions the calling key captured with `capture` (see `forwardRequest`): name, the host each is bound to and when it expires. Never a value. Sessions of other keys are not listed, and expired ones are not either.
+      security:
+        - agentKey: []
+      responses:
+        "200":
+          description: An array of sessions, sorted by name. Empty when the key has none.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionInfo"
+              examples:
+                one:
+                  value:
+                    - name: portainer
+                      host: portainer.example.com
+                      expires_at: "2026-01-01T12:30:00Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/sessions/{name}:
+    delete:
+      operationId: deleteSession
+      tags: [agent]
+      summary: Forget a captured session
+      description: |
+        Removes one of the calling key's captured sessions. A name that is absent, expired or belongs to another key is the same `422` (`unknown_session`).
+      security:
+        - agentKey: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: The session name.
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9_.-]{1,64}$"
+      responses:
+        "204":
+          description: The session was removed. The body is empty.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: The key has no live session of that name (`unknown_session`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                unknown:
+                  value:
+                    error: Session portainer is unknown or expired; log in again
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /v1/unlock:
     post:
       operationId: unlockVault
@@ -909,6 +1015,72 @@ components:
       properties:
         request:
           $ref: "#/components/schemas/ProxyRequest"
+        capture:
+          type: array
+          minItems: 1
+          maxItems: 8
+          description: |
+            Values of the response to keep inside Ferrowarden instead of returning them. Leave the member out for no capture; `null` and `[]` are rejected. Everything here is checked before the request is sent, and a capture that cannot be made never fails the request: the login already happened at the target, so the agent still gets its (scrubbed) response, with the outcome of each entry in `captures`.
+          items:
+            $ref: "#/components/schemas/CaptureSpec"
+    CaptureSpec:
+      type: object
+      additionalProperties: false
+      required: [from, as]
+      description: |
+        One value to capture from the response, and the name to keep it under. It is read from the raw response, on any status code, before scrubbing, and is stored only if it is a string of 4 to 16384 bytes. A value found at the source is removed from the response the agent sees, whether or not it was stored: `[CAPTURED:NAME]` when stored, `[REDACTED]` when it was found but could not be (`too_long`, `expired`, `limit_reached`). A value shorter than 4 characters is not stored and cannot be hidden.
+
+        The session expires at the earliest of `ttl_secs`, the token's own `exp` (when the value is a JWT) and the cookie's `Max-Age` or `Expires`. These can only shorten the lifetime. A session is kept in memory for the agent key that captured it, bound to the origin (scheme, host and port) of the login request, and is cleared when the key is revoked or its policy changes, when the vault locks, and when Ferrowarden restarts. Capturing under a name the key already has replaces that session.
+      properties:
+        from:
+          type: string
+          description: |
+            Where the value is:
+
+            | Source | Value |
+            |---|---|
+            | `json:/pointer` | the string at an RFC 6901 pointer in the JSON response body (a body that is not JSON, or a pointer to something that is not a string, is `not_a_string`) |
+            | `header:Name` | the value of a response header, name in any letter case; it must occur exactly once |
+            | `cookie:name` | the value of the cookie `name` in the `Set-Cookie` headers; it must occur exactly once, and only the value is taken, not the attributes |
+
+            May not contain `{{`.
+        as:
+          type: string
+          pattern: "^[A-Za-z0-9_.-]{1,64}$"
+          description: The session name, used as `{{session:NAME}}`. Used once per request.
+        ttl_secs:
+          type: integer
+          minimum: 1
+          description: Lifetime in seconds, at most the operator's `sessions.max_ttl_secs` (default 86400). Default is the operator's `sessions.default_ttl_secs` (1800).
+    CaptureResult:
+      type: object
+      required: [as, status]
+      description: What became of one `capture` entry. Never holds a value.
+      properties:
+        as:
+          type: string
+        status:
+          type: string
+          enum: [captured, not_found, not_a_string, ambiguous, too_short, too_long, expired, limit_reached]
+          description: |
+            `captured`: stored. `not_found`: nothing at the source. `not_a_string`: the JSON pointer points to something that is not a string, or the body is not JSON. `ambiguous`: more than one header or cookie of that name (or a JSON body that repeats a key). `too_short`: shorter than 4 characters. `too_long`: longer than 16384 bytes. `expired`: already past its own expiry. `limit_reached`: the key already holds the most live sessions the operator allows (`sessions.max_per_key`).
+        expires_at:
+          type: string
+          format: date-time
+          description: When the session expires. Only when `status` is `captured`.
+    SessionInfo:
+      type: object
+      required: [name, host, expires_at]
+      description: A live captured session of the calling key. Never its value.
+      properties:
+        name:
+          type: string
+        host:
+          type: string
+          description: The host the session is bound to, with `:port` when the port is not the default for the scheme.
+        expires_at:
+          type: string
+          format: date-time
     ProxyRequest:
       type: object
       additionalProperties: false
@@ -916,7 +1088,7 @@ components:
       description: |
         The request Ferrowarden should make for the agent, with placeholders where credentials belong.
 
-        **Placeholder grammar.** A placeholder is `{{vault:NAME}}` or `{{vault:NAME:SELECTOR}}`:
+        **Placeholder grammar.** A placeholder is `{{vault:NAME}}` or `{{vault:NAME:SELECTOR}}`, or `{{session:NAME}}` for a captured session (below):
 
         | Placeholder | Substitutes |
         |---|---|
@@ -931,7 +1103,9 @@ components:
 
         **Where placeholders may appear.** In the URL's path, query string or user info (not its scheme, host or port); in any header value; and in the body, inside string values and object keys of a JSON body or anywhere in a string body. A placeholder that would change the URL's scheme, host or port is rejected with `400`. The same placeholder may appear several times, and different placeholders may be mixed in one request.
 
-        **Malformed placeholders.** Anything that starts with `{{vault:` and does not parse is rejected with `422`, and the request is not forwarded. A placeholder that parses but names a credential or field that does not exist is also `422`.
+        **Sessions.** `{{session:NAME}}` is replaced with a value captured earlier from a login response (`capture` in `ForwardPayload`). `NAME` is a plain word of 1 to 64 letters, digits, `_`, `-` and `.`, without quotes. It works in the same places as a vault placeholder, and only for requests to the origin (scheme, host and port) the session was captured from, by the agent key that captured it. A name that is not there, has expired or belongs to another key is `422`; another origin is `403`. A session placeholder is not matched against the key's credential patterns.
+
+        **Malformed placeholders.** Anything that starts with `{{vault:` or `{{session:` and does not parse is rejected with `422`, and the request is not forwarded. A placeholder that parses but names a credential or field that does not exist is also `422`.
 
         **Policy.** The agent key's policy decides which credentials a placeholder may name and which methods may be used. Each credential can be sent only to the hosts it is bound to in the vault.
       properties:
@@ -956,7 +1130,7 @@ components:
       description: |
         The target's response, after scrubbing.
 
-        **Scrubbing.** Ferrowarden replaces the credential values it substituted into this request with `[REDACTED]`, wherever they appear in the response body or in header values, in their raw, JSON-escaped, URL-encoded and four common base64 forms. Usernames, TOTP codes and boolean fields are not matched by value, and neither is a value shorter than 4 characters. Ferrowarden also redacts common credential shapes: bearer tokens, JSON fields named like `api_key`, `secret` or `password`, PEM private key blocks, passwords in `http(s)://user:pass@` URLs and Proxmox API tokens. Scrubbing is best effort. A target that transforms a value in some other way before echoing it back is not covered, and the patterns can redact text that is not a credential.
+        **Scrubbing.** Ferrowarden replaces the credential values it substituted into this request with `[REDACTED]`, wherever they appear in the response body or in header values, in their raw, JSON-escaped, URL-encoded and four common base64 forms. Every captured session value of the calling key gets the same treatment whether or not the request used it, and is replaced with `[CAPTURED:NAME]`. Usernames, TOTP codes and boolean fields are not matched by value, and neither is a value shorter than 4 characters. Ferrowarden also redacts common credential shapes: bearer tokens, JSON fields named like `api_key`, `secret` or `password`, PEM private key blocks, passwords in `http(s)://user:pass@` URLs and Proxmox API tokens. Scrubbing is best effort. A target that transforms a value in some other way before echoing it back is not covered, and the patterns can redact text that is not a credential.
 
         Hop-by-hop headers and `content-length` are left out of `headers`, and so are header values that are not valid text. A response larger than the operator's limit (`max_response_bytes`, 10 MiB by default) is refused with `502` instead.
       properties:
@@ -977,6 +1151,11 @@ components:
           type: string
           enum: [utf8, base64]
           description: "`utf8` when `body` is the response text. `base64` when the response was not valid UTF-8 and `body` is its base64 encoding (scrubbed before encoding)."
+        captures:
+          type: array
+          description: What became of each `capture` entry of the request, in request order. Left out when the request had none.
+          items:
+            $ref: "#/components/schemas/CaptureResult"
     CredentialPatterns:
       type: array
       maxItems: 256
@@ -1259,6 +1438,10 @@ components:
         - insecure_transport
         - missing_metrics_token
         - invalid_metrics_token
+        - unknown_session
+        - session_host_not_allowed
+        - sessions_disabled
+        - capture_failed
     SecurityEvent:
       type: object
       description: |
@@ -1312,6 +1495,10 @@ components:
                 - ui_two_factor_email_sent
                 - notify_test
                 - metrics_auth
+                - session_capture
+                - session_use
+                - session_expire
+                - session_delete
             category:
               type: array
               items:
@@ -1401,6 +1588,11 @@ components:
             credentials:
               type: array
               description: Labels of the placeholders the request used. Not values.
+              items:
+                type: string
+            sessions:
+              type: array
+              description: Names of the captured sessions the request used (`{{session:NAME}}`). Not values.
               items:
                 type: string
             details:

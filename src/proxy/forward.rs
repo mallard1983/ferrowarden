@@ -1,5 +1,6 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use reqwest::header::HeaderMap;
 use reqwest::{Client, Method, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,7 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::error::{FerroError, FerroResult};
 use crate::net::{BlockedTarget, TargetPolicy};
-use crate::proxy::scrub::{scrub_bytes, scrub_response};
+use crate::proxy::scrub::{scrub_bytes_with, scrub_json_body, scrub_response_with, Secret};
 
 /// A header map whose values are zeroed on drop.
 /// Zeroizing<HashMap<_,_>> is not possible because HashMap doesn't implement
@@ -71,6 +72,10 @@ pub struct ProxyResponse {
     /// metric. Never sent to the agent.
     #[serde(skip)]
     pub upstream_bytes: usize,
+    /// What became of each `capture` entry of the request, in request order.
+    /// Left out when the request had none. Never holds a value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captures: Option<Vec<crate::sessions::CaptureResult>>,
 }
 
 /// Limits applied to one forwarded request.
@@ -79,23 +84,28 @@ pub struct ForwardLimits {
     pub max_response_bytes: usize,
 }
 
-/// Forward a fully-substituted request to its target and return a scrubbed response.
+/// What the target answered, before anything is removed from it. Held only
+/// inside Ferrowarden: capture reads it, then [`render_response`] scrubs it.
+/// The body is wiped on drop.
+pub struct UpstreamResponse {
+    pub status: u16,
+    pub headers: HeaderMap,
+    pub body: Zeroizing<Vec<u8>>,
+}
+
+/// Send a fully-substituted request to its target and read the whole answer.
 ///
 /// `target` is the parsed URL with credentials already substituted; it has
 /// been checked against the target policy for scheme and IP-literal hosts.
 /// Name-based hosts are checked at DNS resolution time by the policy resolver.
-///
-/// `secrets` are the credential values substituted into this request; every
-/// encoding of them is scrubbed from the response headers, body and any error.
-pub async fn forward_request(
+pub async fn send_request(
     method: &str,
     target: &Url,
     substituted_headers: ZeroizingHeaders,
     substituted_body: Option<Zeroizing<String>>,
-    secrets: &[&str],
     policy: &Arc<TargetPolicy>,
     limits: &ForwardLimits,
-) -> FerroResult<ProxyResponse> {
+) -> FerroResult<UpstreamResponse> {
     let method = Method::from_bytes(method.to_uppercase().as_bytes())
         .map_err(|_| FerroError::InvalidTargetUrl(format!("Invalid HTTP method: {}", method)))?;
 
@@ -142,10 +152,33 @@ pub async fn forward_request(
         }
     }
 
+    let headers = resp.headers().clone();
+
+    // Read the body in chunks so an oversized response is rejected without
+    // being buffered in full.
+    let mut raw: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
+    while let Some(chunk) = resp.chunk().await.map_err(|e| map_send_error(&e))? {
+        if raw.len() + chunk.len() > limits.max_response_bytes {
+            return Err(FerroError::ResponseTooLarge(limits.max_response_bytes));
+        }
+        raw.extend_from_slice(&chunk);
+    }
+
+    Ok(UpstreamResponse {
+        status,
+        headers,
+        body: raw,
+    })
+}
+
+/// Turn the target's answer into the response the agent gets: hop-by-hop
+/// headers dropped, and `secrets` removed (every encoding of each, replaced
+/// with the text it carries) from header values, the body and any error.
+pub fn render_response(up: &UpstreamResponse, secrets: &[Secret<'_>]) -> ProxyResponse {
     // Collect response headers — filter out transfer-encoding and similar
     // hop-by-hop headers that shouldn't be proxied — and scrub every value.
-    let resp_headers: HashMap<String, String> = resp
-        .headers()
+    let resp_headers: HashMap<String, String> = up
+        .headers
         .iter()
         .filter(|(name, _)| {
             !matches!(
@@ -165,32 +198,26 @@ pub async fn forward_request(
             value
                 .to_str()
                 .ok()
-                .map(|v| (name.to_string(), scrub_response(v, secrets)))
+                .map(|v| (name.to_string(), scrub_response_with(v, secrets)))
         })
         .collect();
 
-    // Read the body in chunks so an oversized response is rejected without
-    // being buffered in full.
-    let mut raw: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
-    while let Some(chunk) = resp.chunk().await.map_err(|e| map_send_error(&e))? {
-        if raw.len() + chunk.len() > limits.max_response_bytes {
-            return Err(FerroError::ResponseTooLarge(limits.max_response_bytes));
-        }
-        raw.extend_from_slice(&chunk);
-    }
-
-    let (body, body_encoding) = match std::str::from_utf8(&raw) {
-        Ok(text) => (scrub_response(text, secrets), "utf8"),
-        Err(_) => (STANDARD.encode(scrub_bytes(&raw, secrets)), "base64"),
+    let (body, body_encoding) = match std::str::from_utf8(&up.body) {
+        Ok(text) => (scrub_json_body(text, secrets), "utf8"),
+        Err(_) => (
+            STANDARD.encode(scrub_bytes_with(&up.body, secrets)),
+            "base64",
+        ),
     };
 
-    Ok(ProxyResponse {
-        status,
+    ProxyResponse {
+        status: up.status,
         headers: resp_headers,
         body,
         body_encoding,
-        upstream_bytes: raw.len(),
-    })
+        upstream_bytes: up.body.len(),
+        captures: None,
+    }
 }
 
 /// Map a reqwest error to a FerroError without ever including the URL: the

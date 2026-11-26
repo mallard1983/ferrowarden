@@ -77,6 +77,18 @@ pub enum FerroError {
     #[error("Credential {0} has master password re-prompt enabled; it cannot be used by agents until approvals are supported")]
     RepromptRequired(String),
 
+    // Captured-session errors (docs/sessions.md). `UnknownSession` is the one
+    // answer for a name that is absent, expired or another key's, so it cannot
+    // be used to find out what other keys hold.
+    #[error("Session {0} is unknown or expired; log in again")]
+    UnknownSession(String),
+
+    #[error("Session {name} may not be sent to {host}: it was captured from another origin")]
+    SessionHostNotAllowed { name: String, host: String },
+
+    #[error("Captured sessions are disabled (sessions.enabled = false)")]
+    SessionsDisabled,
+
     // Config errors
     #[error("Configuration error: {0}")]
     Config(String),
@@ -125,9 +137,11 @@ impl FerroError {
             }
             FerroError::ForwardFailed(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             FerroError::InvalidTargetUrl(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            FerroError::UnknownPlaceholder(_) | FerroError::MalformedPlaceholder(_) => {
-                (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
-            }
+            FerroError::UnknownPlaceholder(_)
+            | FerroError::MalformedPlaceholder(_)
+            | FerroError::UnknownSession(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
+            FerroError::SessionHostNotAllowed { .. } => (StatusCode::FORBIDDEN, self.to_string()),
+            FerroError::SessionsDisabled => (StatusCode::BAD_REQUEST, self.to_string()),
             FerroError::AmbiguousField { .. } => (StatusCode::CONFLICT, self.to_string()),
             FerroError::RepromptRequired(_) => (StatusCode::FORBIDDEN, self.to_string()),
             FerroError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),

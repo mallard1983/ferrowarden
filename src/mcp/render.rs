@@ -120,6 +120,9 @@ pub struct ForwardedResponse {
     pub headers: BTreeMap<String, String>,
     pub body: String,
     pub body_encoding: String,
+    /// What each `capture` entry of the request did, as lines of text:
+    /// `NAME: captured (expires ...)` or `NAME: not_found`.
+    pub captures: Vec<String>,
 }
 
 impl ForwardedResponse {
@@ -139,11 +142,27 @@ impl ForwardedResponse {
             .collect::<Option<BTreeMap<_, _>>>()?;
         let body = obj.get("body")?.as_str()?.to_string();
         let body_encoding = obj.get("body_encoding")?.as_str()?.to_string();
+        // Optional; an entry that does not have the documented shape is left out.
+        let captures = obj
+            .get("captures")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                let name = c.get("as")?.as_str()?;
+                let status = c.get("status")?.as_str()?;
+                Some(match c.get("expires_at").and_then(Value::as_str) {
+                    Some(at) => format!("{name}: {status} (expires {at})"),
+                    None => format!("{name}: {status}"),
+                })
+            })
+            .collect();
         Some(Self {
             status,
             headers,
             body,
             body_encoding,
+            captures,
         })
     }
 
@@ -173,6 +192,12 @@ impl ForwardedResponse {
             out.push_str("[empty body]");
         } else {
             out.push_str(&self.body);
+        }
+        if !self.captures.is_empty() {
+            out.push_str("\n\nCaptured sessions (use them as {{session:NAME}}):");
+            for line in &self.captures {
+                let _ = write!(out, "\n- {line}");
+            }
         }
         truncate_text(out, MAX_TEXT_BYTES)
     }

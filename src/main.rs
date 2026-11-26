@@ -11,6 +11,7 @@ mod notify;
 mod pki;
 mod policy;
 mod proxy;
+mod sessions;
 mod state;
 mod ui;
 mod vault;
@@ -74,6 +75,7 @@ fn startup_event(
             "ui_insecure_http",
             config.ui.enabled() && config.ui.insecure_http,
         )
+        .detail("sessions_enabled", config.sessions.enabled)
         .detail("metrics_enabled", config.metrics.enabled())
         .detail("metrics_auth", config.metrics.auth().as_str())
         .detail(
@@ -282,6 +284,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Periodic sync/refresh; also re-unlocks in file mode after the vault locks.
     spawn_refresher(state.clone());
+
+    // Captured sessions: remove the expired ones every minute.
+    sessions::spawn_sweeper(state.clone());
 
     if config.enforce_credential_hosts {
         tracing::info!("Credential host binding enforced: credentials are only sent to hosts in their vault item URIs");

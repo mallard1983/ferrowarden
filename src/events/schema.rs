@@ -71,12 +71,16 @@ pub enum Action {
     UiTwoFactorEmailSent,
     NotifyTest,
     MetricsAuth,
+    SessionCapture,
+    SessionUse,
+    SessionExpire,
+    SessionDelete,
 }
 
 impl Action {
     /// Every action, in the order the audit view lists them. Keep in step
     /// with the enum: the `all_actions_are_listed` test counts the variants.
-    pub const ALL: [Action; 26] = [
+    pub const ALL: [Action; 30] = [
         Action::Forward,
         Action::CredentialsList,
         Action::AgentAuth,
@@ -103,6 +107,10 @@ impl Action {
         Action::UiTwoFactorEmailSent,
         Action::NotifyTest,
         Action::MetricsAuth,
+        Action::SessionCapture,
+        Action::SessionUse,
+        Action::SessionExpire,
+        Action::SessionDelete,
     ];
 
     /// The action whose wire name (`as_str`) is `name`.
@@ -138,6 +146,10 @@ impl Action {
             Action::UiTwoFactorEmailSent => "ui_two_factor_email_sent",
             Action::NotifyTest => "notify_test",
             Action::MetricsAuth => "metrics_auth",
+            Action::SessionCapture => "session_capture",
+            Action::SessionUse => "session_use",
+            Action::SessionExpire => "session_expire",
+            Action::SessionDelete => "session_delete",
         }
     }
 
@@ -157,7 +169,11 @@ impl Action {
             | Action::UiLogin
             | Action::UiLogout
             | Action::UiSessionExpired
-            | Action::UiTwoFactorEmailSent => "authentication",
+            | Action::UiTwoFactorEmailSent
+            | Action::SessionCapture
+            | Action::SessionUse
+            | Action::SessionExpire
+            | Action::SessionDelete => "authentication",
             Action::RateLimited => "network",
             Action::KeyCreate
             | Action::KeyRevoke
@@ -213,6 +229,10 @@ impl Action {
             Action::UiSessionExpired => "UI session",
             Action::UiTwoFactorEmailSent => "UI email code",
             Action::NotifyTest => "test notification",
+            Action::SessionCapture => "session capture",
+            Action::SessionUse => "session use",
+            Action::SessionExpire => "session expiry",
+            Action::SessionDelete => "session deletion",
         }
     }
 
@@ -245,6 +265,10 @@ impl Action {
             Action::UiSessionExpired => "UI session expired",
             Action::UiTwoFactorEmailSent => "UI email code requested",
             Action::NotifyTest => "test notification sent",
+            Action::SessionCapture => "session captured",
+            Action::SessionUse => "session used",
+            Action::SessionExpire => "session expired",
+            Action::SessionDelete => "session deleted",
         }
     }
 }
@@ -311,12 +335,16 @@ pub enum Reason {
     InsecureTransport,
     MissingMetricsToken,
     InvalidMetricsToken,
+    UnknownSession,
+    SessionHostNotAllowed,
+    SessionsDisabled,
+    CaptureFailed,
 }
 
 impl Reason {
     /// Every reason, in declaration order (tests and the notifier tables).
     #[cfg(test)]
-    pub const ALL: [Reason; 32] = [
+    pub const ALL: [Reason; 36] = [
         Reason::MissingKey,
         Reason::InvalidKey,
         Reason::MissingAdminKey,
@@ -349,6 +377,10 @@ impl Reason {
         Reason::InsecureTransport,
         Reason::MissingMetricsToken,
         Reason::InvalidMetricsToken,
+        Reason::UnknownSession,
+        Reason::SessionHostNotAllowed,
+        Reason::SessionsDisabled,
+        Reason::CaptureFailed,
     ];
 
     /// The wire code (`event.reason`), the same text serde writes.
@@ -386,6 +418,10 @@ impl Reason {
             Reason::InsecureTransport => "insecure_transport",
             Reason::MissingMetricsToken => "missing_metrics_token",
             Reason::InvalidMetricsToken => "invalid_metrics_token",
+            Reason::UnknownSession => "unknown_session",
+            Reason::SessionHostNotAllowed => "session_host_not_allowed",
+            Reason::SessionsDisabled => "sessions_disabled",
+            Reason::CaptureFailed => "capture_failed",
         }
     }
 
@@ -413,6 +449,8 @@ impl Reason {
                 | Reason::InsecureTransport
                 | Reason::MissingMetricsToken
                 | Reason::InvalidMetricsToken
+                | Reason::SessionHostNotAllowed
+                | Reason::SessionsDisabled
         )
     }
 
@@ -451,6 +489,10 @@ impl Reason {
             Reason::InsecureTransport => "the connection is not HTTPS",
             Reason::MissingMetricsToken => "no metrics token presented",
             Reason::InvalidMetricsToken => "invalid metrics token",
+            Reason::UnknownSession => "unknown or expired session",
+            Reason::SessionHostNotAllowed => "session not bound to target origin",
+            Reason::SessionsDisabled => "captured sessions are disabled",
+            Reason::CaptureFailed => "no value could be captured",
         }
     }
 }
@@ -479,6 +521,9 @@ impl From<&FerroError> for Reason {
             FerroError::MalformedPlaceholder(_) => Reason::MalformedPlaceholder,
             FerroError::AmbiguousField { .. } => Reason::AmbiguousField,
             FerroError::RepromptRequired(_) => Reason::RepromptRequired,
+            FerroError::UnknownSession(_) => Reason::UnknownSession,
+            FerroError::SessionHostNotAllowed { .. } => Reason::SessionHostNotAllowed,
+            FerroError::SessionsDisabled => Reason::SessionsDisabled,
             FerroError::Config(_) => Reason::InternalError,
             FerroError::UnlockEndpointDisabled => Reason::InvalidRequest,
             FerroError::InvalidRequest(_) => Reason::InvalidRequest,
@@ -569,6 +614,10 @@ pub struct FerrowardenInfo {
     pub key: Option<KeyInfo>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<String>,
+    /// Names of the captured sessions a request used (`{{session:NAME}}`).
+    /// Names only, never values.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<Map<String, Value>>,
 }
@@ -634,6 +683,7 @@ impl SecurityEvent {
                 request_id: None,
                 key: None,
                 credentials: Vec::new(),
+                sessions: Vec::new(),
                 details: None,
             },
             items: Vec::new(),
@@ -674,8 +724,10 @@ impl SecurityEvent {
             Action::UiLogout | Action::UiSessionExpired => vec!["end"],
             Action::UiTwoFactorEmailSent => vec!["info"],
             Action::RateLimited | Action::RequestRejected => vec!["denied"],
-            Action::KeyCreate => vec!["creation"],
-            Action::KeyRevoke => vec!["deletion"],
+            Action::KeyCreate | Action::SessionCapture => vec!["creation"],
+            Action::KeyRevoke | Action::SessionDelete => vec!["deletion"],
+            Action::SessionUse => vec!["access"],
+            Action::SessionExpire => vec!["end"],
             Action::VaultLock => vec!["change"],
             Action::VaultSync | Action::EventsDropped | Action::NotifyTest => vec!["info"],
             Action::Startup => vec!["start"],
@@ -734,6 +786,16 @@ impl SecurityEvent {
         self
     }
 
+    /// The agent key by id and name, for events that happen without a request
+    /// (a session that expires, or is cleared because its key was revoked).
+    pub fn key_named(mut self, id: &str, name: &str) -> Self {
+        self.ferrowarden.key = Some(KeyInfo {
+            id: truncate(id, MAX_FIELD_CHARS),
+            name: truncate(name, MAX_FIELD_CHARS),
+        });
+        self
+    }
+
     pub fn method(mut self, method: &str) -> Self {
         self.http.get_or_insert_with(Http::default).request = Some(HttpRequest {
             method: truncate(method, MAX_FIELD_CHARS),
@@ -785,6 +847,21 @@ impl SecurityEvent {
             .into_iter()
             .take(MAX_CREDENTIAL_LABELS)
             .map(|l| truncate(l.as_ref(), MAX_FIELD_CHARS))
+            .collect();
+        self
+    }
+
+    /// The captured-session names a request used (never values). Capped in
+    /// count and length like the credential labels.
+    pub fn sessions<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.ferrowarden.sessions = names
+            .into_iter()
+            .take(MAX_CREDENTIAL_LABELS)
+            .map(|n| truncate(n.as_ref(), MAX_FIELD_CHARS))
             .collect();
         self
     }

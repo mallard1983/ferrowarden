@@ -46,6 +46,7 @@ fn snapshot() -> Snapshot {
             dropped: 1,
         },
         ui_sessions: 2,
+        sessions_active: 3,
     }
 }
 
@@ -159,6 +160,9 @@ fn every_family_is_registered_with_the_right_type() {
         ("ferrowarden_metrics_events_dropped", "counter"),
         ("ferrowarden_notifications", "counter"),
         ("ferrowarden_ui_sessions", "gauge"),
+        ("ferrowarden_session_captures", "counter"),
+        ("ferrowarden_session_uses", "counter"),
+        ("ferrowarden_sessions_active", "gauge"),
         ("ferrowarden_forward_credential_uses", "counter"),
     ]);
     let got = types(&text);

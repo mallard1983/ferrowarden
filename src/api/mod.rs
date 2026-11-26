@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod captured_sessions;
 pub mod credentials;
 pub mod forward;
 pub mod health;
@@ -40,6 +41,8 @@ enum Op {
     OpenApi,
     ListCredentials,
     Forward,
+    ListSessions,
+    DeleteSession,
     Unlock,
     ListKeys,
     CreateKey,
@@ -67,11 +70,13 @@ pub struct Route {
 /// router from this table, and a unit test compares it with `docs/openapi.yaml`,
 /// so a route cannot be added without being described there.
 #[rustfmt::skip]
-pub const ROUTES: [Route; 13] = [
+pub const ROUTES: [Route; 15] = [
     Route { method: "GET", path: "/health", group: Group::Public, op: Op::Health },
     Route { method: "GET", path: "/v1/openapi.json", group: Group::Agent, op: Op::OpenApi },
     Route { method: "GET", path: "/v1/credentials", group: Group::Agent, op: Op::ListCredentials },
     Route { method: "POST", path: "/v1/forward", group: Group::Agent, op: Op::Forward },
+    Route { method: "GET", path: "/v1/sessions", group: Group::Agent, op: Op::ListSessions },
+    Route { method: "DELETE", path: "/v1/sessions/{name}", group: Group::Agent, op: Op::DeleteSession },
     Route { method: "POST", path: "/v1/unlock", group: Group::Admin, op: Op::Unlock },
     Route { method: "GET", path: "/v1/admin/keys", group: Group::Admin, op: Op::ListKeys },
     Route { method: "POST", path: "/v1/admin/keys", group: Group::Admin, op: Op::CreateKey },
@@ -102,6 +107,8 @@ fn handler(route: &Route) -> MethodRouter<Arc<AppState>> {
         Op::OpenApi => on(f, openapi::get_openapi),
         Op::ListCredentials => on(f, credentials::list_credentials),
         Op::Forward => on(f, forward::forward),
+        Op::ListSessions => on(f, captured_sessions::list_sessions),
+        Op::DeleteSession => on(f, captured_sessions::delete_session),
         Op::Unlock => on(f, unlock::unlock),
         Op::ListKeys => on(f, admin::list_keys),
         Op::CreateKey => on(f, admin::create_key),

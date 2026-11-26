@@ -3779,7 +3779,9 @@ async fn test_openapi_endpoint_serves_the_right_view_to_each_key() {
             "/health",
             "/v1/credentials",
             "/v1/forward",
-            "/v1/openapi.json"
+            "/v1/openapi.json",
+            "/v1/sessions",
+            "/v1/sessions/{name}"
         ]
     );
     let text = serde_json::to_string(&agent).unwrap().to_lowercase();
@@ -4751,6 +4753,864 @@ async fn test_zz_metrics_scrape_after_the_suite_holds_no_secrets() {
         "and other events"
     );
     assert_scrape_is_clean(&env, &m, &scrape);
+    // Every session token the mock issued during the suite: in neither the
+    // scrape nor the audit log.
+    let issued = env.issued_tokens().await;
+    assert!(!issued.is_empty(), "the suite logged in to the mock");
+    assert_hidden("the final scrape", &scrape.text, &issued);
+    assert_hidden("the final audit log", &env.all_events_text().await, &issued);
+}
+
+// ── Captured sessions ─────────────────────────────────────────────────────────
+//
+// docs/sessions.md. The mock API plays two services that log in and hand out
+// tokens (a Portainer-like JWT, a Proxmox-like ticket with a CSRF token and a
+// cookie), and two careless targets that reflect what they are sent. The tests
+// prove that the token Ferrowarden captured is in no response, event, metric
+// or log the agent side can see, and that `{{session:NAME}}` delivers it
+// exactly, to the origin it came from and to nowhere else. The tokens the mock
+// issued are read back from its `/__issued__` endpoint (never printed) and
+// scanned for by `scripts/check-no-secrets.sh` in the container logs, the
+// event file and a metrics scrape.
+
+/// Every form of a token a target might reflect: raw, URL-encoded and the four
+/// base64 alphabets.
+fn token_forms(token: &str) -> Vec<String> {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    use base64::Engine;
+    vec![
+        token.to_string(),
+        urlencoding::encode(token).into_owned(),
+        STANDARD.encode(token),
+        STANDARD_NO_PAD.encode(token),
+        URL_SAFE.encode(token),
+        URL_SAFE_NO_PAD.encode(token),
+    ]
+}
+
+/// Assert that none of `tokens`, in any form, appears in `text`. The message
+/// names what was searched, never a value.
+fn assert_hidden(what: &str, text: &str, tokens: &[String]) {
+    for (i, token) in tokens.iter().enumerate() {
+        for (j, form) in token_forms(token).iter().enumerate() {
+            assert!(
+                !text.contains(form.as_str()),
+                "{what} contains token #{i} (form #{j}: raw, URL, then four base64 alphabets)"
+            );
+        }
+    }
+}
+
+impl TestEnv {
+    /// `POST /v1/forward` with a whole payload (`request` and `capture`).
+    async fn forward_payload_as(&self, token: &str, payload: Value) -> reqwest::Response {
+        self.client
+            .post(format!("{}/v1/forward", self.fw_url))
+            .header("X-Agent-Key", token)
+            .json(&payload)
+            .send()
+            .await
+            .expect("forward request failed")
+    }
+
+    /// The same host as the mock API under another name (an alias of the same
+    /// container, allowed by the test stack): another origin.
+    fn other_origin(&self) -> String {
+        self.mock_url_via_ferrowarden()
+            .replace("mock-api", "mock-alt")
+    }
+
+    /// Every token the mock's login services have issued so far, from all
+    /// kinds, as one list.
+    async fn issued_tokens(&self) -> Vec<String> {
+        let issued: Value = self
+            .client
+            .get(format!("{}/__issued__", self.mock_url))
+            .send()
+            .await
+            .expect("mock API request failed")
+            .json()
+            .await
+            .expect("the mock API did not answer JSON; was its image rebuilt?");
+        issued
+            .as_object()
+            .expect("an object")
+            .values()
+            .flat_map(|v| v.as_array().into_iter().flatten())
+            .filter_map(|t| t.as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// The newest issued token of `kind` (`portainer_jwt`, `pve_ticket`,
+    /// `pve_csrf`).
+    async fn latest_issued(&self, kind: &str) -> String {
+        let issued: Value = self
+            .client
+            .get(format!("{}/__issued__", self.mock_url))
+            .send()
+            .await
+            .expect("mock API request failed")
+            .json()
+            .await
+            .expect("the mock API did not answer JSON");
+        issued[kind]
+            .as_array()
+            .and_then(|a| a.last())
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("the mock has issued no {kind}"))
+            .to_string()
+    }
+
+    async fn sessions_as(&self, token: &str) -> reqwest::Response {
+        self.agent_get("/v1/sessions", Some(token)).await
+    }
+
+    async fn delete_session_as(&self, token: &str, name: &str) -> reqwest::Response {
+        self.client
+            .delete(format!("{}/v1/sessions/{name}", self.fw_url))
+            .header("X-Agent-Key", token)
+            .send()
+            .await
+            .expect("delete request failed")
+    }
+
+    /// The text of every event Ferrowarden holds, as the operator sees it.
+    async fn all_events_text(&self) -> String {
+        serde_json::to_string(&self.events(1000).await).unwrap()
+    }
+}
+
+/// The Portainer-like login: JSON body, the seeded username and password.
+fn portainer_login(base: &str, name: &str) -> Value {
+    json!({
+        "request": {
+            "method": "POST",
+            "url": format!("{base}/api/auth"),
+            "body": {
+                "username": "{{vault:test_login_full:username}}",
+                "password": "{{vault:test_login_full}}"
+            }
+        },
+        "capture": [{ "from": "json:/jwt", "as": name }]
+    })
+}
+
+/// A GET with one session in the Authorization header.
+fn bearer_get(url: &str, session: &str) -> Value {
+    json!({ "request": {
+        "method": "GET",
+        "url": url,
+        "headers": { "Authorization": format!("Bearer {{{{session:{session}}}}}") }
+    }})
+}
+
+/// The whole story with a Portainer-like service: log in, never see the token,
+/// use it, and prove every response, listing and event hides it.
+#[tokio::test]
+async fn test_session_login_is_captured_hidden_and_used() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_mock().await;
+    let (_, id, token) = fresh_key(&env, "session-portainer").await;
+    let base = env.mock_url_via_ferrowarden();
+
+    // Log in: the agent sends the credentials as placeholders and asks for the jwt.
+    let r = env
+        .forward_payload_as(&token, portainer_login(&base, "portainer"))
+        .await;
+    let (status, login) = spec.check("/v1/forward", "POST", r).await;
+    assert_eq!(status, 200);
+    assert_eq!(login["status"], 200, "the mock accepted the seeded login");
+    let jwt = env.latest_issued("portainer_jwt").await;
+    let tokens = vec![jwt.clone()];
+    assert_hidden("the login response", &login.to_string(), &tokens);
+    let login_body: Value = serde_json::from_str(login["body"].as_str().unwrap()).unwrap();
+    assert_eq!(login_body["jwt"], "[CAPTURED:portainer]");
+    assert_eq!(login["captures"][0]["as"], "portainer");
+    assert_eq!(login["captures"][0]["status"], "captured");
+    // The JWT's own exp is an hour out, so the 30-minute default is what applies.
+    let expires =
+        chrono::DateTime::parse_from_rfc3339(login["captures"][0]["expires_at"].as_str().unwrap())
+            .unwrap()
+            .timestamp();
+    let now = chrono::Utc::now().timestamp();
+    assert!(
+        (now + 25 * 60..=now + 31 * 60).contains(&expires),
+        "expires in ~30 minutes"
+    );
+    // The credentials went out as the real values, not placeholders.
+    let sent = env.last_captured_request().await;
+    assert!(!sent["body"].as_str().unwrap().contains("{{"));
+
+    // The agent's view of its sessions: a name and a host, no value.
+    let (status, list) = spec
+        .check("/v1/sessions", "GET", env.sessions_as(&token).await)
+        .await;
+    assert_eq!(status, 200);
+    assert_hidden("the session list", &list.to_string(), &tokens);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["name"], "portainer");
+    assert_eq!(list[0]["host"], "mock-api:7777");
+    assert_eq!(list[0]["expires_at"], login["captures"][0]["expires_at"]);
+
+    // Use it: the mock confirms the exact value arrived.
+    env.reset_mock().await;
+    let r = env
+        .forward_payload_as(
+            &token,
+            bearer_get(&format!("{base}/api/portainer/endpoints"), "portainer"),
+        )
+        .await;
+    let (_, used) = spec.check("/v1/forward", "POST", r).await;
+    assert_eq!(used["status"], 200, "the target accepted the session");
+    assert!(used["body"]
+        .as_str()
+        .unwrap()
+        .contains(r#""verified": true"#));
+    let sent = env.last_captured_request().await;
+    assert_eq!(
+        captured_header(&sent, "authorization"),
+        Some(format!("Bearer {jwt}").as_str()),
+        "the exact value reached the target (not printed)"
+    );
+    assert_hidden("the use response", &used.to_string(), &tokens);
+
+    // A target that reflects the token: in the body (raw, base64, URL-encoded)
+    // and in a header, on success and on an error status.
+    for path in ["/api/reflect", "/api/reflect-error"] {
+        let r = env
+            .forward_payload_as(&token, bearer_get(&format!("{base}{path}"), "portainer"))
+            .await;
+        let (_, reflected) = spec.check("/v1/forward", "POST", r).await;
+        assert_eq!(
+            reflected["status"],
+            if path.ends_with("error") { 403 } else { 200 }
+        );
+        assert_hidden(path, &reflected.to_string(), &tokens);
+        let body = reflected["body"].as_str().unwrap();
+        assert!(body.contains("[CAPTURED:portainer]"), "{path}");
+        assert_eq!(
+            reflected["headers"]["x-reflected-authorization"], "[CAPTURED:portainer]",
+            "{path}"
+        );
+    }
+    // A target that mentions the token although this request did not use it:
+    // every session value of the key is scrubbed from every response.
+    let r = env
+        .forward_payload_as(
+            &token,
+            json!({"request": {"method": "GET", "url": format!("{base}/api/leak-last-token")}}),
+        )
+        .await;
+    let (_, leaked) = spec.check("/v1/forward", "POST", r).await;
+    assert_hidden(
+        "a response that did not use the session",
+        &leaked.to_string(),
+        &tokens,
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(leaked["body"].as_str().unwrap()).unwrap(),
+        json!({"last_token": "[CAPTURED:portainer]", "again": ["[CAPTURED:portainer]"]})
+    );
+
+    // Events and metrics: names and outcomes only.
+    assert_hidden("the audit log", &env.all_events_text().await, &tokens);
+    let events = env.events(1000).await;
+    let key_events: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["ferrowarden"]["key"]["id"].as_str() == Some(id.as_str()))
+        .collect();
+    let find = |action: &str| -> Vec<&&Value> {
+        key_events
+            .iter()
+            .filter(|e| e["event"]["action"] == action)
+            .collect()
+    };
+    let captured = find("session_capture");
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0]["event"]["outcome"], "success");
+    assert_eq!(
+        captured[0]["ferrowarden"]["details"]["session"],
+        "portainer"
+    );
+    assert_eq!(captured[0]["ferrowarden"]["details"]["status"], "captured");
+    assert_eq!(captured[0]["url"]["domain"], "mock-api");
+    assert_eq!(find("session_use").len(), 3);
+    assert!(find("forward")
+        .iter()
+        .any(|e| e["ferrowarden"]["sessions"] == json!(["portainer"])));
+    // The login's forward event names the vault credentials, not sessions.
+    assert!(find("forward").iter().any(|e| {
+        e["ferrowarden"]["credentials"]
+            .as_array()
+            .is_some_and(|c| c.iter().any(|l| l == "test_login_full:username"))
+            && e["ferrowarden"].get("sessions").is_none()
+    }));
+    let scrape = metrics_env().scrape(&env).await;
+    assert_hidden("a metrics scrape", &scrape.text, &tokens);
+    assert!(scrape.text.contains("ferrowarden_session_captures_total"));
+
+    env.revoke_key(&id).await;
+}
+
+/// A target that writes JSON like PHP's `json_encode` escapes every `/` as
+/// `\/`. The token (standard base64, so it has slashes) is not the text the
+/// agent would read after decoding, unless Ferrowarden also scrubs the decoded
+/// strings.
+#[tokio::test]
+async fn test_session_token_written_with_escaped_slashes_is_hidden() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_mock().await;
+    let (_, id, token) = fresh_key(&env, "session-php").await;
+    let base = env.mock_url_via_ferrowarden();
+    let r = env
+        .forward_payload_as(
+            &token,
+            json!({
+                "request": { "method": "POST", "url": format!("{base}/api/php/login"), "body": {} },
+                "capture": [{ "from": "json:/token", "as": "php" }]
+            }),
+        )
+        .await;
+    let (status, login) = spec.check("/v1/forward", "POST", r).await;
+    assert_eq!(status, 200);
+    assert_eq!(login["captures"][0]["status"], "captured");
+    let issued = env.latest_issued("php_token").await;
+    assert!(issued.contains('/'), "the mock's token has a slash");
+    let tokens = vec![issued.clone()];
+    let text = login.to_string();
+    assert_hidden("the login response", &text, &tokens);
+    // Neither the escaped form nor any slash-bearing fragment of it.
+    assert!(!text.contains(&issued.replace('/', "\\/")));
+    assert!(!text.contains(&issued.replace('/', "\\\\/")));
+    let body: Value = serde_json::from_str(login["body"].as_str().unwrap()).unwrap();
+    assert_eq!(body["token"], "[CAPTURED:php]");
+    assert_eq!(body["ok"], true);
+    // The session works, and the audit log and the gate's token list cover it.
+    let r = env
+        .forward_payload_as(&token, bearer_get(&format!("{base}/api/php/me"), "php"))
+        .await;
+    let (_, me) = spec.check("/v1/forward", "POST", r).await;
+    assert!(me["body"].as_str().unwrap().contains("true"));
+    assert_hidden("the audit log", &env.all_events_text().await, &tokens);
+    env.revoke_key(&id).await;
+}
+
+/// A Proxmox-like login with a form body: ticket, CSRF token and cookie are all
+/// captured; the cookie, the CSRF header and the ticket are used.
+#[tokio::test]
+async fn test_session_proxmox_ticket_cookie_and_csrf() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_mock().await;
+    let (_, id, token) = fresh_key(&env, "session-proxmox").await;
+    let base = env.mock_url_via_ferrowarden();
+
+    let r = env
+        .forward_payload_as(
+            &token,
+            json!({
+                "request": {
+                    "method": "POST",
+                    "url": format!("{base}/api2/json/access/ticket"),
+                    "headers": { "Content-Type": "application/x-www-form-urlencoded" },
+                    "body": "username={{vault:test_login_full:username}}@pam&password={{vault:test_login_full}}"
+                },
+                "capture": [
+                    { "from": "json:/data/ticket", "as": "pve_ticket" },
+                    { "from": "json:/data/CSRFPreventionToken", "as": "pve_csrf" },
+                    { "from": "cookie:PVEAuthCookie", "as": "pve_cookie" }
+                ]
+            }),
+        )
+        .await;
+    let (_, login) = spec.check("/v1/forward", "POST", r).await;
+    assert_eq!(login["status"], 200, "the mock accepted the seeded login");
+    let ticket = env.latest_issued("pve_ticket").await;
+    let csrf = env.latest_issued("pve_csrf").await;
+    // The cookie carries the ticket URL-encoded, which is the third capture.
+    let tokens = vec![ticket.clone(), csrf.clone()];
+    assert_hidden("the login response", &login.to_string(), &tokens);
+    for c in login["captures"].as_array().unwrap() {
+        assert_eq!(c["status"], "captured", "{c}");
+    }
+    assert!(login["headers"]["set-cookie"]
+        .as_str()
+        .unwrap()
+        .starts_with("PVEAuthCookie=[CAPTURED:"));
+    assert!(login["body"]
+        .as_str()
+        .unwrap()
+        .contains("[CAPTURED:pve_ticket]"));
+    assert!(login["body"]
+        .as_str()
+        .unwrap()
+        .contains("[CAPTURED:pve_csrf]"));
+    assert_eq!(
+        login["body"]
+            .as_str()
+            .map(|b| serde_json::from_str::<Value>(b).unwrap()["data"]["username"].clone()),
+        Some(json!("test-full-user@pam")),
+        "what is not a token stays"
+    );
+
+    // Reads need the cookie: the ticket, or the cookie value as the target sent it.
+    for session in ["pve_ticket", "pve_cookie"] {
+        let r = env
+            .forward_payload_as(
+                &token,
+                json!({"request": {
+                    "method": "GET",
+                    "url": format!("{base}/api2/json/nodes"),
+                    "headers": { "Cookie": format!("PVEAuthCookie={{{{session:{session}}}}}") }
+                }}),
+            )
+            .await;
+        let (_, nodes) = spec.check("/v1/forward", "POST", r).await;
+        assert_eq!(nodes["status"], 200, "{session}");
+        assert_hidden(session, &nodes.to_string(), &tokens);
+    }
+    // A write needs the CSRF header as well.
+    let stop = |with_csrf: bool| {
+        let mut headers = json!({ "Cookie": "PVEAuthCookie={{session:pve_ticket}}" });
+        if with_csrf {
+            headers["CSRFPreventionToken"] = json!("{{session:pve_csrf}}");
+        }
+        json!({"request": {
+            "method": "POST",
+            "url": format!("{base}/api2/json/nodes/pve/qemu/100/status/stop"),
+            "headers": headers
+        }})
+    };
+    let r = env.forward_payload_as(&token, stop(false)).await;
+    let (_, without) = spec.check("/v1/forward", "POST", r).await;
+    assert_eq!(
+        without["status"], 401,
+        "the target wants the CSRF token too"
+    );
+    let r = env.forward_payload_as(&token, stop(true)).await;
+    let (_, with) = spec.check("/v1/forward", "POST", r).await;
+    assert_eq!(with["status"], 200);
+    let sent = env.last_captured_request().await;
+    assert_eq!(
+        captured_header(&sent, "csrfpreventiontoken"),
+        Some(csrf.as_str()),
+        "the exact CSRF value reached the target (not printed)"
+    );
+
+    // A target reflecting the ticket, the cookie and the CSRF token.
+    let r = env
+        .forward_payload_as(
+            &token,
+            json!({"request": {
+                "method": "GET",
+                "url": format!("{base}/api/reflect"),
+                "headers": {
+                    "Cookie": "PVEAuthCookie={{session:pve_ticket}}",
+                    "CSRFPreventionToken": "{{session:pve_csrf}}"
+                }
+            }}),
+        )
+        .await;
+    let (_, reflected) = spec.check("/v1/forward", "POST", r).await;
+    assert_hidden("the reflecting response", &reflected.to_string(), &tokens);
+    assert!(reflected["body"].as_str().unwrap().contains("[CAPTURED:"));
+
+    let (_, list) = spec
+        .check("/v1/sessions", "GET", env.sessions_as(&token).await)
+        .await;
+    assert_eq!(list.as_array().unwrap().len(), 3);
+    assert_hidden("the session list", &list.to_string(), &tokens);
+    assert_hidden("the audit log", &env.all_events_text().await, &tokens);
+    env.revoke_key(&id).await;
+}
+
+/// A session is never sent to another origin, and the refusal happens before
+/// anything is sent: the mock records no request.
+#[tokio::test]
+async fn test_session_is_refused_at_another_origin() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_mock().await;
+    let (_, id, token) = fresh_key(&env, "session-origin").await;
+    let base = env.mock_url_via_ferrowarden();
+    let r = env
+        .forward_payload_as(&token, portainer_login(&base, "portainer"))
+        .await;
+    assert_eq!(spec.check("/v1/forward", "POST", r).await.0, 200);
+    let tokens = vec![env.latest_issued("portainer_jwt").await];
+    env.reset_mock().await;
+
+    for (what, url) in [
+        (
+            "another host name",
+            format!("{}/api/portainer/endpoints", env.other_origin()),
+        ),
+        (
+            "another port",
+            format!("{}/api/portainer/endpoints", base.replace(":7777", ":7778")),
+        ),
+    ] {
+        let resp = env
+            .forward_payload_as(&token, bearer_get(&url, "portainer"))
+            .await;
+        let rid = request_id(&resp);
+        let (status, body) = spec.check("/v1/forward", "POST", resp).await;
+        assert_eq!(status, 403, "{what}");
+        assert!(
+            body["error"].as_str().unwrap().contains("another origin"),
+            "{what}"
+        );
+        assert_hidden(what, &body.to_string(), &tokens);
+        let e = env.event_for(&rid, "forward").await;
+        assert_eq!(e["event"]["reason"], "session_host_not_allowed", "{what}");
+        let u = env.event_for(&rid, "session_use").await;
+        assert_eq!(u["event"]["outcome"], "failure", "{what}");
+        assert_eq!(u["ferrowarden"]["sessions"], json!(["portainer"]), "{what}");
+    }
+    assert!(
+        env.all_captured_requests().await.is_empty(),
+        "a refused session request must not reach the mock"
+    );
+
+    // The same origin spelled differently is still the same origin.
+    let resp = env
+        .forward_payload_as(
+            &token,
+            bearer_get(
+                &format!(
+                    "{}/api/portainer/endpoints",
+                    base.replace("mock-api", "MOCK-API")
+                ),
+                "portainer",
+            ),
+        )
+        .await;
+    let (status, ok) = spec.check("/v1/forward", "POST", resp).await;
+    assert_eq!((status, &ok["status"]), (200, &json!(200)));
+    assert_hidden("the audit log", &env.all_events_text().await, &tokens);
+    env.revoke_key(&id).await;
+}
+
+/// A session belongs to the agent key that captured it: another key cannot use
+/// it, list it or delete it, and its answers do not say whether the name exists.
+#[tokio::test]
+async fn test_session_is_not_shared_between_agent_keys() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_mock().await;
+    let (_, id_a, a) = fresh_key(&env, "session-owner").await;
+    let (_, id_b, b) = fresh_key(&env, "session-other").await;
+    let base = env.mock_url_via_ferrowarden();
+    let r = env
+        .forward_payload_as(&a, portainer_login(&base, "portainer"))
+        .await;
+    assert_eq!(spec.check("/v1/forward", "POST", r).await.0, 200);
+    let tokens = vec![env.latest_issued("portainer_jwt").await];
+    env.reset_mock().await;
+
+    let url = format!("{base}/api/portainer/endpoints");
+    let theirs = env
+        .forward_payload_as(&b, bearer_get(&url, "portainer"))
+        .await;
+    let (s_theirs, theirs) = spec.check("/v1/forward", "POST", theirs).await;
+    let nobody = env
+        .forward_payload_as(&b, bearer_get(&url, "no_such_name"))
+        .await;
+    let (s_nobody, nobody) = spec.check("/v1/forward", "POST", nobody).await;
+    assert_eq!((s_theirs, s_nobody), (422, 422));
+    assert_eq!(
+        theirs["error"].as_str().unwrap().replace("portainer", "X"),
+        nobody["error"]
+            .as_str()
+            .unwrap()
+            .replace("no_such_name", "X"),
+        "somebody else's session and a name nobody has look the same"
+    );
+    assert!(env.all_captured_requests().await.is_empty());
+
+    let (_, list) = spec
+        .check("/v1/sessions", "GET", env.sessions_as(&b).await)
+        .await;
+    assert_eq!(list, json!([]));
+    let r = env.delete_session_as(&b, "portainer").await;
+    assert_eq!(spec.check("/v1/sessions/{name}", "DELETE", r).await.0, 422);
+    // The owner still has it, and it still works.
+    let (_, list) = spec
+        .check("/v1/sessions", "GET", env.sessions_as(&a).await)
+        .await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    let r = env
+        .forward_payload_as(&a, bearer_get(&url, "portainer"))
+        .await;
+    assert_eq!(spec.check("/v1/forward", "POST", r).await.1["status"], 200);
+    assert_hidden("the audit log", &env.all_events_text().await, &tokens);
+    env.revoke_key(&id_a).await;
+    env.revoke_key(&id_b).await;
+}
+
+/// The ways a session ends: the agent deletes it, its lifetime runs out, or its
+/// key is revoked.
+#[tokio::test]
+async fn test_session_delete_expiry_and_revoke() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_mock().await;
+    let (_, id, token) = fresh_key(&env, "session-end").await;
+    let base = env.mock_url_via_ferrowarden();
+    let url = format!("{base}/api/portainer/endpoints");
+
+    // Delete.
+    let r = env
+        .forward_payload_as(&token, portainer_login(&base, "portainer"))
+        .await;
+    assert_eq!(spec.check("/v1/forward", "POST", r).await.0, 200);
+    let r = env.delete_session_as(&token, "portainer").await;
+    let resp_id = request_id(&r);
+    assert_eq!(spec.check("/v1/sessions/{name}", "DELETE", r).await.0, 204);
+    let deleted = env.event_for(&resp_id, "session_delete").await;
+    assert_eq!(deleted["ferrowarden"]["details"]["cause"], "agent");
+    assert_eq!(deleted["ferrowarden"]["details"]["session"], "portainer");
+    let r = env.delete_session_as(&token, "portainer").await;
+    assert_eq!(spec.check("/v1/sessions/{name}", "DELETE", r).await.0, 422);
+    env.reset_mock().await;
+    let r = env
+        .forward_payload_as(&token, bearer_get(&url, "portainer"))
+        .await;
+    let (status, body) = spec.check("/v1/forward", "POST", r).await;
+    assert_eq!(status, 422);
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("unknown or expired"));
+    assert!(env.all_captured_requests().await.is_empty());
+
+    // Expiry: a one-second session is gone two seconds later.
+    let mut login = portainer_login(&base, "short");
+    login["capture"][0]["ttl_secs"] = json!(1);
+    let r = env.forward_payload_as(&token, login).await;
+    let (_, short) = spec.check("/v1/forward", "POST", r).await;
+    assert_eq!(short["captures"][0]["status"], "captured");
+    tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+    env.reset_mock().await;
+    let r = env
+        .forward_payload_as(&token, bearer_get(&url, "short"))
+        .await;
+    assert_eq!(spec.check("/v1/forward", "POST", r).await.0, 422);
+    let (_, list) = spec
+        .check("/v1/sessions", "GET", env.sessions_as(&token).await)
+        .await;
+    assert_eq!(list, json!([]), "an expired session is not listed");
+    assert!(env.all_captured_requests().await.is_empty());
+
+    // Revoke: the key's remaining sessions go with it.
+    let r = env
+        .forward_payload_as(&token, portainer_login(&base, "again"))
+        .await;
+    assert_eq!(spec.check("/v1/forward", "POST", r).await.0, 200);
+    env.revoke_key(&id).await;
+    let events = env.events(200).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| e["event"]["action"] == "session_delete"
+                && e["ferrowarden"]["details"]["cause"] == "key_revoke"
+                && e["ferrowarden"]["details"]["session"] == "again"
+                && e["ferrowarden"]["key"]["id"].as_str() == Some(id.as_str())),
+        "revoking the key records the deletion of its session"
+    );
+    let r = env.sessions_as(&token).await;
+    assert_eq!(spec.check("/v1/sessions", "GET", r).await.0, 401);
+}
+
+/// A capture that cannot be made never fails the request, and a bad `capture`
+/// is refused before anything is sent.
+#[tokio::test]
+async fn test_session_capture_failures_and_validation() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_mock().await;
+    let (_, id, token) = fresh_key(&env, "session-failures").await;
+    let base = env.mock_url_via_ferrowarden();
+
+    // The mock refuses the login (422) and returns no jwt: not_found, nothing stored.
+    let mut wrong = portainer_login(&base, "portainer");
+    wrong["request"]["body"]["password"] = json!("{{vault:test_api_token}}");
+    let r = env.forward_payload_as(&token, wrong).await;
+    let (status, body) = spec.check("/v1/forward", "POST", r).await;
+    assert_eq!(status, 200, "the forward itself succeeded");
+    assert_eq!(body["status"], 422, "the target's own answer");
+    assert_eq!(body["captures"][0]["status"], "not_found");
+    assert!(body["captures"][0].get("expires_at").is_none());
+    let (_, list) = spec
+        .check("/v1/sessions", "GET", env.sessions_as(&token).await)
+        .await;
+    assert_eq!(list, json!([]));
+
+    // A capture whose status is a failure is an event with the status.
+    let events = env.events(50).await;
+    let failed = events
+        .iter()
+        .find(|e| e["event"]["action"] == "session_capture" && e["event"]["outcome"] == "failure")
+        .expect("a failed capture is recorded");
+    assert_eq!(failed["event"]["reason"], "capture_failed");
+    assert_eq!(failed["ferrowarden"]["details"]["status"], "not_found");
+
+    // Refused before anything is sent: nothing reaches the mock.
+    env.reset_mock().await;
+    let url = format!("{base}/api/auth");
+    let too_many: Vec<Value> = (0..9)
+        .map(|i| json!({"from": "json:/jwt", "as": format!("n{i}")}))
+        .collect();
+    for capture in [
+        json!([]),
+        json!(null),
+        json!(too_many),
+        json!([{"from": "json:/jwt", "as": "a"}, {"from": "json:/jwt", "as": "a"}]),
+        json!([{"from": "json:/jwt", "as": "not a name"}]),
+        json!([{"from": "json:/jwt", "as": "x", "ttl_secs": 0}]),
+        json!([{"from": "json:/jwt", "as": "x", "ttl_secs": 999_999_999}]),
+        json!([{"from": "nowhere:/jwt", "as": "x"}]),
+        json!([{"from": "json:/jwt", "as": "x", "unknown": 1}]),
+    ] {
+        let payload =
+            json!({"request": {"method": "POST", "url": url, "body": {}}, "capture": capture});
+        let r = env.forward_payload_as(&token, payload).await;
+        assert_eq!(
+            spec.check("/v1/forward", "POST", r).await.0,
+            400,
+            "{capture}"
+        );
+    }
+    let r = env
+        .forward_payload_as(&token, bearer_get(&url, "a b"))
+        .await;
+    assert_eq!(
+        spec.check("/v1/forward", "POST", r).await.0,
+        422,
+        "a malformed session placeholder"
+    );
+    assert!(
+        env.all_captured_requests().await.is_empty(),
+        "nothing was sent for a bad capture"
+    );
+    env.revoke_key(&id).await;
+}
+
+/// The counters and the gauge: what the metrics say about sessions, and nothing
+/// that identifies one.
+#[tokio::test]
+async fn test_session_metrics() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_mock().await;
+    let m = metrics_env();
+    let (_, id, token) = fresh_key(&env, "session-metrics").await;
+    let base = env.mock_url_via_ferrowarden();
+    let before = m.scrape(&env).await;
+    let delta = |after: &Scrape, name: &str, labels: &[(&str, &str)]| {
+        after.sum(name, labels) - before.sum(name, labels)
+    };
+
+    let r = env
+        .forward_payload_as(&token, portainer_login(&base, "portainer"))
+        .await;
+    assert_eq!(spec.check("/v1/forward", "POST", r).await.0, 200);
+    let jwt = env.latest_issued("portainer_jwt").await;
+    let url = format!("{base}/api/portainer/endpoints");
+    env.forward_payload_as(&token, bearer_get(&url, "portainer"))
+        .await;
+    env.forward_payload_as(&token, bearer_get(&url, "nope"))
+        .await;
+    env.forward_payload_as(
+        &token,
+        bearer_get(&format!("{}/x", env.other_origin()), "portainer"),
+    )
+    .await;
+    let mut miss = portainer_login(&base, "portainer");
+    miss["capture"][0]["from"] = json!("json:/missing");
+    env.forward_payload_as(&token, miss).await;
+
+    // The event consumer is asynchronous: wait for the counters.
+    let mut after = m.scrape(&env).await;
+    for _ in 0..20 {
+        if delta(
+            &after,
+            "ferrowarden_session_uses_total",
+            &[("outcome", "session_host_not_allowed")],
+        ) >= 1.0
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        after = m.scrape(&env).await;
+    }
+    assert_eq!(
+        delta(
+            &after,
+            "ferrowarden_session_captures_total",
+            &[("outcome", "captured")]
+        ),
+        1.0
+    );
+    assert_eq!(
+        delta(
+            &after,
+            "ferrowarden_session_captures_total",
+            &[("outcome", "not_found")]
+        ),
+        1.0
+    );
+    assert_eq!(
+        delta(
+            &after,
+            "ferrowarden_session_uses_total",
+            &[("outcome", "success")]
+        ),
+        1.0
+    );
+    assert_eq!(
+        delta(
+            &after,
+            "ferrowarden_session_uses_total",
+            &[("outcome", "unknown_session")]
+        ),
+        1.0
+    );
+    assert_eq!(
+        delta(
+            &after,
+            "ferrowarden_session_uses_total",
+            &[("outcome", "session_host_not_allowed")]
+        ),
+        1.0
+    );
+    assert_eq!(
+        after.gauge("ferrowarden_sessions_active") - before.gauge("ferrowarden_sessions_active"),
+        1.0
+    );
+    assert_hidden("a scrape", &after.text, &[jwt]);
+    // Session names (and anything else of a session) are not labels: the
+    // session series carry the outcome and nothing else.
+    for name in [
+        "ferrowarden_session_captures_total",
+        "ferrowarden_session_uses_total",
+    ] {
+        for (labels, _) in after.series(name) {
+            assert!(
+                labels.starts_with("outcome=") && !labels.contains(','),
+                "{name} has only an outcome label, got {labels}"
+            );
+        }
+    }
+
+    env.revoke_key(&id).await;
+    let end = m.scrape(&env).await;
+    assert_eq!(
+        end.gauge("ferrowarden_sessions_active"),
+        before.gauge("ferrowarden_sessions_active")
+    );
 }
 
 // ── Container hardening ───────────────────────────────────────────────────────

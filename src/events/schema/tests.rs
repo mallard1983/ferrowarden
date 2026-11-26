@@ -52,6 +52,10 @@ fn all_actions_are_listed() {
             Action::UiTwoFactorEmailSent => 23,
             Action::NotifyTest => 24,
             Action::MetricsAuth => 25,
+            Action::SessionCapture => 26,
+            Action::SessionUse => 27,
+            Action::SessionExpire => 28,
+            Action::SessionDelete => 29,
         }
     }
     for (i, a) in Action::ALL.into_iter().enumerate() {
@@ -337,6 +341,10 @@ fn reason_codes_are_the_documented_snake_case_list() {
         (Reason::InsecureTransport, "insecure_transport"),
         (Reason::MissingMetricsToken, "missing_metrics_token"),
         (Reason::InvalidMetricsToken, "invalid_metrics_token"),
+        (Reason::UnknownSession, "unknown_session"),
+        (Reason::SessionHostNotAllowed, "session_host_not_allowed"),
+        (Reason::SessionsDisabled, "sessions_disabled"),
+        (Reason::CaptureFailed, "capture_failed"),
     ];
     assert_eq!(all.len(), Reason::ALL.len());
     for ((reason, code), listed) in all.into_iter().zip(Reason::ALL) {

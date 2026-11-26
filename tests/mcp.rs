@@ -517,6 +517,150 @@ async fn mcp_session_against_the_test_stack() {
     }
 }
 
+/// `http_request` with `capture`, end to end: the login token is kept inside
+/// Ferrowarden and never reaches the tool result (text or structured content),
+/// `{{session:NAME}}` uses it, another origin is refused, and the mock API (the
+/// target) confirms the exact value arrived.
+#[tokio::test]
+async fn mcp_http_request_captures_and_uses_a_session() {
+    let Some(stack) = Stack::load() else { return };
+    stack.reset_mock().await;
+    let mut s = stack.session();
+    s.initialize();
+
+    let tools = s.request("tools/list", json!({}));
+    let http = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "http_request")
+        .expect("http_request is offered")
+        .clone();
+    assert!(
+        http["inputSchema"]["properties"]["capture"]["items"]["properties"]["as"].is_object(),
+        "the tool schema has capture"
+    );
+
+    // Log in and capture the JWT.
+    let login = s.call(
+        "http_request",
+        json!({
+            "method": "POST",
+            "url": format!("{}/api/auth", stack.mock_internal),
+            "body": {
+                "username": "{{vault:test_login_full:username}}",
+                "password": "{{vault:test_login_full}}"
+            },
+            "capture": [{ "from": "json:/jwt", "as": "mcp_portainer", "ttl_secs": 120 }]
+        }),
+    );
+    assert_eq!(login["isError"], false, "{}", text_of(&login));
+    assert_eq!(login["structuredContent"]["status"], 200);
+    assert_eq!(
+        login["structuredContent"]["captures"][0]["as"],
+        "mcp_portainer"
+    );
+    assert_eq!(
+        login["structuredContent"]["captures"][0]["status"],
+        "captured"
+    );
+    let text = text_of(&login);
+    assert!(text.contains("[CAPTURED:mcp_portainer]"), "{text}");
+    assert!(text.contains("mcp_portainer: captured (expires "), "{text}");
+
+    let issued = stack.mock_get("/__issued__").await;
+    let jwt = issued["portainer_jwt"]
+        .as_array()
+        .and_then(|a| a.last())
+        .and_then(Value::as_str)
+        .expect("the mock issued a token")
+        .to_string();
+    assert!(
+        !login.to_string().contains(&jwt),
+        "the token reached the tool result (not printed)"
+    );
+
+    // Use it: the target accepts the session, and the exact value arrived.
+    stack.reset_mock().await;
+    let used = s.call(
+        "http_request",
+        json!({
+            "method": "GET",
+            "url": format!("{}/api/portainer/endpoints", stack.mock_internal),
+            "headers": { "Authorization": "Bearer {{session:mcp_portainer}}" }
+        }),
+    );
+    assert_eq!(used["isError"], false, "{}", text_of(&used));
+    assert_eq!(used["structuredContent"]["status"], 200);
+    assert!(text_of(&used).contains("verified"));
+    assert!(!used.to_string().contains(&jwt));
+    let sent = stack.mock_get("/__requests__/last").await;
+    let auth = sent["headers"]
+        .as_object()
+        .and_then(|h| {
+            h.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        })
+        .and_then(|(_, v)| v.as_str())
+        .expect("the mock captured the header");
+    assert_eq!(
+        auth,
+        format!("Bearer {jwt}"),
+        "the session value did not reach the target (values not printed)"
+    );
+
+    // Another origin (the same container under another name): refused, with
+    // the 403 guidance, and nothing is forwarded.
+    stack.reset_mock().await;
+    let refused = s.call(
+        "http_request",
+        json!({
+            "method": "GET",
+            "url": format!(
+                "{}/api/portainer/endpoints",
+                stack.mock_internal.replace("mock-api", "mock-alt")
+            ),
+            "headers": { "Authorization": "Bearer {{session:mcp_portainer}}" }
+        }),
+    );
+    assert_eq!(refused["isError"], true);
+    assert_eq!(refused["structuredContent"]["status"], 403);
+    assert!(text_of(&refused).contains("HTTP 403"));
+    assert_eq!(stack.mock_get("/__requests__").await, json!([]));
+
+    // A capture that Ferrowarden refuses is a tool error with its message.
+    let bad = s.call(
+        "http_request",
+        json!({
+            "method": "GET",
+            "url": format!("{}/api/auth", stack.mock_internal),
+            "capture": [{ "from": "json:/jwt", "as": "no spaces allowed" }]
+        }),
+    );
+    assert_eq!(bad["isError"], true);
+    assert_eq!(bad["structuredContent"]["status"], 400);
+    // The bridge refuses an unknown capture member before it asks.
+    let unknown = s.call(
+        "http_request",
+        json!({
+            "method": "GET",
+            "url": format!("{}/api/auth", stack.mock_internal),
+            "capture": [{ "from": "json:/jwt", "as": "x", "extra": 1 }]
+        }),
+    );
+    assert_eq!(unknown["isError"], true);
+    assert_eq!(unknown["structuredContent"]["error_source"], "mcp");
+
+    let (stdout, stderr) = s.finish();
+    for (name, text) in [("stdout", &stdout), ("stderr", &stderr)] {
+        assert!(!text.contains(&jwt), "{name} shows the session token");
+        assert!(
+            !text.contains(&stack.agent_key),
+            "{name} shows the agent key"
+        );
+    }
+}
+
 /// With nothing listening where `FERROWARDEN_URL` points, the call fails as a
 /// tool error and the URL is not shown. (Always runs; needs no stack.)
 #[test]

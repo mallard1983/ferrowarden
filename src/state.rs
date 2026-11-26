@@ -9,6 +9,7 @@ use crate::keys::hash_token;
 use crate::net::TargetPolicy;
 use crate::notify::NotifyHandle;
 use crate::policy::KeyPolicy;
+use crate::sessions::{DeleteCause, SessionStore};
 use crate::vault::model::SyncStats;
 use crate::vault::{ActiveVault, CredentialMap, Vault};
 
@@ -81,6 +82,11 @@ pub struct AppState {
     /// When the vault was last synced and how many items it left out, for the
     /// metrics endpoint. Numbers only.
     pub sync_stats: Arc<SyncStats>,
+
+    /// Captured login sessions (`{{session:NAME}}`), per agent key. In memory
+    /// only: never written to disk, a restart empties it, and the vault
+    /// locking clears it.
+    pub sessions: Arc<SessionStore>,
 }
 
 impl AppState {
@@ -119,6 +125,7 @@ impl AppState {
             events,
             notify,
             sync_stats: Arc::new(SyncStats::default()),
+            sessions: Arc::new(SessionStore::default()),
         }
     }
 
@@ -173,6 +180,9 @@ impl AppState {
     pub async fn set_locked(&self, cause: &'static str) {
         self.vault.lock().await;
         self.credentials.write().await.clear();
+        // A captured session is a credential too: it does not outlive the
+        // unlocked vault.
+        crate::sessions::clear_all(self, DeleteCause::VaultLock);
         let was_unlocked = {
             let mut state = self.lock_state.write().await;
             let was_unlocked = *state == LockState::Unlocked;

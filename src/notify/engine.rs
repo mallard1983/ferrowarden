@@ -85,6 +85,7 @@ pub fn classify(event: &SecurityEvent) -> Option<Class> {
     match e.action {
         Action::Forward if failed => match e.reason? {
             Reason::CredentialHostNotAllowed
+            | Reason::SessionHostNotAllowed
             | Reason::TargetBlocked
             | Reason::CredentialOutOfScope
             | Reason::MethodNotAllowed

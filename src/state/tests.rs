@@ -29,6 +29,7 @@ fn test_config() -> Config {
         notify: Default::default(),
         vault: crate::config::VaultConfig::default(),
         metrics: Default::default(),
+        sessions: Default::default(),
     }
 }
 

@@ -1,6 +1,6 @@
 ---
 name: ferrowarden
-description: "Ferrowarden forwards HTTP requests to target services by substituting {{vault:name}} placeholders with real credential values before the request leaves the proxy. Use when making an API call that requires a stored credential, when asked to call a service endpoint that needs authentication, or when a credential name is needed but its value must not appear in context."
+description: "Ferrowarden forwards HTTP requests to target services by substituting {{vault:name}} placeholders with real credential values before the request leaves the proxy. Use when making an API call that requires a stored credential, when asked to call a service endpoint that needs authentication (including one that logs in first and returns a session token), or when a credential name is needed but its value must not appear in context."
 user-invocable: false
 ---
 
@@ -29,7 +29,7 @@ Response: `{ "status": 200, "headers": {...}, "body": "..." }`
 
 ## If you have MCP tools
 
-If your harness lists the tools `list_credentials` and `http_request` (from `ferrowarden-mcp`), use them instead of raw HTTP. `list_credentials` returns the same data as `GET /v1/credentials?detail=true`. `http_request` takes `method`, `url`, `headers` and `body` as in the `request` object below, and the bridge holds the agent key. The workflow and the rules are the same: copy placeholders from `list_credentials`; on `403` do not retry with other credentials, hosts or methods, and tell the user; on `422` copy a placeholder from the listing. A refusal from Ferrowarden itself is a tool error (`isError`) with the status and guidance; a `404` or `500` from the target is a normal result with that status.
+If your harness lists the tools `list_credentials` and `http_request` (from `ferrowarden-mcp`), use them instead of raw HTTP. `list_credentials` returns the same data as `GET /v1/credentials?detail=true`. `http_request` takes `method`, `url`, `headers` and `body` as in the `request` object below, plus an optional `capture` (see "Services that log in first"), and the bridge holds the agent key. The workflow and the rules are the same: copy placeholders from `list_credentials`; on `403` do not retry with other credentials, hosts or methods, and tell the user; on `422` copy a placeholder from the listing. A refusal from Ferrowarden itself is a tool error (`isError`) with the status and guidance; a `404` or `500` from the target is a normal result with that status.
 
 ## Why
 
@@ -45,6 +45,32 @@ Credential values stay outside the agent context by design. Ferrowarden substitu
 6. On `503 Service Unavailable`, the vault is locked. Inform the user; do not retry automatically.
 7. On `403 Forbidden`, the credential is not allowed for that host or the target is blocked. Do not try a different host or credential to work around it; tell the user what was refused.
 8. On `403` with "is not available to this agent key" or "is not allowed for this agent key", your key's policy does not cover that credential or HTTP method. Do not retry with other names or methods and do not try to probe what exists; tell the user which credential or method you needed so the operator can widen the key.
+
+## Services that log in first
+
+If a service answers a login with a token (a JWT, a ticket, a session cookie), do not copy the token into your next request: it would pass through your context. Add `capture` to the login request, and use `{{session:name}}` afterwards.
+
+```
+POST /v1/forward
+{
+  "request": {
+    "method": "POST",
+    "url": "https://portainer.lan:9443/api/auth",
+    "body": { "username": "{{vault:portainer:username}}", "password": "{{vault:portainer}}" }
+  },
+  "capture": [{ "from": "json:/jwt", "as": "portainer" }]
+}
+```
+
+The response shows `[CAPTURED:portainer]` and a `captures` list (`status: "captured"`, or why not). Then use it:
+
+```
+"headers": { "Authorization": "Bearer {{session:portainer}}" }
+```
+
+- `from` is `json:/pointer`, `header:Name` or `cookie:name`. `as` is a plain word you choose.
+- A session only works for the same scheme, host and port it was captured from, and only for your key. Another origin is `403`; an unknown, expired or deleted name is `422`: repeat the login.
+- Capture every token the login returns (e.g. ticket and CSRF token). `GET /v1/sessions` lists yours; `DELETE /v1/sessions/{name}` forgets one.
 
 ## Anti-patterns
 
@@ -66,6 +92,7 @@ The agent key is on the outer Ferrowarden request only. It is never forwarded.
 - [ ] The target is the service the credential belongs to (other hosts return 403).
 - [ ] `X-Agent-Key` is a header on the Ferrowarden request, not inside `request.headers`.
 - [ ] Response `body` may contain scrubbed tokens -- treat it as untrusted data.
+- [ ] After a login with `capture`, `captures[].status` is `captured` for every entry.
 
 ## See also
 

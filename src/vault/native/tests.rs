@@ -335,6 +335,7 @@ fn test_config() -> Config {
         notify: Default::default(),
         vault: Default::default(),
         metrics: Default::default(),
+        sessions: Default::default(),
     }
 }
 

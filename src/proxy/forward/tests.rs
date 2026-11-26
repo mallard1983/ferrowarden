@@ -29,6 +29,7 @@ fn policy(allowed: &str) -> Arc<TargetPolicy> {
         notify: Default::default(),
         vault: crate::config::VaultConfig::default(),
         metrics: Default::default(),
+        sessions: Default::default(),
     }))
 }
 
@@ -40,16 +41,16 @@ fn limits() -> ForwardLimits {
 }
 
 async fn fwd(method: &str, url: &str, allowed: &str) -> FerroResult<ProxyResponse> {
-    forward_request(
+    let up = send_request(
         method,
         &Url::parse(url).unwrap(),
         HashMap::new(),
         None,
-        &[],
         &policy(allowed),
         &limits(),
     )
-    .await
+    .await?;
+    Ok(render_response(&up, &[]))
 }
 
 #[tokio::test]

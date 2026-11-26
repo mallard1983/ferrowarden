@@ -114,7 +114,81 @@ X-Agent-Key: ag_abc123...
 
 ---
 
-## 6. Handling a 422 -- unknown credential name
+## 6. Log in and keep the token out of context (Portainer)
+
+Step 1: log in, and ask Ferrowarden to capture the `jwt` of the answer.
+```json
+{
+  "request": {
+    "method": "POST",
+    "url": "https://portainer.lan:9443/api/auth",
+    "body": { "username": "{{vault:portainer:username}}", "password": "{{vault:portainer}}" }
+  },
+  "capture": [{ "from": "json:/jwt", "as": "portainer" }]
+}
+```
+
+Response (the token is not in it):
+```json
+{
+  "status": 200,
+  "headers": { "content-type": "application/json" },
+  "body": "{\"jwt\":\"[CAPTURED:portainer]\"}",
+  "body_encoding": "utf8",
+  "captures": [{ "as": "portainer", "status": "captured", "expires_at": "2026-01-01T12:30:00Z" }]
+}
+```
+
+Step 2: use it.
+```json
+{
+  "request": {
+    "method": "GET",
+    "url": "https://portainer.lan:9443/api/endpoints",
+    "headers": { "Authorization": "Bearer {{session:portainer}}" }
+  }
+}
+```
+
+If step 2 returns `422` ("Session portainer is unknown or expired; log in again"), repeat step 1. If `captures[0].status` is not `captured`, nothing was stored: do not retry blindly; read the status (`not_found` means the pointer is wrong) and tell the user if it persists.
+
+---
+
+## 7. Proxmox ticket and CSRF token
+
+Capture both values of the login answer:
+```json
+{
+  "request": {
+    "method": "POST",
+    "url": "https://pve.lan:8006/api2/json/access/ticket",
+    "headers": { "Content-Type": "application/x-www-form-urlencoded" },
+    "body": "username={{vault:proxmox:username}}&password={{vault:proxmox}}"
+  },
+  "capture": [
+    { "from": "json:/data/ticket", "as": "pve_ticket" },
+    { "from": "json:/data/CSRFPreventionToken", "as": "pve_csrf" }
+  ]
+}
+```
+
+Reads need the cookie; writes need the CSRF header too:
+```json
+{
+  "request": {
+    "method": "POST",
+    "url": "https://pve.lan:8006/api2/json/nodes/pve/qemu/100/status/stop",
+    "headers": {
+      "Cookie": "PVEAuthCookie={{session:pve_ticket}}",
+      "CSRFPreventionToken": "{{session:pve_csrf}}"
+    }
+  }
+}
+```
+
+---
+
+## 8. Handling a 422 -- unknown credential name
 
 Response:
 ```json
@@ -129,7 +203,7 @@ Correct action:
 
 ---
 
-## 7. Handling a 429 -- rate limit
+## 9. Handling a 429 -- rate limit
 
 Response headers include `Retry-After: 3`.
 
@@ -137,7 +211,7 @@ Correct action: wait 3 seconds, then resend the identical request once.
 
 ---
 
-## 8. Handling a 503 -- vault locked
+## 10. Handling a 503 -- vault locked
 
 ```json
 { "error": "Vault is locked" }
