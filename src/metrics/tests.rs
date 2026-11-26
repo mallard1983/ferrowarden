@@ -8,7 +8,7 @@ use std::time::Duration;
 const VERSION: &str = "9.9.9-test";
 
 fn metrics(credential_labels: bool) -> Arc<Metrics> {
-    Metrics::new(VERSION, "bw-serve", credential_labels)
+    Metrics::new(VERSION, "native", credential_labels)
 }
 
 fn key(name: &str) -> AgentKey {
@@ -287,7 +287,7 @@ fn scrape_time_values_come_from_the_snapshot() {
     assert_eq!(
         value(
             &text,
-            &format!("ferrowarden_build_info{{version=\"{VERSION}\",vault_backend=\"bw-serve\"}}")
+            &format!("ferrowarden_build_info{{version=\"{VERSION}\",vault_backend=\"native\"}}")
         ),
         Some(1.0)
     );
@@ -845,5 +845,5 @@ async fn the_started_consumer_counts_what_the_log_emits() {
 #[tokio::test]
 async fn metrics_off_starts_nothing() {
     let log = Arc::new(EventLog::buffer_only(16));
-    assert!(start(&MetricsConfig::default(), "bw-serve", &log).is_none());
+    assert!(start(&MetricsConfig::default(), "native", &log).is_none());
 }

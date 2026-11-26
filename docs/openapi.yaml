@@ -282,7 +282,7 @@ paths:
       tags: [admin]
       summary: Unlock the vault (manual unlock mode)
       description: |
-        Sends the vault master password to the vault backend (`bw serve`) and, on success, reloads the credential list. Only available when Ferrowarden runs with `unlock_mode = manual`; with `file` mode the vault unlocks at startup and this endpoint returns `404`.
+        Sends the vault master password to the vault backend and, on success, reloads the credential list. Only available when Ferrowarden runs with `unlock_mode = manual`; with `file` mode the vault unlocks at startup and this endpoint returns `404`.
 
         The password is not stored or logged. The body is read only after the admin key has been accepted.
       security:
@@ -665,7 +665,7 @@ paths:
                 unlocked:
                   value:
                     locked: false
-                    vault_backend: bw-serve
+                    vault_backend: native
                     credential_count: 12
                     agent_key_count: 2
         "401":
@@ -797,7 +797,7 @@ components:
             type: string
           example: Rate limit exceeded. See the Retry-After header.
     VaultLocked:
-      description: The vault is locked, or the vault backend (`bw serve`) cannot be reached. Credentials cannot be read until the vault is unlocked.
+      description: The vault is locked, or Vaultwarden cannot be reached. Credentials cannot be read until the vault is unlocked.
       headers:
         X-Request-Id:
           $ref: "#/components/headers/XRequestId"
@@ -1187,8 +1187,8 @@ components:
           description: Whether the vault is locked.
         vault_backend:
           type: string
-          enum: [bw-serve, native]
-          description: The vault backend in use (`vault.backend`).
+          enum: [native]
+          description: The vault backend in use (`vault.backend`). Always `native`; the field stays so that dashboards and SIEM rules keep working.
         credential_count:
           type: integer
           minimum: 0

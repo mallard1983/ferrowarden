@@ -164,7 +164,7 @@ services:
       FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
       # The vault backend is native (the default): Ferrowarden signs in to
       # Vaultwarden with your API key and decrypts only the one field a request
-      # needs. No bw serve, no Bitwarden CLI, no decrypted values on the network
+      # needs. No Bitwarden CLI, no Node, no decrypted values on the network
       # (docs/native-vault.md, docs/architecture.md).
       FERROWARDEN_VAULT__URL: "https://vaultwarden"
       # Trusts the internal CA that signed the Vaultwarden certificate. Also used

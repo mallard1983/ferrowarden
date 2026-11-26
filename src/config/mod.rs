@@ -28,10 +28,10 @@ pub struct Config {
     #[serde(default = "default_bind_addr")]
     pub bind_addr: String,
 
-    /// URL of the bw serve process.
-    /// Must be localhost-only — bw serve should never be exposed externally.
-    #[serde(default = "default_bw_serve_url")]
-    pub bw_serve_url: String,
+    /// Leftover `bw_serve_url` / `FERROWARDEN_BW_SERVE_URL` from the removed
+    /// bw-serve backend. Read only to warn that it is ignored.
+    #[serde(default)]
+    pub bw_serve_url: Option<String>,
 
     /// Unlock mode. Required — the operator must make an explicit choice.
     pub unlock_mode: UnlockMode,
@@ -70,8 +70,9 @@ pub struct Config {
 
     /// Allow forwarding to private, loopback, link-local and other
     /// non-public addresses. Default: false. Prefer `allowed_targets` to open
-    /// only the specific internal hosts or ranges an agent needs. The bw serve
-    /// endpoint is always blocked regardless of this setting.
+    /// only the specific internal hosts or ranges an agent needs. Vaultwarden
+    /// (`vault.url`) and the notifier endpoints are always blocked regardless
+    /// of this setting.
     #[serde(default)]
     pub allow_private_targets: bool,
 
@@ -90,7 +91,7 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub enforce_credential_hosts: bool,
 
-    /// How often (seconds) to sync bw serve with Vaultwarden, refresh the
+    /// How often (seconds) to sync with Vaultwarden, refresh the
     /// credential cache and re-check the lock state. 0 disables the refresh.
     #[serde(default = "default_refresh_interval_secs")]
     pub refresh_interval_secs: u64,
@@ -478,24 +479,37 @@ impl EventsConfig {
 
 // ── Vault backend ─────────────────────────────────────────────────────────────
 
-/// The vault backend, chosen once at startup.
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
-#[serde(rename_all = "kebab-case")]
+/// The vault backend, chosen once at startup. `native` is the only one; the
+/// setting stays so that configs that name it keep working, and so that a
+/// config that still names the removed `bw-serve` fails loudly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VaultBackend {
-    /// The Bitwarden CLI's `bw serve` REST API (`bw_serve_url`). Deprecated:
-    /// removed in the release after 0.2.0.
-    BwServe,
     /// The Bitwarden client protocol implemented in Rust directly against
-    /// Vaultwarden: no `bw`, no Node. Needs `vault.url` and an API key. The
-    /// default.
+    /// Vaultwarden: no `bw`, no Node. Needs `vault.url` and an API key.
     #[default]
     Native,
+}
+
+/// Startup error for `vault.backend = "bw-serve"` (deprecated in 0.2.0,
+/// removed in 0.3.0).
+pub const BW_SERVE_REMOVED: &str = "vault.backend = \"bw-serve\" was removed in 0.3.0: the native backend is the only one. See docs/native-vault.md#upgrading-from-bw-serve";
+
+impl<'de> Deserialize<'de> for VaultBackend {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "native" => Ok(VaultBackend::Native),
+            "bw-serve" => Err(serde::de::Error::custom(BW_SERVE_REMOVED)),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown vault.backend {other:?}: the only value is \"native\""
+            ))),
+        }
+    }
 }
 
 impl VaultBackend {
     pub fn as_str(self) -> &'static str {
         match self {
-            VaultBackend::BwServe => "bw-serve",
             VaultBackend::Native => "native",
         }
     }
@@ -555,7 +569,8 @@ impl VaultCredentials {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct VaultConfig {
-    /// `native` (default) or `bw-serve` (deprecated).
+    /// `native`, the only backend (`bw-serve` was removed in 0.3.0 and is a
+    /// startup error).
     pub backend: VaultBackend,
     /// Vaultwarden base URL: how Ferrowarden reaches the server. Used by the
     /// native backend and, with the admin UI, to verify the master password at
@@ -570,18 +585,13 @@ pub struct VaultConfig {
     /// ("Hide passwords", `viewPassword: false`). Default `false`: such items
     /// are left out (reason `hidden_password` in the `vault_sync` event),
     /// because Ferrowarden would hand the password to an agent that the
-    /// collection's owner meant to keep from it. Native backend only: `bw
-    /// serve` reports no `viewPassword` and withholds such passwords itself.
-    /// `FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS`.
+    /// collection's owner meant to keep from it. `FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS`.
     pub allow_hidden_passwords: bool,
     /// The native backend's API key (`FERROWARDEN_VAULT_CLIENT_ID[_FILE]`,
     /// `FERROWARDEN_VAULT_CLIENT_SECRET[_FILE]`).
     #[serde(skip)]
     pub credentials: VaultCredentials,
 }
-
-/// Logged at startup when `vault.backend = bw-serve`.
-pub const BW_SERVE_DEPRECATED: &str = "the bw-serve backend is deprecated and will be removed in the next release; see docs/native-vault.md#switching";
 
 pub const DEFAULT_VAULT_URL: &str = "https://vaultwarden";
 
@@ -668,13 +678,9 @@ impl VaultConfig {
         notes
     }
 
-    /// Native settings are required in native mode and meaningless otherwise.
-    /// Returns warnings for settings that are set but ignored.
-    pub(crate) fn validate(
-        &self,
-        bw_serve_url_set: bool,
-        native_vars_set: bool,
-    ) -> FerroResult<Vec<String>> {
+    /// The native settings are required. Returns warnings for settings that
+    /// are set but ignored.
+    pub(crate) fn validate(&self, bw_serve_url_set: bool) -> FerroResult<Vec<String>> {
         let mut warnings = Vec::new();
         match self.backend {
             VaultBackend::Native => {
@@ -682,35 +688,21 @@ impl VaultConfig {
                 if self.credentials.client_id.is_none() || self.credentials.client_secret.is_none()
                 {
                     return Err(FerroError::Config(format!(
-                        "the native vault backend (the default since 0.2.0) requires the \
-                         Vaultwarden API key: set {ENV_VAULT_CLIENT_ID} (or \
-                         {ENV_VAULT_CLIENT_ID}_FILE) and {ENV_VAULT_CLIENT_SECRET} (or \
-                         {ENV_VAULT_CLIENT_SECRET}_FILE), and vault.url \
-                         (FERROWARDEN_VAULT__URL) if Vaultwarden is not at \
-                         {DEFAULT_VAULT_URL}. See docs/native-vault.md. To stay on the \
-                         deprecated bw serve backend for now, set vault.backend = \
-                         \"bw-serve\" (FERROWARDEN_VAULT__BACKEND=bw-serve)"
+                        "the native vault backend requires the Vaultwarden API key: set \
+                         {ENV_VAULT_CLIENT_ID} (or {ENV_VAULT_CLIENT_ID}_FILE) and \
+                         {ENV_VAULT_CLIENT_SECRET} (or {ENV_VAULT_CLIENT_SECRET}_FILE), and \
+                         vault.url (FERROWARDEN_VAULT__URL) if Vaultwarden is not at \
+                         {DEFAULT_VAULT_URL}. See docs/native-vault.md"
                     )));
                 }
-                if bw_serve_url_set {
-                    warnings.push("vault.backend = native: bw_serve_url is ignored".to_string());
-                }
             }
-            VaultBackend::BwServe => {
-                warnings.push(BW_SERVE_DEPRECATED.to_string());
-                if self.allow_hidden_passwords {
-                    warnings.push(
-                        "vault.allow_hidden_passwords has no effect with vault.backend = bw-serve (bw serve withholds the password of such items itself)"
-                            .to_string(),
-                    );
-                }
-                if native_vars_set {
-                    warnings.push(format!(
-                        "vault.backend = bw-serve: {ENV_VAULT_CLIENT_ID} and \
-                         {ENV_VAULT_CLIENT_SECRET} are ignored (they belong to the native backend)"
-                    ));
-                }
-            }
+        }
+        if bw_serve_url_set {
+            warnings.push(
+                "bw_serve_url (FERROWARDEN_BW_SERVE_URL) is ignored: the bw-serve backend was \
+                 removed in 0.3.0; delete the setting"
+                    .to_string(),
+            );
         }
         Ok(warnings)
     }
@@ -991,10 +983,6 @@ fn default_bind_addr() -> String {
     "0.0.0.0:3000".to_string()
 }
 
-fn default_bw_serve_url() -> String {
-    "http://127.0.0.1:8087".to_string()
-}
-
 fn default_tls_enabled() -> bool {
     true
 }
@@ -1126,11 +1114,7 @@ impl Config {
         for note in &notes {
             tracing::warn!("{note}");
         }
-        // The API key matters to the native backend only. In bw-serve mode
-        // the variables are not read (a stale `_FILE` must not stop startup).
-        if cfg.vault.backend == VaultBackend::Native {
-            cfg.vault.credentials = VaultCredentials::from_env()?;
-        }
+        cfg.vault.credentials = VaultCredentials::from_env()?;
 
         cfg.validate()?;
 
@@ -1192,15 +1176,7 @@ impl Config {
         self.ui.validate()?;
         self.notify.validate()?;
         self.metrics.validate(&self.bind_addr, &self.ui.bind)?;
-        let native_vars_set = [ENV_VAULT_CLIENT_ID, ENV_VAULT_CLIENT_SECRET]
-            .iter()
-            .any(|n| {
-                std::env::var_os(n).is_some() || std::env::var_os(format!("{n}_FILE")).is_some()
-            });
-        for warning in self
-            .vault
-            .validate(self.bw_serve_url != default_bw_serve_url(), native_vars_set)?
-        {
+        for warning in self.vault.validate(self.bw_serve_url.is_some())? {
             tracing::warn!("{warning}");
         }
 

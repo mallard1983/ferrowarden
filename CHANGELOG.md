@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+### Removed
+
+- **The `bw-serve` vault backend** (#48), deprecated in 0.2.0: the `bw serve` client, `vault.backend = "bw-serve"`, the `bw_serve_url` setting (`FERROWARDEN_BW_SERVE_URL`), the deprecation warning, `docker-compose.bw-serve.yml` and the `bw_serve_locked` lock cause. Nothing in the project or its CI runs Node.js or the Bitwarden CLI as part of Ferrowarden any more; the native backend is the only vault backend. The internal `Vault` interface stays so that another backend can be added later.
+
+### Changed
+
+- **Breaking: `vault.backend = "bw-serve"` (in `ferrowarden.toml` or as `FERROWARDEN_VAULT__BACKEND=bw-serve`) is now a startup error**, not a silent fallback. The message says the backend was removed in 0.3.0 and points to [docs/native-vault.md](docs/native-vault.md#upgrading-from-bw-serve). `vault.backend` accepts `native` only (a config that sets it explicitly keeps working). A leftover `bw_serve_url` or `FERROWARDEN_BW_SERVE_URL` is ignored, with a warning. **Upgrading:** if you were on `bw-serve` in 0.2.0, first follow the 0.2.0 upgrade steps (remove the override file, `chown 999:999` the API key files, set `vault.url` if you run outside the bundled Compose file), then upgrade, and remove the unused `bw-data` volume with the same care as before (`vaultwarden-data` holds your vault).
+- `vault_backend` in `GET /v1/admin/status`, the `startup` event, `ferrowarden_build_info` and the admin UI is always `native`. The field stays so that dashboards and SIEM rules keep working.
+- The error for an unreachable vault no longer says "bw serve" (`Vault backend is unreachable`), and the help text of `ferrowarden_vault_excluded_items` no longer mentions `bw serve`.
+
+### Internal
+
+- The test stack runs one Ferrowarden, the native one, as `ferrowarden` on port 3000 (UI 3001, metrics 9095). `ferrowarden-native` (3003, 3004, 9096), the `bw-serve` service, `.env.test.native` and the Bitwarden CLI pairing (`BW_CLI_VERSION`) are gone; `docker/bw-cli.Dockerfile` is now `docker/setup.Dockerfile`, a pinned `node:*-slim` for the one-shot setup and seed containers only (no Bitwarden CLI; the `bw_client_id`, `bw_client_secret` and `bw_master_password` secret names are unchanged). CI runs the integration suite once per Vaultwarden version, with the same job names.
+- `tests/equivalence.rs` is removed with the backend it compared against. Its coverage is kept as native-only integration tests that derive the expected listing and every expected value from `tests/seed/*.json`: `test_listing_matches_the_seed_data` and `test_every_offered_placeholder_delivers_the_seeded_value`. See [docs/native-vault.md](docs/native-vault.md#how-formats-are-verified) for what vouches for the formats now.
+- Unit tests that built an `AppState` with the `bw-serve` backend (because it needed no credentials) use an in-memory `Vault` that exists only in the test build.
+
 ## [0.2.0] — 2026-11-25
 
 > This release reads the vault natively, with no `bw serve`, Node.js or openssl in the default deployment, ships a hardened shell-less container, widens credential coverage with field placeholders, makes agent keys default-deny and scoped, adds an optional admin web UI, records security events in a stable format for your SIEM, and adds push notifications, Prometheus metrics, an MCP server and an OpenAPI specification. Review the upgrade notes and security changes before deployment: the default vault backend changes (the `bw-serve` container is gone from the default stack), and keys created with 0.1.0 become deny-all until you set a policy.

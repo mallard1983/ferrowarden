@@ -1,22 +1,14 @@
 # The native vault backend
 
-Since 0.2.0 Ferrowarden reads the vault itself. This is the **default** (`vault.backend = "native"`): it speaks the Bitwarden client protocol to Vaultwarden and does the cryptography in Rust. The earlier way, the Bitwarden CLI's `bw serve`, is **deprecated** and still selectable for this one release (`vault.backend = "bw-serve"`); it is removed in the next release.
+Ferrowarden reads the vault itself: it speaks the Bitwarden client protocol to Vaultwarden and does the cryptography in Rust. This is the only vault backend (`vault.backend = "native"`, the default). The Bitwarden CLI's `bw serve`, which 0.1.0 used and 0.2.0 deprecated, was removed in 0.3.0: see [Upgrading from bw-serve](#upgrading-from-bw-serve).
 
-| | `native` (default) | `bw-serve` (deprecated, removed next release) |
-|---|---|---|
-| How | Ferrowarden speaks the Bitwarden client protocol to Vaultwarden itself and does the cryptography in Rust | The Bitwarden CLI (`bw serve`) logs in, syncs and decrypts; Ferrowarden calls its local REST API |
-| Extra containers | none | `bw-serve` (Node.js, the `bw` CLI) |
-| Where secrets are decrypted | In Ferrowarden, one value at a time, on request; nothing decrypted crosses a network | In `bw serve`; a value crosses a local HTTP connection to Ferrowarden |
-| Vault in memory | Ciphertext; only metadata (names, URIs, field names) is decrypted | Decrypted, inside `bw serve` |
-| Status | Default | Deprecated; startup logs a warning |
+- No extra containers: no Bitwarden CLI and no Node.js.
+- Secrets are decrypted in Ferrowarden, one value at a time, on request. Nothing decrypted crosses a network.
+- The vault is held in memory as ciphertext. Only metadata (names, URIs, field names) is decrypted.
 
-Both back ends implement the same internal `Vault` interface, and everything else (placeholders, host binding, policy, scrubbing, events, the admin UI) is the same code. The two are tested against each other: see [Equivalence](#equivalence-with-bw-serve).
+The code that reads the vault sits behind an internal `Vault` interface, and everything else (placeholders, host binding, policy, scrubbing, events, the admin UI) uses only that. The interface stays so that another backend can be added later; the native one is its only implementation.
 
-## Switching
-
-Native is the default, so a new deployment needs no switch: [setup.md](setup.md) is the path. This section is for two cases: you are **upgrading from 0.1.0**, or you want to **stay on bw-serve for this release**.
-
-### Native settings
+## Settings
 
 ```toml
 [vault]
@@ -31,27 +23,26 @@ FERROWARDEN_VAULT_CLIENT_ID_FILE=/run/secrets/bw_client_id          # user.<uuid
 FERROWARDEN_VAULT_CLIENT_SECRET_FILE=/run/secrets/bw_client_secret
 ```
 
-(`FERROWARDEN_VAULT_CLIENT_ID` and `FERROWARDEN_VAULT_CLIENT_SECRET` also work; a direct variable wins over its `_FILE`.) These are the same two files (`secrets/bw_client_id`, `secrets/bw_client_secret`) the `bw-serve` container used. The values never come from `ferrowarden.toml`. If either is missing, startup fails with a message that names both variables and `vault.url`, and tells you how to stay on bw-serve.
+(`FERROWARDEN_VAULT_CLIENT_ID` and `FERROWARDEN_VAULT_CLIENT_SECRET` also work; a direct variable wins over its `_FILE`.) The secret files keep the names `bw_client_id` and `bw_client_secret` from earlier releases, so an existing `secrets/` directory works unchanged. The values never come from `ferrowarden.toml`. If either is missing, startup fails with a message that names both variables and `vault.url`.
 
 - `unlock_mode` and `unlock_file` work exactly as before: **file mode** logs in, syncs and unlocks at startup and again when the vault locks; **manual mode** waits for `POST /v1/unlock` (or the admin UI) to supply the master password.
-- `bw_serve_url` is ignored in native mode (Ferrowarden warns if it is set), and the API key variables are ignored in `bw-serve` mode.
+- `vault.backend` accepts `native` only. `vault.backend = "bw-serve"` (or `FERROWARDEN_VAULT__BACKEND=bw-serve`) is a **startup error**, never a silent fallback. A leftover `bw_serve_url` (or `FERROWARDEN_BW_SERVE_URL`) is ignored, with a warning at startup.
 - `vault.url` and `vault.ca_file` are *the* setting for how Ferrowarden reaches Vaultwarden. They replace `ui.vaultwarden_url` and `ui.vaultwarden_ca_file`, which still work as deprecated aliases (a warning is logged; if both are set and differ, `vault.*` wins). `vault.url` must be `https://` (plain `http://` only for loopback hosts, for tests). Certificate verification is never switched off.
-- Native mode does not need the `bw-serve` container, the Bitwarden CLI or Node.js. `docker-compose.yml` no longer has a `bw-serve` service or a `bw-data` volume.
 - `vault.allow_hidden_passwords` (`FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS`, default `false`): see [Hidden passwords](#hidden-passwords-collections-that-hide-them).
-- The startup event and `GET /v1/admin/status` report the backend (`vault_backend`), and so does the admin UI's status page.
+- The startup event, `GET /v1/admin/status`, the `ferrowarden_build_info` metric and the admin UI's status page report the backend as `vault_backend`. The value is always `native` now; the field stays so that dashboards and SIEM rules keep working.
 - In file unlock mode one process holds both the API key and the master password. Manual unlock is the hardened option: see [security.md](security.md#native-backend-one-process-holds-both-secrets).
 
-### Staying on bw-serve for this release
+## Upgrading from bw-serve
 
-If you cannot move yet, keep the deprecated backend:
+0.3.0 removes the `bw-serve` backend, its Compose override and the `bw_serve_url` setting. If you moved to the native backend with 0.2.0 (the default there), there is nothing to do.
 
-```sh
-docker compose -f docker-compose.yml -f docker-compose.bw-serve.yml up -d
-```
+If you were still on `bw-serve` in 0.2.0 (you used `docker-compose.bw-serve.yml`, or set `vault.backend = "bw-serve"`):
 
-`docker-compose.bw-serve.yml` adds the `bw-serve` service and its `bw-data` volume back and sets `FERROWARDEN_VAULT__BACKEND=bw-serve` and `FERROWARDEN_BW_SERVE_URL`. Outside Compose, set `vault.backend = "bw-serve"` (or `FERROWARDEN_VAULT__BACKEND=bw-serve`) and `bw_serve_url`. Ferrowarden then logs "the bw-serve backend is deprecated and will be removed in the next release" at every start. The override file is removed together with the backend.
+1. **Move to native on 0.2.0 first.** Follow the 0.2.0 upgrade steps ([release-notes/v0.2.0.md](release-notes/v0.2.0.md#upgrading)): stop using the override file, `chown 999:999` the API key files (`secrets/bw_client_id`, `secrets/bw_client_secret`), and set `vault.url` if Vaultwarden is not at `https://vaultwarden` (that is, you run outside the bundled Compose file). Check that the vault loads and your agents work.
+2. **Then upgrade to 0.3.0.** Remove `vault.backend = "bw-serve"` from `ferrowarden.toml` and `FERROWARDEN_VAULT__BACKEND` from the environment (or set it to `native`), and delete `bw_serve_url` / `FERROWARDEN_BW_SERVE_URL`.
+3. **Remove the `bw-data` volume** once nothing uses it: `docker volume rm <project>_bw-data` (list the volumes with `docker volume ls`). It held only the Bitwarden CLI's local login state, which nothing reads any more. Take the same care as with any volume: do not remove `vaultwarden-data`, which is your vault. Neither back end stores anything else between runs, so there is nothing to migrate.
 
-To move to native later, drop the override file and restart; nothing is stored by either back end between runs, so there is nothing to migrate.
+Starting 0.3.0 with `vault.backend = "bw-serve"` set fails with an error that points here; it does not fall back to native.
 
 ## How it works
 
@@ -85,9 +76,8 @@ One `vault_sync` event per sync carries the counts by reason and up to 20 item *
 
 An organisation collection can be shared with a member as **"Hide passwords"**: the member can use the item but is not meant to see its password. Vaultwarden then marks the item `viewPassword: false` in that member's sync. Ferrowarden holds the account's keys and would hand the password to an agent, which the collection's owner chose to keep from this account. So the default is to refuse:
 
-- **Native backend:** an item with `viewPassword: false` is **left out** (reason `hidden_password` in the `vault_sync` event, with the count and the item ids, never a name or a value; also counted in `ferrowarden_vault_excluded_items`). It is not listed by `/v1/credentials`, the MCP server or the policy preview, and a placeholder naming it fails like an unknown item. Only an explicit `false` counts: an item without the field (an older server) is not affected.
+- An item with `viewPassword: false` is **left out** (reason `hidden_password` in the `vault_sync` event, with the count and the item ids, never a name or a value; also counted in `ferrowarden_vault_excluded_items`). It is not listed by `/v1/credentials`, the MCP server or the policy preview, and a placeholder naming it fails like an unknown item. Only an explicit `false` counts: an item without the field (an older server) is not affected.
 - **`vault.allow_hidden_passwords = true`** (`FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS`, default `false`) is the opt-in for operators who want the account's agents to use such items anyway. Ferrowarden logs a warning at startup, and the `startup` event records `vault_allow_hidden_passwords`.
-- **`bw-serve` backend:** `bw serve` does **not** report `viewPassword` (neither the list nor the single-item JSON has the field, and the collection list has no `hidePasswords`), so Ferrowarden cannot tell such an item apart. The CLI withholds the password itself, though: the item's `login.password` is `null` and `GET /object/password/<id>` answers "No password available for this login". With `bw-serve` the item therefore **is listed** (with its username and notes placeholders, but no password placeholder) and its password is never released, whatever `vault.allow_hidden_passwords` says (it has no effect with `bw-serve`; Ferrowarden warns if it is set). The equivalence suite asserts this difference and that neither backend ever releases the password. Use the native backend if you need the whole item left out.
 
 ## Supported formats
 
@@ -106,40 +96,45 @@ The type number decides the algorithm; nothing is guessed from the shape of the 
 |---|---|---|
 | Login (1) | yes | username, password, TOTP, notes, custom fields |
 | Secure note (2) | yes | notes, custom fields, bindings through `ferrowarden_uris` |
-| Card (3), identity (4), SSH key (5) | no | parsed enough to know they exist; same as `bw-serve` mode |
+| Card (3), identity (4), SSH key (5) | no | parsed enough to know they exist |
 | In the trash (`deletedDate`) | no | |
-| Archived (`archivedDate`) | no | `bw serve` does not list them either (checked by the equivalence suite) |
+| Archived (`archivedDate`) | no | |
 | Organisation items, with or without a per-item key | yes | except items whose collection hides passwords from the account (`viewPassword = false`): left out unless `vault.allow_hidden_passwords` is on, see below |
 
-**Format drift.** A client format Ferrowarden does not know is not guessed at: the affected items are excluded and counted in the `vault_sync` event, so a newer client writing a new format shows up as a number to investigate rather than as a silent failure or a weaker decryption. Every other item keeps working. Until bw-serve is removed (next release), it remains available as a temporary fallback for formats not yet implemented.
+**Format drift.** A client format Ferrowarden does not know is not guessed at: the affected items are excluded and counted in the `vault_sync` event, so a newer client writing a new format shows up as a number to investigate rather than as a silent failure or a weaker decryption. Every other item keeps working.
 
 TOTP: RFC 6238 with SHA-1, SHA-256 or SHA-512; `otpauth://` URIs (`algorithm`, `digits` 1 to 10, `period` above 0), bare base32 secrets (case-insensitive; spaces and `=` ignored) and `steam://`. A specification that cannot produce a code behaves like a missing TOTP (the placeholder fails with "not found").
 
-## Equivalence with bw serve
+## How formats are verified
 
-`docker-compose.test.yml` runs **two Ferrowarden instances** against the same Vaultwarden account: `ferrowarden` (`bw serve`, port 3000) and `ferrowarden-native` (native, port 3003, admin UI on 3004). `tests/equivalence.rs` proves they behave the same:
+The native backend implements the protocol itself, so nothing else vouches for what it reads. Four checks stand in for an independent reference implementation:
 
-1. `GET /v1/credentials?detail=true` is identical: names, kinds, placeholders, bindings, unavailable reasons.
-2. For **every** placeholder the listing offers, and a set of deliberately bad ones, a forward to the mock API through each instance gives the same status and the same substituted value. Values are compared in memory and never printed; a mismatch is reported by placeholder label and side only.
+- **Known-answer vectors.** `src/vault/native/testdata/vectors.json` holds vectors for the key hierarchy and EncStrings, generated independently with Node's `crypto` module (`tests/native-vectors/gen.js`), and the unit tests check the Rust code against them. TOTP is checked against the RFC 6238 test vectors.
+- **A vault written by a real web vault.** `src/vault/native/testdata/webvault/` is a capture from the web vault bundled with Vaultwarden, covering formats our own seeder does not write (see [below](#a-vault-written-by-the-web-vault)). **Recapture it on each Vaultwarden minor release**: create a throwaway account in the web vault that release bundles, add one of each item type, and save the prelogin, token and sync responses (the capture steps are in the [README](../src/vault/native/testdata/README.md)). If the new release writes something Ferrowarden does not read, the unit test that unlocks the capture fails by item name.
+- **Fail-closed exclusion counts.** An item Ferrowarden cannot read safely is left out and counted per reason ([above](#fail-closed-per-item)), never read with a weaker method, so a format that drifts shows up as a number in the `vault_sync` event and in `ferrowarden_vault_excluded_items`, not as a wrong value.
+- **Two Vaultwarden versions in CI.** The whole integration suite runs against the current release and the previous minor ([below](#tested-vaultwarden-versions)), with a PBKDF2 and an Argon2id account.
 
-The fixture vault (`tests/seed/credentials.json`, written by `docker/bw-seed.js` with Node's `crypto`, no `bw` CLI) covers per-item keys, an organisation with a collection, organisation items with and without per-item keys, card/identity/SSH items, a custom-field mix of every kind, URI match types, TOTP in all three shapes (SHA-256 with 8 digits and a 60 second period, Steam, a bare secret with spaces), and edge cases: a whitespace-only password, an empty-string username, an item without URIs, Unicode and very long values, and an archived item.
+The integration suite also checks the seeded fixture vault end to end. The fixtures (`tests/seed/credentials.json`, written by `docker/bw-seed.js` with Node's `crypto`) cover per-item keys, an organisation with a collection, organisation items with and without per-item keys, card/identity/SSH items, a custom-field mix of every kind, URI match types, TOTP in all three shapes (SHA-256 with 8 digits and a 60 second period, Steam, a bare secret with spaces), and edge cases: a whitespace-only password, an empty-string username, an item without URIs, Unicode and very long values, and an archived item. Two tests compare Ferrowarden with what the fixture files define, with no second implementation involved:
 
-The fixture vault also has the **hidden-password** case: `docker/bw-seed-hidden.js` registers a second account that owns a second organisation, and shares one item (`tests/seed/hidden.json`) with the test account as an ordinary member whose collection has "Hide passwords" (owners and admins always see passwords, so the test account cannot be the owner). The equivalence suite asserts the one deliberate difference described above.
+1. `GET /v1/credentials?detail=true` matches the seed data: names, kinds, placeholders, bindings and unavailable reasons.
+2. **Every** placeholder the listing offers, forwarded to the mock API, delivers exactly the seeded value (a TOTP placeholder, the code for the seeded secret), and a set of deliberately bad placeholders fails the way it should. Values are compared in memory and never printed; a mismatch is reported by placeholder label only.
+
+The fixture vault also has the **hidden-password** case: `docker/bw-seed-hidden.js` registers a second account that owns a second organisation, and shares one item (`tests/seed/hidden.json`) with the test account as an ordinary member whose collection has "Hide passwords" (owners and admins always see passwords, so the test account cannot be the owner). The suite asserts that the item is left out, counted in the metric and the sync event, and that its password is never released.
 
 ## Tested Vaultwarden versions
 
-The native backend implements the protocol itself, so the Vaultwarden release matters. CI runs the whole stack (both instances' integration suites, the equivalence suite, the MCP suite and the secret gate) against **two** releases ([cicd.md](cicd.md#vaultwarden-versions-in-ci)):
+The native backend implements the protocol itself, so the Vaultwarden release matters. CI runs the whole stack (the integration suite, the MCP suite and the secret gate) against **two** releases ([cicd.md](cicd.md#vaultwarden-versions-in-ci)):
 
-| Vaultwarden | Test account KDF | Bitwarden CLI for `bw serve` |
-|---|---|---|
-| 1.37.5 (current) | PBKDF2-SHA256, 600 000 iterations | 2026.11.0 |
-| 1.36.0 (previous minor) | Argon2id, 64 MiB, 3 iterations, parallelism 4 | 2026.6.0 |
+| Vaultwarden | Test account KDF |
+|---|---|
+| 1.37.5 (current) | PBKDF2-SHA256, 600 000 iterations |
+| 1.36.0 (previous minor) | Argon2id, 64 MiB, 3 iterations, parallelism 4 |
 
-The statement of support is: the current and the previous minor release. A newer Vaultwarden that changes the formats is first run against the stack. Native became the default in 0.2.0 once the equivalence suite was green on both and a vault written by a real web vault, with organisation items, had been checked (#36).
+The statement of support is: the current and the previous minor release. A newer Vaultwarden that changes the formats is first run against the stack, and the web-vault capture is recaptured.
 
 ## A vault written by the web vault
 
-The fixtures above are written by our own seeder, so a format that only real clients write would not show up in them. `src/vault/native/testdata/webvault/` closes that gap: a throwaway account created **by hand in the web vault bundled with Vaultwarden 1.37.5**, with Argon2id (32 MiB, 6 iterations, parallelism 4), a login with TOTP and a custom field of every kind (text, hidden, checkbox, linked), an otpauth TOTP, a login bound elsewhere, a secure note bound through `ferrowarden_uris`, a card, an identity, an SSH key, an organisation with a collection holding a login and a note, a trashed item and an archived item. The token and `/api/sync` responses are kept verbatim (ciphertext only), and the expected values are what the Bitwarden CLI 2026.11.0 decrypted from the same account. A unit test unlocks the capture with the native backend and checks every name, binding and value against that reference, and that cards, identities, SSH keys, trashed and archived items are not offered.
+The fixtures above are written by our own seeder, so a format that only real clients write would not show up in them. `src/vault/native/testdata/webvault/` closes that gap: a throwaway account created **by hand in the web vault bundled with Vaultwarden 1.37.5**, with Argon2id (32 MiB, 6 iterations, parallelism 4), a login with TOTP and a custom field of every kind (text, hidden, checkbox, linked), an otpauth TOTP, a login bound elsewhere, a secure note bound through `ferrowarden_uris`, a card, an identity, an SSH key, an organisation with a collection holding a login and a note, a trashed item and an archived item. The token and `/api/sync` responses are kept verbatim (ciphertext only), and the expected values were read from the same account when it was captured (with the Bitwarden CLI 2026.11.0, run once by hand: no CLI is part of Ferrowarden or its CI). A unit test unlocks the capture with the native backend and checks every name, binding and value against that reference, and that cards, identities, SSH keys, trashed and archived items are not offered.
 
 What the capture showed:
 
@@ -150,8 +145,6 @@ What the capture showed:
 `testdata/webvault-hidden/` is the same organisation seen by a second account that is an ordinary member of the collection with **"Hide passwords"**. Vaultwarden marks the items `viewPassword: false` but **still sends the password's ciphertext**: hiding is enforced by clients only, which is why the native backend refuses these items itself by default. Tests check that both items are left out by default (no value of any kind is released) and are usable, with the owner's values, when `vault.allow_hidden_passwords` is on.
 
 Changing the KDF from the bundled web vault (Settings, Security, Keys) left two test accounts unable to sign in with their password afterwards; avoid doing that on a Vaultwarden 1.37.5 account you depend on until the cause is known.
-
-
 
 ## Provenance and licence
 

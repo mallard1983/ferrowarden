@@ -181,8 +181,9 @@ fn plan_secure_note_has_no_login_values() {
 
 #[tokio::test]
 async fn resolve_rejects_before_fetching() {
-    // Unreachable vault: any fetch attempt would return VaultUnavailable.
-    let vault = crate::vault::BwServe::new("http://127.0.0.1:1".to_string());
+    // The fake vault fails every value read with VaultUnavailable, so any
+    // fetch attempt would show up as that error.
+    let vault = crate::vault::fake::FakeVault::default();
     let mut creds = CredentialMap::new();
     creds.insert(
         "dup".into(),

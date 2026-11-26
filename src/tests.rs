@@ -76,7 +76,7 @@ const METRICS_TEST_TOKEN: &str = "tls-test-metrics-token-0123456789";
 fn metrics_router() -> axum::Router {
     let mut cfg: Config = ::config::Config::builder()
         .add_source(::config::File::from_str(
-            "unlock_mode = \"manual\"\n[vault]\nbackend = \"bw-serve\"\n",
+            "unlock_mode = \"manual\"\n",
             ::config::FileFormat::Toml,
         ))
         .build()
@@ -87,7 +87,7 @@ fn metrics_router() -> axum::Router {
     cfg.metrics.token = config::MetricsToken(Some(METRICS_TEST_TOKEN.to_string().into()));
     let events = Arc::new(EventLog::buffer_only(100));
     let state = Arc::new(AppState::new(cfg.clone(), events));
-    let metrics = metrics::Metrics::new("0.0.0", "bw-serve", false);
+    let metrics = metrics::Metrics::new("0.0.0", "native", false);
     metrics::server::router(metrics::server::MetricsServer::new(
         state,
         metrics,

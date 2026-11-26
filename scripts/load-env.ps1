@@ -2,12 +2,10 @@
 #
 # Load .env.test into the current PowerShell session so integration tests
 # can find the Ferrowarden test URL, admin key, and agent key. Pass a file name
-# to load another one: .env.test.native points the tests at the instance that
-# uses the native vault backend.
+# to load another one.
 #
 # Usage:
 #   . .\scripts\load-env.ps1
-#   . .\scripts\load-env.ps1 .env.test.native
 #   cargo +stable-x86_64-pc-windows-msvc test --test integration -- --test-threads=1
 #
 # Note the leading dot (dot-sourcing) — this is required for the variables

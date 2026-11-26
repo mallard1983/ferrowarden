@@ -24,7 +24,7 @@ updates:
     schedule:
       interval: "weekly"
 
-  # bw-cli / mock API images (docker/, tests/mock-api/)
+  # Setup/seed image and mock API image (docker/, tests/mock-api/)
   - package-ecosystem: "docker"
     directory: "/docker"
     schedule:

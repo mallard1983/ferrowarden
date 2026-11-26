@@ -50,8 +50,8 @@ pub struct AppState {
     /// token and looks it up here.
     pub agent_keys: Arc<RwLock<HashMap<String, AgentKey>>>,
 
-    /// The vault backend chosen at startup (`vault.backend`): bw serve or the
-    /// native client. Everything that reads the vault goes through it.
+    /// The vault backend chosen at startup (`vault.backend`). Everything that
+    /// reads the vault goes through it.
     pub vault: Arc<ActiveVault>,
 
     /// Credential cache — item names, ids, URIs and which values exist, from
@@ -64,7 +64,7 @@ pub struct AppState {
     pub keys_file_lock: Arc<tokio::sync::Mutex<()>>,
 
     /// Serializes vault re-unlock attempts, so a burst of requests arriving
-    /// while bw serve is locked triggers one unlock, not one per request.
+    /// while the vault is locked triggers one unlock, not one per request.
     pub unlock_lock: Arc<tokio::sync::Mutex<()>>,
 
     /// Outbound target policy (SSRF protection), built once from config.
@@ -84,22 +84,30 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// [`try_new`](Self::try_new) for settings that cannot fail (the bw serve
-    /// backend, which tests use).
+    /// The state for tests that do not need a real vault: backed by the
+    /// in-memory [`FakeVault`](crate::vault::fake::FakeVault), which never
+    /// connects anywhere. Test builds only; tests of the native backend build
+    /// theirs with [`try_new`](Self::try_new).
     #[cfg(test)]
     pub fn new(config: Config, events: Arc<EventLog>) -> Self {
-        Self::try_new(config, events).expect("the configured vault backend can be built")
+        let vault = ActiveVault::Fake(Default::default());
+        Self::with_vault(config, events, vault)
     }
 
     /// Build the state, including the configured vault backend. Fails when the
     /// native backend's settings are unusable (unreadable CA file, no API key).
     pub fn try_new(config: Config, events: Arc<EventLog>) -> FerroResult<Self> {
-        let vault = Arc::new(ActiveVault::from_config(&config)?);
+        let vault = ActiveVault::from_config(&config)?;
+        Ok(Self::with_vault(config, events, vault))
+    }
+
+    fn with_vault(config: Config, events: Arc<EventLog>, vault: ActiveVault) -> Self {
+        let vault = Arc::new(vault);
         // Start locked regardless of unlock mode — unlock happens during
         // startup (file mode) or on first POST /v1/unlock (manual mode).
         let target_policy = Arc::new(TargetPolicy::from_config(&config));
         let notify = Arc::new(NotifyHandle::disabled(config.notify.categories()));
-        Ok(Self {
+        Self {
             config,
             vault,
             lock_state: Arc::new(RwLock::new(LockState::Locked)),
@@ -111,7 +119,7 @@ impl AppState {
             events,
             notify,
             sync_stats: Arc::new(SyncStats::default()),
-        })
+        }
     }
 
     /// Use `notify` as the notifier (the one `main` started).
@@ -160,14 +168,11 @@ impl AppState {
 
     /// Mark the vault locked. Emits a `vault_lock` event on the transition
     /// from unlocked only — repeated checks of an already-locked vault are
-    /// silent. `cause` is a fixed code such as `bw_serve_locked`. With the
-    /// native backend, which holds the vault itself, locking also drops the
-    /// credential map.
+    /// silent. `cause` is a fixed code such as `vault_locked`. Locking also
+    /// drops the backend's keys and the credential map.
     pub async fn set_locked(&self, cause: &'static str) {
-        if self.vault.is_native() {
-            self.vault.lock().await;
-            self.credentials.write().await.clear();
-        }
+        self.vault.lock().await;
+        self.credentials.write().await.clear();
         let was_unlocked = {
             let mut state = self.lock_state.write().await;
             let was_unlocked = *state == LockState::Unlocked;

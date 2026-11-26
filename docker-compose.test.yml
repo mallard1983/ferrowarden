@@ -23,8 +23,7 @@ services:
   # ── Internal PKI (one-shot) ──────────────────────────────────────────────────
   # Creates a private CA and a certificate for "vaultwarden" in the
   # internal-pki volume. Vaultwarden serves HTTPS on the internal network, and
-  # Ferrowarden (and, in the deprecated bw-serve setup, the Bitwarden CLI)
-  # trust this CA. Idempotent: re-issues the server cert only when missing or
+  # Ferrowarden and the setup containers trust this CA. Idempotent: re-issues the server cert only when missing or
   # expiring. Runs `ferrowarden internal-certs` from the Ferrowarden image
   # (docker-compose.yml explains the user and hardening).
   internal-certs:
@@ -50,12 +49,10 @@ services:
   # Allow signups during the initial setup run. The dev-setup script disables
   # this after account creation.
   vaultwarden:
-    # Pinned: bw CLI 2026.11.0 (see docker/bw-cli.Dockerfile) is verified
-    # against this release. Upgrade both deliberately and re-run the tests.
-    # VAULTWARDEN_VERSION selects another release, with the BW_CLI_VERSION of
-    # its time: CI runs the whole suite against the previous minor
-    # (1.36.0, CLI 2026.6.0) with an Argon2id account (TEST_KDF=argon2id).
-    # See docs/cicd.md.
+    # Pinned: the suite is verified against this release. Upgrade
+    # deliberately and re-run the tests. VAULTWARDEN_VERSION selects another
+    # release: CI runs the whole suite against the previous minor (1.36.0)
+    # with an Argon2id account (TEST_KDF=argon2id). See docs/cicd.md.
     image: vaultwarden/server:${VAULTWARDEN_VERSION:-1.37.5}
     restart: unless-stopped
     # Same as production: the only hardening Vaultwarden gets (it binds 443 as root).
@@ -64,8 +61,8 @@ services:
     environment:
       DOMAIN: "https://vaultwarden"
       SIGNUPS_ALLOWED: "${VAULTWARDEN_SIGNUPS_ALLOWED:-false}"
-      # HTTPS on the internal network, using the internal CA's certificate.
-      # Required because current Bitwarden CLI releases refuse plain HTTP.
+      # HTTPS on the internal network, using the internal CA's certificate,
+      # as in production (docs/tls.md).
       ROCKET_TLS: '{certs="/pki/vaultwarden.crt",key="/pki/vaultwarden.key"}'
       ROCKET_PORT: "443"
     volumes:
@@ -77,58 +74,10 @@ services:
     networks:
       - vault-internal
 
-  # ── bw serve ────────────────────────────────────────────────────────────────
-  bw-serve:
-    build:
-      context: ./docker
-      dockerfile: bw-cli.Dockerfile
-      args:
-        BW_CLI_VERSION: "${BW_CLI_VERSION:-2026.11.0}"
-    restart: unless-stopped
-    entrypoint: ["/bin/sh", "/entrypoint.sh"]
-    # Hardened exactly like production (docker-compose.yml), which is what
-    # the integration suite must run against.
-    read_only: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - "no-new-privileges:true"
-    pids_limit: 128
-    mem_limit: 1g
-    volumes:
-      - ./docker/bw-entrypoint.sh:/entrypoint.sh:ro
-      - internal-pki:/pki:ro
-    # bw writes only its data directory (data.json). A tmpfs here (production
-    # uses a volume) means every container start logs in again with the API
-    # key, which bw-entrypoint.sh handles ("bw login --check") and which is
-    # fast enough for a test stack. uid/gid 1000 is the image's node user.
-    tmpfs:
-      - "/home/node/.config/Bitwarden CLI:uid=1000,gid=1000,mode=0700"
-    secrets:
-      - bw_client_id
-      - bw_client_secret
-    environment:
-      BW_SERVER_URL: "https://vaultwarden"
-      # bw serve only accepts requests whose Host header is localhost or the
-      # --hostname it was started with, so this must be the name ferrowarden
-      # uses in FERROWARDEN_BW_SERVE_URL. It binds to this container's address
-      # on vault-internal.
-      BW_SERVE_HOSTNAME: "bw-serve"
-      BW_SERVE_PORT: "8087"
-    networks:
-      - vault-internal
-    depends_on:
-      - vaultwarden
-    # Same check as production. bw serve takes ~15-20 s to log in and sync.
-    healthcheck:
-      # Must use the bw-serve name: bw serve rejects other Host headers.
-      test: ["CMD", "curl", "-f", "http://bw-serve:8087/status"]
-      interval: 5s
-      timeout: 3s
-      retries: 15
-      start_period: 20s
-
   # ── Ferrowarden ─────────────────────────────────────────────────────────────
+  # Reads the vault itself (the native backend, docs/native-vault.md), with the
+  # Vaultwarden API key from the setup run.
+  #   ports 3000 (API), 3001 (admin UI) and 9095 (metrics)
   ferrowarden:
     image: ferrowarden:test
     build: .
@@ -147,6 +96,8 @@ services:
     secrets:
       - ferrowarden_admin_key
       - bw_master_password
+      - bw_client_id
+      - bw_client_secret
       - notify_webhook_token
       - metrics_token
     volumes:
@@ -155,18 +106,17 @@ services:
       # which ferrowarden must never mount.
       - internal-ca-public:/ca-public:ro
     environment:
+      FERROWARDEN_VAULT__URL: "https://vaultwarden"
+      FERROWARDEN_VAULT__CA_FILE: "/ca-public/ca.crt"
+      FERROWARDEN_VAULT_CLIENT_ID_FILE: "/run/secrets/bw_client_id"
+      FERROWARDEN_VAULT_CLIENT_SECRET_FILE: "/run/secrets/bw_client_secret"
       FERROWARDEN_UNLOCK_MODE: "file"
       FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
-      # The deprecated bw-serve backend (kept for one release, docs/native-vault.md).
-      FERROWARDEN_VAULT__BACKEND: "bw-serve"
-      FERROWARDEN_BW_SERVE_URL: "http://bw-serve:8087"
       FERROWARDEN_BIND_ADDR: "0.0.0.0:3000"
       FERROWARDEN_ADMIN_KEY_FILE: "/run/secrets/ferrowarden_admin_key"
-      # Agent key persistence — keys survive container restarts.
-      # Only SHA-256 hashes are written; plaintext tokens are never stored.
       FERROWARDEN_KEYS_FILE: "/data/agent_keys.json"
       # TLS is disabled in the test stack. All services share a Docker-internal
-      # network on the same host — there is no network hop to protect.
+      # network on the same host - there is no network hop to protect.
       # Production deployments must use tls_enabled = true.
       FERROWARDEN_TLS_ENABLED: "false"
       # mock-api lives on a private Docker network; allow it explicitly.
@@ -192,18 +142,10 @@ services:
       # HTTP, hence insecure_http; never do this outside a test stack.
       FERROWARDEN_UI__BIND: "0.0.0.0:3001"
       FERROWARDEN_UI__INSECURE_HTTP: "true"
-      FERROWARDEN_VAULT__URL: "https://vaultwarden"
-      FERROWARDEN_VAULT__CA_FILE: "/ca-public/ca.crt"
-      # Push notifications (docs/notifications.md) to the mock API's second
-      # network alias, which records them in a log of their own. Plain HTTP is
-      # fine on this private test network. The token comes from a test secret
-      # (secrets/notify_webhook_token) and is on the secret gate's list.
       FERROWARDEN_NOTIFY__WEBHOOK_URL: "http://notify-sink:7777/notify"
       FERROWARDEN_NOTIFY__ALLOW_HTTP: "true"
       FERROWARDEN_NOTIFY_WEBHOOK_TOKEN_FILE: "/run/secrets/notify_webhook_token"
       FERROWARDEN_NOTIFY__EVENTS: "blocked,auth_failure,vault,system"
-      # Short, so tests need not wait a minute between notifications for a
-      # subject; a high cap so the whole suite cannot reach it.
       FERROWARDEN_NOTIFY__MIN_INTERVAL_SECS: "2"
       FERROWARDEN_NOTIFY__MAX_PER_HOUR: "100000"
       # Prometheus metrics (docs/metrics.md) on their own port, bearer token
@@ -220,85 +162,6 @@ services:
       - "${FERROWARDEN_TEST_PUBLISH:-127.0.0.1}:3001:3001"
       # Metrics listener (token required).
       - "${FERROWARDEN_TEST_PUBLISH:-127.0.0.1}:9095:9095"
-    depends_on:
-      internal-certs:
-        condition: service_completed_successfully
-      bw-serve:
-        condition: service_started
-    healthcheck:
-      # The image has no curl: the binary checks itself (GET /health on its own
-      # port; TLS verified against tls_cert_file when the TLS overlay is on).
-      test: ["CMD", "/app/ferrowarden", "healthcheck"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-
-  # ── Ferrowarden, native vault backend ────────────────────────────────────────
-  # The same image and the same hardening as `ferrowarden`, reading the vault
-  # itself (vault.backend = native, docs/native-vault.md) instead of through
-  # bw serve. It runs next to the bw serve instance, against the same
-  # Vaultwarden account, so the equivalence test (tests/equivalence.rs) can
-  # compare the two. Its own key volume: agent keys are not shared.
-  #   ports 3003 (API), 3004 (admin UI) and 9096 (metrics); bw-serve is not involved.
-  ferrowarden-native:
-    image: ferrowarden:test
-    build: .
-    restart: unless-stopped
-    read_only: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - "no-new-privileges:true"
-    pids_limit: 256
-    mem_limit: 1g
-    secrets:
-      - ferrowarden_admin_key
-      - bw_master_password
-      - bw_client_id
-      - bw_client_secret
-      - notify_webhook_token
-      - metrics_token
-    volumes:
-      - ferrowarden-native-keys:/data
-      - internal-ca-public:/ca-public:ro
-    environment:
-      FERROWARDEN_VAULT__BACKEND: "native"
-      FERROWARDEN_VAULT__URL: "https://vaultwarden"
-      FERROWARDEN_VAULT__CA_FILE: "/ca-public/ca.crt"
-      FERROWARDEN_VAULT_CLIENT_ID_FILE: "/run/secrets/bw_client_id"
-      FERROWARDEN_VAULT_CLIENT_SECRET_FILE: "/run/secrets/bw_client_secret"
-      FERROWARDEN_UNLOCK_MODE: "file"
-      FERROWARDEN_UNLOCK_FILE: "/run/secrets/bw_master_password"
-      FERROWARDEN_BIND_ADDR: "0.0.0.0:3000"
-      FERROWARDEN_ADMIN_KEY_FILE: "/run/secrets/ferrowarden_admin_key"
-      FERROWARDEN_KEYS_FILE: "/data/agent_keys.json"
-      FERROWARDEN_TLS_ENABLED: "false"
-      FERROWARDEN_ALLOWED_TARGETS: "mock-api,notify-sink"
-      FERROWARDEN_REFRESH_INTERVAL_SECS: "30"
-      FERROWARDEN_AGENT_RATE_LIMIT_BURST: "1000"
-      FERROWARDEN_ADMIN_RATE_LIMIT_BURST: "1000"
-      FERROWARDEN_EVENTS__FILE: "/data/events/events.jsonl"
-      FERROWARDEN_UI__BIND: "0.0.0.0:3001"
-      FERROWARDEN_UI__INSECURE_HTTP: "true"
-      FERROWARDEN_NOTIFY__WEBHOOK_URL: "http://notify-sink:7777/notify"
-      FERROWARDEN_NOTIFY__ALLOW_HTTP: "true"
-      FERROWARDEN_NOTIFY_WEBHOOK_TOKEN_FILE: "/run/secrets/notify_webhook_token"
-      FERROWARDEN_NOTIFY__EVENTS: "blocked,auth_failure,vault,system"
-      FERROWARDEN_NOTIFY__MIN_INTERVAL_SECS: "2"
-      FERROWARDEN_NOTIFY__MAX_PER_HOUR: "100000"
-      # Prometheus metrics (docs/metrics.md) on their own port, bearer token
-      # from a test secret (secrets/metrics_token, on the secret gate's list).
-      FERROWARDEN_METRICS__BIND: "0.0.0.0:9095"
-      FERROWARDEN_METRICS_TOKEN_FILE: "/run/secrets/metrics_token"
-    networks:
-      - vault-internal
-      - test-net
-    ports:
-      - "${FERROWARDEN_TEST_PUBLISH:-127.0.0.1}:3003:3000"
-      - "${FERROWARDEN_TEST_PUBLISH:-127.0.0.1}:3004:3001"
-      # Metrics listener (token required); 9095 inside the container.
-      - "${FERROWARDEN_TEST_PUBLISH:-127.0.0.1}:9096:9095"
     depends_on:
       internal-certs:
         condition: service_completed_successfully
@@ -357,9 +220,7 @@ services:
     user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     build:
       context: ./docker
-      dockerfile: bw-cli.Dockerfile
-      args:
-        BW_CLI_VERSION: "${BW_CLI_VERSION:-2026.11.0}"
+      dockerfile: setup.Dockerfile
     entrypoint: ["/bin/sh", "/setup-entrypoint.sh"]
     volumes:
       - ./docker/setup-entrypoint.sh:/setup-entrypoint.sh:ro
@@ -392,9 +253,7 @@ services:
     profiles: ["setup"]
     build:
       context: ./docker
-      dockerfile: bw-cli.Dockerfile
-      args:
-        BW_CLI_VERSION: "${BW_CLI_VERSION:-2026.11.0}"
+      dockerfile: setup.Dockerfile
     entrypoint: ["/bin/sh", "/seed-entrypoint.sh"]
     volumes:
       - ./docker/seed-entrypoint.sh:/seed-entrypoint.sh:ro
@@ -428,7 +287,6 @@ volumes:
   # Public CA certificate only (see internal-certs); mounted into ferrowarden.
   internal-ca-public:
   ferrowarden-keys:
-  ferrowarden-native-keys:
 
 secrets:
   bw_client_id:
@@ -443,7 +301,7 @@ secrets:
   # A test value generated by scripts/dev-setup.*; never reuse it elsewhere.
   notify_webhook_token:
     file: ./secrets/notify_webhook_token
-  # Bearer token of the metrics listeners (docs/metrics.md). A test value
+  # Bearer token of the metrics listener (docs/metrics.md). A test value
   # generated by scripts/dev-setup.*; never reuse it elsewhere.
   metrics_token:
     file: ./secrets/metrics_token

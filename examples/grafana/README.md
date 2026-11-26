@@ -59,7 +59,7 @@ The dashboard's queries use the `instance` label that Prometheus adds, so any jo
 
 ## How it was tested
 
-The dashboard and the Compose example were run against the Ferrowarden test stack (both instances, `bw serve` and native) while the integration suites ran:
+The dashboard and the Compose example were run against the Ferrowarden test stack of the time (0.2.0, which ran a `bw serve` instance and a native one side by side) while the integration suites ran:
 
 - Prometheus 3.15.1 scraped both metrics listeners with the token file (`up` for both).
 - Every panel query of the dashboard, with `$instance` and `$__rate_interval` filled in, returned data from Prometheus's HTTP API (`/api/v1/query`).

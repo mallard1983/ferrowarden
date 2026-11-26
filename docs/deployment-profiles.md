@@ -44,11 +44,9 @@ If you point `FERROWARDEN_EVENTS__FILE` somewhere else, mount a volume there tha
 
 ### What the Vaultwarden container has
 
-The default stack has two long-running containers, Ferrowarden and Vaultwarden. There is no `bw-serve` container: the largest attack surface of 0.1.0 (Node.js and the Bitwarden CLI's npm dependency tree, holding the decrypted vault while unlocked) is gone from the default deployment. The Vaultwarden container is a third-party image that binds port 443 as root; it gets `no-new-privileges` and nothing more.
+The default stack has two long-running containers, Ferrowarden and Vaultwarden. There is no `bw-serve` container: the largest attack surface of 0.1.0 (Node.js and the Bitwarden CLI's npm dependency tree, holding the decrypted vault while unlocked) went with the backend, which 0.3.0 removed. The Vaultwarden container is a third-party image that binds port 443 as root; it gets `no-new-privileges` and nothing more.
 
 The `internal-certs` one-shot that makes Vaultwarden's certificate also runs the Ferrowarden image (`ferrowarden internal-certs`), so the default deployment holds no Node.js, no shell and no openssl. It exits when it is done and is hardened like Ferrowarden: `network_mode: none`, `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges`, `restart: "no"`. It runs as root (`user: "0"`) because the `internal-pki` volume is root-owned with mode-0600 keys and Vaultwarden runs as root; with no capabilities it can still write the files it owns ([tls.md](tls.md#the-internal-ca-how-it-is-made)).
-
-If you stay on the deprecated `bw-serve` backend (`docker-compose.bw-serve.yml`), that container keeps its hardening: `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges`, `pids_limit: 128`, `mem_limit: 1g`, and one writable path, the CLI's data directory, on the `bw-data` volume. Be clear about the limit: it is a stock Node image with a shell, `curl` and a Debian userland; the restrictions contain it, not the absence of tools.
 
 ### What Standard protects against, and what it does not
 
@@ -144,7 +142,7 @@ What should be able to leave the VM:
 | Source | Needs to reach | Everything else |
 |---|---|---|
 | `ferrowarden` (the `agent-facing` network) | DNS; the hosts of the APIs your agents call (the `allowed_targets` and the credentials' URIs); your push notifier and SIEM syslog endpoint if configured | Drop and log |
-| `ferrowarden` and `vaultwarden` (`vault-internal`) | Each other (plus `bw-serve`, with the deprecated backend). This network is `internal: true`: Docker gives it no route out | Already isolated |
+| `ferrowarden` and `vaultwarden` (`vault-internal`) | Each other. This network is `internal: true`: Docker gives it no route out | Already isolated |
 | `vaultwarden` (the `vault-web` bridge) | Nothing for normal operation. Outbound is only needed for optional features (icon fetching, push relay, SMTP); turn those off in Vaultwarden or allow only their hosts | Drop |
 | The VM itself | OS updates, NTP, your backup target | Drop |
 

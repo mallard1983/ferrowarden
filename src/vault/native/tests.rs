@@ -310,7 +310,7 @@ async fn harness() -> Harness {
 fn test_config() -> Config {
     Config {
         bind_addr: "127.0.0.1:3000".to_string(),
-        bw_serve_url: "http://127.0.0.1:8087".to_string(),
+        bw_serve_url: None,
         unlock_mode: crate::config::UnlockMode::Manual,
         unlock_file: None,
         admin_key: "a".repeat(32).into(),

@@ -80,18 +80,6 @@ pub enum Builtin {
     Notes,
 }
 
-impl Builtin {
-    /// The object name bw serve uses for this value.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Builtin::Password => "password",
-            Builtin::Username => "username",
-            Builtin::Totp => "totp",
-            Builtin::Notes => "notes",
-        }
-    }
-}
-
 /// A custom field's metadata — never its value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldInfo {
@@ -172,7 +160,7 @@ pub struct VaultStatus {
     /// Email of the logged-in account (absent when unauthenticated).
     pub user_email: Option<String>,
     /// Timestamp of the last sync with the server (RFC 3339 for the native
-    /// backend; as bw serve reports it otherwise).
+    /// backend).
     pub last_sync: Option<String>,
 }
 
@@ -213,7 +201,7 @@ pub struct Listing {
     /// items while doing so.
     pub excluded: Option<ExclusionReport>,
     /// How many items the latest rebuild of the native backend's metadata
-    /// left out (0 for bw serve). Unlike `excluded` it is reported on every
+    /// left out. Unlike `excluded` it is reported on every
     /// listing, so a metric can fall back to 0 when the cause is fixed.
     pub excluded_count: usize,
 }

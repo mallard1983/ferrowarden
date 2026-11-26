@@ -17,7 +17,6 @@ This document describes what Ferrowarden is designed to protect against, the sec
 | The operator | Full trust | Holds the admin key, master password, and vault |
 | The host OS | Full trust | Ferrowarden cannot protect against OS-level compromise |
 | Vaultwarden | Full trust | Chosen by the operator; runs on the same host |
-| bw serve (deprecated backend only) | Full trust | The Bitwarden CLI's vault API server; runs on the same host. Absent from the default deployment: with the native backend it is not part of the trust base |
 | Docker daemon | Full trust | Same host; controls container isolation |
 
 ### Who We Do Not Trust
@@ -29,13 +28,13 @@ This document describes what Ferrowarden is designed to protect against, the sec
 | Target services | Return credential values or credential-shaped content in responses | Exact substituted values (raw, JSON-escaped, URL-encoded, base64) are scrubbed from body and headers, then common credential patterns |
 | An attacker who compromises the agent process | Reads credential values from agent memory or conversation | Same as AI agent above |
 | A network observer between agent and Ferrowarden | Reads credentials in transit | Native TLS (rustls) is enabled by default; TLS can be disabled only when both agent and Ferrowarden run on the same host |
-| Another container or process on the internal Docker network | Reads decrypted credential values off the wire between the vault component and Ferrowarden | With the default native backend there are none: the only traffic to Vaultwarden is the login and the encrypted vault, over verified HTTPS, and a value is decrypted inside Ferrowarden only for the request that needs it. The deprecated bw-serve backend sent every requested value, decrypted, over plain HTTP on that network |
+| Another container or process on the internal Docker network | Reads decrypted credential values off the wire between the vault component and Ferrowarden | There are none: the only traffic to Vaultwarden is the login and the encrypted vault, over verified HTTPS, and a value is decrypted inside Ferrowarden only for the request that needs it |
 
 ### Out of Scope
 
 The following threats are explicitly out of scope. Mitigation requires infrastructure choices beyond Ferrowarden's responsibility:
 
-- **Host-level compromise**: If an attacker gains code execution on the Ferrowarden host, they can read Ferrowarden's memory (and, with the deprecated bw-serve backend, bw serve's, which holds the whole vault decrypted) or the secret files. This is a physical/OS security problem.
+- **Host-level compromise**: If an attacker gains code execution on the Ferrowarden host, they can read Ferrowarden's memory or the secret files. This is a physical/OS security problem.
 - **Vaultwarden vulnerabilities**: Ferrowarden depends on Vaultwarden's security. Keep Vaultwarden updated.
 - **Credential theft at the target service**: Once Ferrowarden forwards a request, the credential is in the target's logs and memory. This is the same risk as any HTTP client.
 - **Agent key theft**: If the agent key is compromised, an attacker can use Ferrowarden to make API calls to any service whose credentials are in the vault. Rotate keys immediately if compromised (see [Operations](operations.md)).
@@ -91,25 +90,23 @@ The cache is populated at unlock time and refreshed every `refresh_interval_secs
 
 Values are decrypted by **item id**, not by name, so a name search can never return a different item than the one validated. If two login items share a name, the name is rejected as ambiguous (`409`) rather than guessing.
 
-### 6. No Decrypted Values on the Network (and No bw serve to Expose)
+### 6. No Decrypted Values on the Network
 
 In the default deployment no component serves decrypted credentials over a network. Ferrowarden holds the vault as ciphertext and decrypts a field inside its own process; the connection to Vaultwarden (on the `internal: true` `vault-internal` network) carries the login and the encrypted vault only. Nothing on that network, and nothing that can reach it, can read a credential value from the wire.
 
-This is a deliberate change from 0.1.0, where `bw serve` held the whole vault decrypted and answered `GET /object/password/<id>` to anyone on the network. It also removes Node.js, the Bitwarden CLI and its npm dependency tree from the trust base, and one container from the deployment.
-
-**The deprecated `bw-serve` backend** (kept for 0.2.0, removed in the next release) restores the old exposure. `bw serve` has no authentication: anyone who can reach its port can list credentials and retrieve values, so network isolation is its primary protection. The override file places `bw-serve` on the `internal: true` network, so no routing exists between it and anything outside Docker, and only Ferrowarden can reach it. Two further layers apply: Ferrowarden's outbound policy refuses the `bw serve` endpoint as a forward target (property 14), and current `bw serve` releases reject requests whose `Host` header is not `localhost`/`127.0.0.1`/`[::1]` or the `--hostname` it was started with (DNS-rebinding protection). The override starts it with `--hostname bw-serve`, the name Ferrowarden uses.
+This is a deliberate change from 0.1.0, where `bw serve` held the whole vault decrypted and answered `GET /object/password/<id>` to anyone on the network. 0.2.0 replaced it with the native backend and 0.3.0 removed `bw serve`, which took Node.js, the Bitwarden CLI and its npm dependency tree out of the trust base along with one container from the deployment.
 
 ### 6b. The Vaultwarden Web Vault Is User-Facing
 
 Vaultwarden is the user's password manager, so its web vault is published (`127.0.0.1:8443` by default, configurable via `.env`). This is the same exposure as any self-hosted Vaultwarden: vault data is end-to-end encrypted with the master password, and the server never sees plaintext. Signups are off except while creating the first account, and the `/admin` panel is disabled because no `ADMIN_TOKEN` is set.
 
-What is *not* exposed: Ferrowarden, which holds the vault keys, stays off the web vault's network. The web vault is on a separate `vault-web` network that ferrowarden does not join (and neither does `bw serve`, if you still use the deprecated backend).
+What is *not* exposed: Ferrowarden, which holds the vault keys, stays off the web vault's network. The web vault is on a separate `vault-web` network that ferrowarden does not join.
 
 Ferrowarden's target policy treats the web vault like any other internal service: an agent cannot reach `https://vaultwarden` (internal address) unless `allowed_targets` permits it, and even if it could, it would only see end-to-end-encrypted data without the master password. Do not bind a credential to the vault's own URL.
 
 ### 6a. Internal TLS Between Ferrowarden and Vaultwarden
 
-Ferrowarden refuses plain-HTTP vault URLs (and so do current Bitwarden CLI releases), so Vaultwarden serves HTTPS on the `vault-internal` network. A one-shot `internal-certs` service creates a private CA (10 years) and a certificate for `vaultwarden` (825 days, re-issued automatically within 30 days of expiry) in the `internal-pki` volume. Vaultwarden mounts it read-only; Ferrowarden trusts only that CA for the internal hop, through `vault.ca_file`, which points at the public copy in `internal-ca-public`. The CA private key never leaves the `internal-pki` volume, which Ferrowarden does not mount. `internal-certs` is `ferrowarden internal-certs`: a one-shot run of the same audited, static binary as the proxy, from the same image. The default deployment has no Node.js, no shell and no openssl for this job. It runs with no network (`network_mode: none`), a read-only root filesystem, all capabilities dropped and `no-new-privileges`, as root only because the existing `internal-pki` volume is root-owned (without capabilities, root cannot read or change files it does not own). Its keys are ECDSA P-256 in PKCS#8, created with mode 0600 and written atomically, and nothing it logs contains key material. An existing CA, including one made by an earlier release with openssl, is reused. See [tls.md](tls.md#the-internal-ca-how-it-is-made).
+Ferrowarden refuses plain-HTTP vault URLs, so Vaultwarden serves HTTPS on the `vault-internal` network. A one-shot `internal-certs` service creates a private CA (10 years) and a certificate for `vaultwarden` (825 days, re-issued automatically within 30 days of expiry) in the `internal-pki` volume. Vaultwarden mounts it read-only; Ferrowarden trusts only that CA for the internal hop, through `vault.ca_file`, which points at the public copy in `internal-ca-public`. The CA private key never leaves the `internal-pki` volume, which Ferrowarden does not mount. `internal-certs` is `ferrowarden internal-certs`: a one-shot run of the same audited, static binary as the proxy, from the same image. The default deployment has no Node.js, no shell and no openssl for this job. It runs with no network (`network_mode: none`), a read-only root filesystem, all capabilities dropped and `no-new-privileges`, as root only because the existing `internal-pki` volume is root-owned (without capabilities, root cannot read or change files it does not own). Its keys are ECDSA P-256 in PKCS#8, created with mode 0600 and written atomically, and nothing it logs contains key material. An existing CA, including one made by an earlier release with openssl, is reused. See [tls.md](tls.md#the-internal-ca-how-it-is-made).
 
 This hop carries Vaultwarden's end-to-end-encrypted vault data and the API-key authentication, and has transport encryption and server authentication too.
 
@@ -209,13 +206,13 @@ Placeholders may not appear in the URL's scheme, host, or port: the host is fixe
 
 Every address a target resolves to is checked inside Ferrowarden's DNS resolver, so the address checked is the address connected to (no DNS-rebinding gap):
 
-- **Always refused:** the vault endpoint (`vault.url`'s host and port, or the `bw serve` endpoint with the deprecated backend; by host name, and by resolved IP + port), the hosts of the configured [notifier URLs](notifications.md#notifier-hosts-are-off-limits-to-agents) (an agent must not be able to post fake notifications or flood your phone), unspecified, multicast and broadcast addresses.
+- **Always refused:** the vault endpoint (`vault.url`'s host and port; by host name, and by resolved IP + port), the hosts of the configured [notifier URLs](notifications.md#notifier-hosts-are-off-limits-to-agents) (an agent must not be able to post fake notifications or flood your phone), unspecified, multicast and broadcast addresses.
 - **Refused unless allowed:** loopback, RFC 1918 private, CGNAT, link-local (including `169.254.169.254` cloud metadata), IPv6 ULA/link-local, and other non-public ranges. Allow specific ones with `allowed_targets` (CIDRs, IPs, or host names) or all of them with `allow_private_targets = true`.
 - **Allowed:** public addresses.
 
 `HTTP_PROXY`/`HTTPS_PROXY` environment variables are ignored for forwarded requests, since a proxy would resolve the target itself and bypass this check.
 
-**Why this matters:** The vault endpoint must never be a forward target. With the deprecated bw serve, which has no authentication, any agent could otherwise forward `GET http://bw-serve:8087/object/password/<name>` and read every password in plaintext.
+**Why this matters:** The vault endpoint must never be a forward target: it holds the whole encrypted vault and answers the API-key login. With 0.1.0's `bw serve`, which had no authentication, any agent could otherwise have forwarded `GET http://bw-serve:8087/object/password/<name>` and read every password in plaintext; the rule stayed when that backend went.
 
 ### 15. Response Size Limit
 
@@ -247,29 +244,29 @@ The optional [admin web UI](admin-ui.md) (`ui.bind`) accepts the **vault master 
 
 ### 17. A Minimal, Read-Only Container
 
-The Ferrowarden image is a static binary on `scratch`, run as UID 999 with a read-only root filesystem, no capabilities and `no-new-privileges`; Vaultwarden is the only other service (`bw serve`, with the deprecated backend, runs with the same restrictions) ([Deployment Profiles](deployment-profiles.md)). There is no shell, package manager or `curl` to use, and nothing in the image can be modified at run time.
+The Ferrowarden image is a static binary on `scratch`, run as UID 999 with a read-only root filesystem, no capabilities and `no-new-privileges`; Vaultwarden is the only other service ([Deployment Profiles](deployment-profiles.md)). There is no shell, package manager or `curl` to use, and nothing in the image can be modified at run time.
 
 **Why this matters:** most of what an attacker does after getting code execution depends on tools that are already there. Removing them, and the ability to write new ones, shrinks a code-execution bug. The binary checks its own health (`ferrowarden healthcheck`, which verifies the server's own TLS certificate), which is why the image needs no `curl`.
 
-**Limits:** this is attack-surface reduction, not isolation. A container shares the host kernel, so a kernel or runtime escape is outside what it can stop; the *Hardened* profile (a dedicated VM, optionally gVisor, outbound firewall rules) addresses that. A compromised Ferrowarden process can still use the vault and the destinations it is allowed to reach. The Vaultwarden image (and `bw-serve`, if you still use it) is a third-party image with a normal userland: restricted, not minimal.
+**Limits:** this is attack-surface reduction, not isolation. A container shares the host kernel, so a kernel or runtime escape is outside what it can stop; the *Hardened* profile (a dedicated VM, optionally gVisor, outbound firewall rules) addresses that. A compromised Ferrowarden process can still use the vault and the destinations it is allowed to reach. The Vaultwarden image is a third-party image with a normal userland: restricted, not minimal.
 
 ---
 
 ### 18. The Native Vault Backend
 
-`vault.backend = "native"` ([native-vault.md](native-vault.md)) is Ferrowarden's own implementation of the Bitwarden client protocol, and **the default since 0.2.0**. It replaces `bw serve`, which is deprecated and removed in the next release. What it changes:
+`vault.backend = "native"` ([native-vault.md](native-vault.md)) is Ferrowarden's own implementation of the Bitwarden client protocol, and the only vault backend. It replaced `bw serve`, which 0.2.0 deprecated and 0.3.0 removed. What it gives:
 
-| | `native` (default) | `bw-serve` (deprecated) |
-|---|---|---|
-| Decrypted vault | never: only metadata is decrypted at sync; **a secret is decrypted for one request** (decrypt-on-demand: only the requested field) | in `bw serve`'s memory, for the whole session |
-| A secret on the wire | never leaves the process until it is substituted into the outbound request | `bw serve` to Ferrowarden, over plain HTTP on the internal network |
-| Whole-item fetch | no | yes (a custom field needs the item; the rest is wiped) |
-| Extra attack surface | none; one more Rust module (about 1,600 lines of production code, with its own unit tests) | the `bw` CLI, Node.js and npm dependencies in a container |
-| Containers | Vaultwarden and Ferrowarden | plus `bw-serve` |
+- **Decrypted vault:** never. Only metadata is decrypted at sync; **a secret is decrypted for one request** (decrypt-on-demand: only the requested field).
+- **A secret on the wire:** never. It does not leave the process until it is substituted into the outbound request.
+- **Whole-item fetch:** none.
+- **Extra attack surface:** one Rust module (about 1,600 lines of production code, with its own unit tests) and RustCrypto crates. No Bitwarden CLI, no Node.js, no npm dependency tree.
+- **Containers:** Vaultwarden and Ferrowarden.
+
+The cost is that the tests no longer have an independent reference implementation, the Bitwarden CLI, to compare Ferrowarden with. [native-vault.md](native-vault.md#how-formats-are-verified) lists what replaces it: known-answer vectors, a capture from a real web vault, fail-closed exclusion counts and two Vaultwarden versions in CI.
 
 #### Native backend: one process holds both secrets
 
-**The trade-off.** In **file unlock mode** one process now holds both the Vaultwarden API key and the master password (with `bw serve`, the second container held the API key and the vault session, and Ferrowarden held the password file's value only while unlocking). A memory-disclosure bug in Ferrowarden would expose both. The mitigations are the same ones the rest of Ferrowarden uses, plus process hardening described below. **Manual unlock mode is the hardened option**: the master password is typed once per boot (through `POST /v1/unlock` or the admin UI), held only for the key derivation, and not on disk; if you can accept typing it after each restart, prefer it. To use it, set `FERROWARDEN_UNLOCK_MODE=manual` and remove the `bw_master_password` secret from the `ferrowarden` service.
+**The trade-off.** In **file unlock mode** one process holds both the Vaultwarden API key and the master password (before 0.2.0, the `bw-serve` container held the API key and the vault session, and Ferrowarden held the password file's value only while unlocking). A memory-disclosure bug in Ferrowarden would expose both. The mitigations are the same ones the rest of Ferrowarden uses, plus process hardening described below. **Manual unlock mode is the hardened option**: the master password is typed once per boot (through `POST /v1/unlock` or the admin UI), held only for the key derivation, and not on disk; if you can accept typing it after each restart, prefer it. To use it, set `FERROWARDEN_UNLOCK_MODE=manual` and remove the `bw_master_password` secret from the `ferrowarden` service.
 
 **Cryptographic rules, as implemented:**
 
@@ -284,9 +281,9 @@ The Ferrowarden image is a static binary on `scratch`, run as UID 999 with a rea
 - **RSA.** `rsa` 0.10 or later only (earlier releases are affected by RUSTSEC-2023-0071). Only the account's own organisation-key ciphertexts are decrypted, at unlock and sync; no attacker-driven decryption oracle is exposed.
 - **No Bitwarden SDK.** The code is written from the wire format and published algorithms; see [native-vault.md](native-vault.md).
 
-**Format drift.** New Bitwarden clients may write formats not listed here (V2 accounts use COSE EncStrings, type 7). They are refused, the affected items are excluded and counted, and everything else keeps working; the deprecated `bw-serve` backend is a temporary fallback until it is removed in the next release. Treat a non-zero `excluded` count in a `vault_sync` event as something to look into.
+**Format drift.** New Bitwarden clients may write formats not listed here (V2 accounts use COSE EncStrings, type 7). They are refused, the affected items are excluded and counted, and everything else keeps working. Treat a non-zero `excluded` count in a `vault_sync` event as something to look into.
 
-- **Hidden passwords.** An organisation collection shared with the account as "Hide passwords" makes the server mark its items `viewPassword: false`. Ferrowarden would give such a password to an agent, which the collection's owner meant to keep from this account, so the native backend **leaves those items out by default** (reason `hidden_password` in the `vault_sync` event: a count and item ids, never names or values; also in `ferrowarden_vault_excluded_items`). `vault.allow_hidden_passwords = true` (`FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS`) is the explicit opt-in: it logs a startup warning and the `startup` event records `vault_allow_hidden_passwords`. `bw serve` does not report `viewPassword`, but the CLI withholds such a password itself, so with `bw-serve` the item is listed without a password placeholder and the password is never released; the flag has no effect there ([native-vault.md](native-vault.md#hidden-passwords-collections-that-hide-them)).
+- **Hidden passwords.** An organisation collection shared with the account as "Hide passwords" makes the server mark its items `viewPassword: false`. Ferrowarden would give such a password to an agent, which the collection's owner meant to keep from this account, so Ferrowarden **leaves those items out by default** (reason `hidden_password` in the `vault_sync` event: a count and item ids, never names or values; also in `ferrowarden_vault_excluded_items`). `vault.allow_hidden_passwords = true` (`FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS`) is the explicit opt-in: it logs a startup warning and the `startup` event records `vault_allow_hidden_passwords`. ([native-vault.md](native-vault.md#hidden-passwords-collections-that-hide-them)).
 
 **Tested against:** Vaultwarden 1.37.5 with a PBKDF2 account and 1.36.0 with an Argon2id account, both in CI ([cicd.md](cicd.md#vaultwarden-versions-in-ci)).
 
@@ -341,7 +338,7 @@ Before going to production:
 
 - [ ] Vaultwarden's `SIGNUPS_ALLOWED` is set to `false`
 - [ ] The Vaultwarden web vault is published only where you need it (`VAULTWARDEN_PUBLISH`); if it is reachable from the internet, it is behind a TLS reverse proxy — ideally with SSO in front — and your account has two-step login enabled
-- [ ] The `vault-internal` network is `internal: true` (it is in the shipped Compose file), so nothing outside Docker can reach Vaultwarden's internal HTTPS port or, with the deprecated backend, `bw serve` (8087)
+- [ ] The `vault-internal` network is `internal: true` (it is in the shipped Compose file), so nothing outside Docker can reach Vaultwarden's internal HTTPS port
 - [ ] You chose the unlock mode on purpose: `file` keeps the master password on disk and in the same process as the API key; `manual` is the hardened option (property 18)
 - [ ] The `internal-pki` volume (internal CA key) is backed up or treated as regenerable, and not copied elsewhere
 - [ ] Every vault item agents use has URIs for exactly the hosts it belongs to, and `enforce_credential_hosts` is `true`
@@ -352,7 +349,7 @@ Before going to production:
 - [ ] `tls_cert_file` and `tls_key_file` point to valid, non-expired certificates
 - [ ] All secret files are `chmod 600` and owned by the deployment user
 - [ ] The admin key (`secrets/ferrowarden_admin_key`) is at least 32 random characters
-- [ ] The `ferrowarden` service (and `bw-serve`, if you still use it) keeps the shipped hardening (`read_only`, `cap_drop: [ALL]`, `no-new-privileges`); you chose a [deployment profile](deployment-profiles.md) that matches what the vault protects
+- [ ] The `ferrowarden` service keeps the shipped hardening (`read_only`, `cap_drop: [ALL]`, `no-new-privileges`); you chose a [deployment profile](deployment-profiles.md) that matches what the vault protects
 - [ ] `ferrowarden.toml` (if used) is in `.gitignore` and not committed
 - [ ] Agent keys are created with meaningful names so the audit log is interpretable
 - [ ] Structured log output is being shipped to a persistent sink

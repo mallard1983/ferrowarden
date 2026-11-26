@@ -26,43 +26,33 @@ bind_addr = "0.0.0.0:3000"
 
 # ── Vault ────────────────────────────────────────────────────────────────────
 
-# Which backend reads the vault: "native" (default) or "bw-serve" (deprecated,
-# removed in the release after 0.2.0).
-#   native:   Ferrowarden speaks the Bitwarden protocol to Vaultwarden itself
-#             (no bw CLI, no Node): it keeps the vault as ciphertext and decrypts
-#             one value per request. Needs [vault] url and the Vaultwarden API key
-#             (FERROWARDEN_VAULT_CLIENT_ID_FILE / FERROWARDEN_VAULT_CLIENT_SECRET_FILE).
-#             See docs/native-vault.md and the trade-off in docs/security.md.
-#   bw-serve: DEPRECATED. The Bitwarden CLI's `bw serve` REST API, at
-#             bw_serve_url below. Ferrowarden logs a warning at every start.
+# The vault backend is "native", the only one: Ferrowarden speaks the Bitwarden
+# protocol to Vaultwarden itself (no bw CLI, no Node): it keeps the vault as
+# ciphertext and decrypts one value per request. It needs [vault] url and the
+# Vaultwarden API key (FERROWARDEN_VAULT_CLIENT_ID_FILE /
+# FERROWARDEN_VAULT_CLIENT_SECRET_FILE). See docs/native-vault.md and the
+# trade-off in docs/security.md.
+# backend = "bw-serve" was removed in 0.3.0 and stops the start with an error
+# that points to docs/native-vault.md#upgrading-from-bw-serve. A leftover
+# bw_serve_url is ignored, with a warning: delete it.
 # [vault]
-# backend = "native"                      # FERROWARDEN_VAULT__BACKEND (the default)
+# backend = "native"                      # FERROWARDEN_VAULT__BACKEND (the only value, and the default)
 # url = "https://vaultwarden"             # FERROWARDEN_VAULT__URL; https:// (http only for localhost)
 # ca_file = "/ca-public/ca.crt"           # FERROWARDEN_VAULT__CA_FILE; extra CA (PEM), never the CA key
 #                                         # (replaces ui.vaultwarden_url / ui.vaultwarden_ca_file)
 # allow_hidden_passwords = false          # FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS
 #   An organisation collection can be shared with this account as "Hide
 #   passwords" (the server marks its items viewPassword = false). By default
-#   the native backend leaves such items out (reason hidden_password in the
-#   vault_sync event); true makes them usable by agents (a startup warning and
-#   the startup event say so). The deprecated bw serve withholds those
-#   passwords itself, so the setting has no effect there. See
-#   docs/native-vault.md.
-# In native mode bw_serve_url below is ignored. The API key comes only from the
-# environment or secret files, never from this file.
-
-# DEPRECATED (backend = "bw-serve" only; removed in the release after 0.2.0).
-# URL of the bw serve process.
-# bw serve must only be reachable from ferrowarden — never expose its port
-# externally. In Docker Compose this is the service name. On a bare host
-# it must be 127.0.0.1 (localhost).
-bw_serve_url = "http://127.0.0.1:8087"
+#   such items are left out (reason hidden_password in the vault_sync event);
+#   true makes them usable by agents (a startup warning and the startup event
+#   say so). See docs/native-vault.md.
+# The API key comes only from the environment or secret files, never from this
+# file.
 
 # How the vault master password is supplied at startup.
 # "file"   — ferrowarden reads the password from unlock_file once at boot,
-#            unlocks the vault with it (the native backend derives the keys
-#            from it; the deprecated bw serve gets POST /unlock), then zeros
-#            the value from memory. In this mode one process holds both the
+#            unlocks the vault with it (Ferrowarden derives the keys from it),
+#            then zeros the value from memory. In this mode one process holds both the
 #            API key and the master password; "manual" is the hardened option
 #            (docs/security.md).
 #            Use this in Docker with a Docker secret or a chmod 400 bind mount.

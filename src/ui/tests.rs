@@ -1,6 +1,7 @@
 //! End-to-end tests of the admin UI: the real router, driven with
 //! `tower::ServiceExt::oneshot`, against a mock Vaultwarden (an axum server on
-//! a loopback port that also plays `bw serve`).
+//! a loopback port). The vault backend is the in-memory test fake, which
+//! reports the account email.
 //!
 //! The mock's success body carries recognizable fake tokens and keys, and its
 //! error messages are recognizable too. Every test that signs in checks that
@@ -16,7 +17,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, Method, Request, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::post,
     Router,
 };
 use serde_json::{json, Value};
@@ -44,7 +45,7 @@ const FAKE_PRIVATE_KEY: &str = "FAKE-PRIVATE-KEY-9d8c";
 const VW_MESSAGE: &str = "MOCK-VW-MESSAGE-do-not-leak";
 const VW_TOTP_MESSAGE: &str = "Invalid TOTP code! Server time: MOCK-SERVER-TIME IP: MOCK-IP";
 
-// ── Mock Vaultwarden / bw serve ───────────────────────────────────────────────
+// ── Mock Vaultwarden ───────────────────────────────────────────────
 
 #[derive(Clone)]
 struct TwoFa {
@@ -71,8 +72,6 @@ struct Inner {
     token_calls: Vec<(HeaderMap, HashMap<String, String>)>,
     send_calls: Vec<String>,
     prelogin_calls: usize,
-    status_calls: usize,
-    bw_unauthenticated: bool,
 }
 
 struct Mock {
@@ -96,28 +95,6 @@ fn json_response(status: u16, body: Value) -> Response {
         body.to_string(),
     )
         .into_response()
-}
-
-async fn mock_status(State(m): State<Arc<Mock>>) -> Response {
-    let unauth = m.with(|i| {
-        i.status_calls += 1;
-        i.bw_unauthenticated
-    });
-    let template = if unauth {
-        json!({"status": "unauthenticated"})
-    } else {
-        json!({
-            "serverUrl": "https://vaultwarden",
-            "lastSync": "2026-11-21T10:00:00.000Z",
-            "userEmail": EMAIL,
-            "userId": "00000000-0000-0000-0000-000000000000",
-            "status": "unlocked"
-        })
-    };
-    json_response(
-        200,
-        json!({"success": true, "data": {"object": "template", "template": template}}),
-    )
 }
 
 async fn mock_prelogin(State(m): State<Arc<Mock>>) -> Response {
@@ -215,7 +192,6 @@ async fn start_mock(two_fa: Option<TwoFa>) -> (Arc<Mock>, String) {
         }),
     });
     let app = Router::new()
-        .route("/status", get(mock_status))
         .route("/identity/accounts/prelogin", post(mock_prelogin))
         .route("/identity/connect/token", post(mock_token))
         .route("/api/two-factor/send-email-login", post(mock_send_email))
@@ -302,7 +278,7 @@ async fn harness(opts: Opts) -> Harness {
     let keys_path = dir.as_ref().map(|d| d.path().join("keys.json"));
     let config = Config {
         bind_addr: "127.0.0.1:3000".to_string(),
-        bw_serve_url: base.clone(),
+        bw_serve_url: None,
         unlock_mode: UnlockMode::Manual,
         unlock_file: None,
         admin_key: "a".repeat(32).into(),
@@ -330,10 +306,7 @@ async fn harness(opts: Opts) -> Harness {
             ..UiConfig::default()
         },
         notify: opts.notify.clone().unwrap_or_default(),
-        vault: crate::config::VaultConfig {
-            backend: crate::config::VaultBackend::BwServe,
-            ..Default::default()
-        },
+        vault: crate::config::VaultConfig::default(),
         metrics: Default::default(),
     };
     let events = Arc::new(EventLog::buffer_only(1000));
@@ -342,6 +315,7 @@ async fn harness(opts: Opts) -> Harness {
         app = app.with_notify(crate::notify::start(&config.notify, &events).unwrap());
     }
     let app = Arc::new(app);
+    fake_vault(&app).set_email(Some(EMAIL));
     app.set_unlocked().await;
     let ui = UiState::new(app.clone()).unwrap();
     Harness {
@@ -354,6 +328,14 @@ async fn harness(opts: Opts) -> Harness {
         keys_path,
         _dir: dir,
         _guard: guard,
+    }
+}
+
+/// The test fake behind the harness's `AppState`.
+fn fake_vault(app: &AppState) -> &crate::vault::fake::FakeVault {
+    match &*app.vault {
+        crate::vault::ActiveVault::Fake(f) => f,
+        _ => unreachable!("the harness builds its state with the fake vault"),
     }
 }
 
@@ -698,7 +680,7 @@ async fn password_sign_in_succeeds_and_shows_the_status_page() {
     assert!(status.body.contains(EMAIL));
     assert!(status.body.contains("Unlocked"));
     assert!(
-        status.body.contains("2026-11-21T10:00:00.000Z"),
+        status.body.contains(crate::vault::fake::LAST_SYNC),
         "last sync"
     );
     assert!(status.body.contains(env!("CARGO_PKG_VERSION")));
@@ -755,7 +737,7 @@ async fn the_account_email_is_cached_after_the_first_lookup() {
     let h = harness(Opts::default()).await;
     Browser::new().sign_in(&h, PASSWORD).await;
     Browser::new().sign_in(&h, PASSWORD).await;
-    assert_eq!(h.mock.with(|m| m.status_calls), 1);
+    assert_eq!(fake_vault(&h.app).status_calls(), 1);
 }
 
 #[tokio::test]
@@ -780,9 +762,9 @@ async fn a_concurrent_sign_in_is_refused_before_any_work() {
 }
 
 #[tokio::test]
-async fn an_unauthenticated_bw_serve_means_no_sign_in() {
+async fn an_unauthenticated_vault_means_no_sign_in() {
     let h = harness(Opts::default()).await;
-    h.mock.with(|m| m.bw_unauthenticated = true);
+    fake_vault(&h.app).set_email(None);
     let mut b = Browser::new();
     let r = b.sign_in(&h, PASSWORD).await;
     assert_eq!(r.status, StatusCode::BAD_GATEWAY);
@@ -1286,9 +1268,11 @@ async fn five_wrong_passwords_lock_the_ip_before_any_upstream_call() {
             StatusCode::UNAUTHORIZED
         );
     }
-    let (token_calls, prelogins, statuses) = h
-        .mock
-        .with(|m| (m.token_calls.len(), m.prelogin_calls, m.status_calls));
+    let (token_calls, prelogins, statuses) = (
+        h.mock.with(|m| m.token_calls.len()),
+        h.mock.with(|m| m.prelogin_calls),
+        fake_vault(&h.app).status_calls(),
+    );
 
     // Locked: even the right password is refused, and nothing is called.
     let r = b.sign_in(&h, PASSWORD).await;
@@ -1299,8 +1283,11 @@ async fn five_wrong_passwords_lock_the_ip_before_any_upstream_call() {
         "no form while locked out"
     );
     assert_eq!(
-        h.mock
-            .with(|m| (m.token_calls.len(), m.prelogin_calls, m.status_calls)),
+        (
+            h.mock.with(|m| m.token_calls.len()),
+            h.mock.with(|m| m.prelogin_calls),
+            fake_vault(&h.app).status_calls()
+        ),
         (token_calls, prelogins, statuses)
     );
     let e = h.last_login_event();
@@ -1724,7 +1711,7 @@ async fn plain_http_is_refused_without_the_form() {
         .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     assert_eq!(h.mock.token_calls(), 0);
-    assert_eq!(h.mock.with(|m| m.status_calls), 0);
+    assert_eq!(fake_vault(&h.app).status_calls(), 0);
 
     // The stylesheet is exempt, so the explanation is readable.
     let css = h.ui.css_path.clone();

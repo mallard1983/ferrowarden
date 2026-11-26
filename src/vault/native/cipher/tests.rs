@@ -105,7 +105,7 @@ fn login(k: &SymKey) -> RawCipher {
 }
 
 #[test]
-fn metadata_matches_what_bw_serve_reports() {
+fn metadata_lists_what_the_item_offers() {
     let v = vault();
     let (name, entry) = build_metadata(&v.ring.view(), &login(&v.user)).unwrap();
     assert_eq!(name, "grafana");

@@ -9,10 +9,9 @@
 #     tests/seed/credentials.json, and the password, username and note of the
 #     item whose collection hides passwords (tests/seed/hidden.json)
 #   - the test agent key, admin key and notifier webhook token from .env.test
-#     (and the native instance's agent key from .env.test.native, if present)
 #   - the vault master password from secrets/bw_master_password (if present)
 #   - the Vaultwarden API key (secrets/bw_client_id, secrets/bw_client_secret):
-#     the native backend holds it, so it must never reach a log or an event
+#     Ferrowarden holds it, so it must never reach a log or an event
 #   - the metrics bearer token (secrets/metrics_token)
 #   - agent tokens the integration tests created during the run, from
 #     target/integration-secrets.txt (or $FERROWARDEN_GATE_EXTRA_SECRETS_FILE)
@@ -21,11 +20,9 @@
 #   - the event file(s) copied out of the container with `docker compose cp`
 #     (docker-compose.test.yml enables the file sink at
 #     /data/events/events.jsonl)
-# for both Ferrowarden instances: `ferrowarden` (bw serve) and
-# `ferrowarden-native` (the native vault backend).
-#   - a scrape of each instance's Prometheus `/metrics` (docs/metrics.md),
-#     fetched with the metrics token from the host ports the compose file
-#     publishes (9095 and 9096)
+#   - a scrape of the Prometheus `/metrics` endpoint (docs/metrics.md),
+#     fetched with the metrics token from the host port the compose file
+#     publishes (9095)
 #   - any extra files given as arguments
 # and exits non-zero if any value appears. Secret values are never printed:
 # a hit is reported by its label (e.g. "test_api_token: value") only.
@@ -37,8 +34,8 @@
 # Usage: scripts/check-no-secrets.sh [extra-file ...]
 #   FERROWARDEN_GATE_SKIP_DOCKER=1  scan only the extra files (self-test)
 #   FERROWARDEN_GATE_SERVICES="a b" the compose services to scan (default:
-#                                   "ferrowarden ferrowarden-native")
-#   FERROWARDEN_GATE_METRICS_HOST   host the metrics ports are published on
+#                                   "ferrowarden")
+#   FERROWARDEN_GATE_METRICS_HOST   host the metrics port is published on
 #                                   (default: localhost)
 
 set -euo pipefail
@@ -52,8 +49,7 @@ SEED_FILE="tests/seed/credentials.json"
 HIDDEN_FILE="tests/seed/hidden.json"
 ENV_FILE=".env.test"
 MASTER_PW_FILE="secrets/bw_master_password"
-NATIVE_ENV_FILE=".env.test.native"
-SERVICES="${FERROWARDEN_GATE_SERVICES:-ferrowarden ferrowarden-native}"
+SERVICES="${FERROWARDEN_GATE_SERVICES:-ferrowarden}"
 CONTAINER_EVENTS_DIR="/data/events"
 METRICS_TOKEN_FILE="secrets/metrics_token"
 METRICS_HOST="${FERROWARDEN_GATE_METRICS_HOST:-localhost}"
@@ -62,7 +58,6 @@ METRICS_HOST="${FERROWARDEN_GATE_METRICS_HOST:-localhost}"
 metrics_port_for() {
     case "$1" in
         ferrowarden) echo 9095 ;;
-        ferrowarden-native) echo 9096 ;;
         *) echo "" ;;
     esac
 }
@@ -136,11 +131,7 @@ if [ -f "$MASTER_PW_FILE" ]; then
     v="$(tr -d '\r\n' < "$MASTER_PW_FILE")"
     [ -z "$v" ] || printf 'bw_master_password\t%s\n' "$v" >> "$secrets"
 fi
-# The native instance's agent key, and the Vaultwarden API key it holds.
-if [ -f "$NATIVE_ENV_FILE" ]; then
-    v="$(sed -n 's/^FERROWARDEN_TEST_AGENT_KEY=//p' "$NATIVE_ENV_FILE" | head -n 1 | tr -d '\r')"
-    [ -z "$v" ] || printf 'native_agent_key\t%s\n' "$v" >> "$secrets"
-fi
+# The Vaultwarden API key Ferrowarden holds, and the metrics token.
 for f in bw_client_id bw_client_secret metrics_token; do
     if [ -f "secrets/$f" ]; then
         v="$(tr -d '\r\n' < "secrets/$f")"

@@ -102,7 +102,7 @@ Every name starts with `ferrowarden_`. Types are as exposed (the counter `events
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `ferrowarden_build_info` | gauge, always 1 | `version`, `vault_backend` | Version and vault backend (`native` or the deprecated `bw-serve`) |
+| `ferrowarden_build_info` | gauge, always 1 | `version`, `vault_backend` | Version and vault backend (always `native`; the label stays so dashboards keep working) |
 | `ferrowarden_events_total` | counter | `action`, `outcome`, `reason` | Every [security event](events.md) by its action, outcome (`success`, `failure`, `unknown`) and reason code (empty when none) |
 | `ferrowarden_forward_requests_total` | counter | `outcome`, `reason`, `key` | Forward requests. `outcome` is `success` or `failure`; `reason` is the [reason code](events.md#reason-codes) of a failure (`target_blocked`, `credential_host_not_allowed`, `unknown_credential`, `vault_locked`, `upstream_error`, ...); `key` is the agent key's **name** (empty if the request had none) |
 | `ferrowarden_forward_duration_seconds` | histogram | `outcome` | Time to serve a forward, in seconds. Buckets 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 |
@@ -111,7 +111,7 @@ Every name starts with `ferrowarden_`. Types are as exposed (the counter `events
 | `ferrowarden_auth_failures_total` | counter | `kind` | Failed authentications: `agent` (agent key), `admin` (admin key), `ui` (admin UI sign-in, including a lockout; a sign-in refused for not being HTTPS is not counted), `metrics` (this endpoint; every failure is counted) |
 | `ferrowarden_vault_unlocked` | gauge | none | 1 when the vault is unlocked, 0 when locked |
 | `ferrowarden_vault_credentials` | gauge | none | Credentials in the cache (names only, never values) |
-| `ferrowarden_vault_excluded_items` | gauge | none | Items the [native backend](native-vault.md) left out at its last rebuild, because they could not be read safely or because their collection hides passwords from the account (`vault.allow_hidden_passwords` off); always 0 with `bw serve` |
+| `ferrowarden_vault_excluded_items` | gauge | none | Items the [vault backend](native-vault.md) left out at its last rebuild, because they could not be read safely or because their collection hides passwords from the account (`vault.allow_hidden_passwords` off) |
 | `ferrowarden_vault_last_sync_timestamp_seconds` | gauge | none | Unix time of the last successful sync (the sync and the listing both worked); 0 before the first. Seconds since: `time() - ferrowarden_vault_last_sync_timestamp_seconds` |
 | `ferrowarden_agent_keys` | gauge | `policy_set` | Agent keys. `policy_set="false"` are keys from 0.1.0 that run **deny-all** until you set a policy |
 | `ferrowarden_events_dropped_total` | counter | none | Security events dropped because the sink queue was full |

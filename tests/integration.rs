@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! These tests run against a live Ferrowarden stack (Vaultwarden + bw serve +
+//! These tests run against a live Ferrowarden stack (Vaultwarden +
 //! Ferrowarden + mock API). They are skipped automatically when the stack is
 //! not running, so `cargo test` always succeeds in CI without the stack.
 //!
@@ -34,7 +34,7 @@
 //! | `FERROWARDEN_TEST_ADMIN_KEY` | *(required)* | Admin key |
 //! | `FERROWARDEN_TEST_AGENT_KEY` | *(required)* | Pre-created agent key |
 //! | `MOCK_API_URL` | `http://localhost:7777` | Mock API base URL |
-//! | `FERROWARDEN_TEST_METRICS_URL` | *(required)* | The instance's metrics listener (`http://localhost:9095`, or 9096 for the native one) |
+//! | `FERROWARDEN_TEST_METRICS_URL` | *(required)* | Ferrowarden's metrics listener (`http://localhost:9095`) |
 //! | `FERROWARDEN_TEST_METRICS_TOKEN` | *(required)* | Its bearer token (`secrets/metrics_token`) |
 
 use reqwest::Client;
@@ -803,13 +803,13 @@ async fn test_forward_blocks_are_recorded_with_reason_codes() {
 
     // Outbound policy.
     let resp = env
-        .forward_url("GET", "http://bw-serve:8087/status", json!({}), None)
+        .forward_url("GET", "https://vaultwarden/api/config", json!({}), None)
         .await;
     assert_eq!(resp.status(), 403);
     let e = env.event_for(&request_id(&resp), "forward").await;
     assert_eq!(e["event"]["reason"], "target_blocked");
     assert_eq!(e["event"]["type"], json!(["access", "denied"]));
-    assert_eq!(e["url"]["domain"], "bw-serve");
+    assert_eq!(e["url"]["domain"], "vaultwarden");
 
     // Placeholder in the host.
     let resp = env
@@ -1274,20 +1274,26 @@ async fn test_echoed_credential_is_scrubbed_from_headers() {
     );
 }
 
-/// Security property: the agent cannot use the proxy to call bw serve
-/// directly. bw serve's /object/password/<id> returns plaintext passwords.
+/// Security property: the agent cannot use the proxy to call Vaultwarden
+/// (`vault.url`) directly: it holds the whole encrypted vault, and the
+/// refusal is by name, on every port, with the vault's own message.
 #[tokio::test]
 async fn test_vault_backend_is_not_a_valid_target() {
     let Some(env) = TestEnv::load() else { return };
 
     for url in [
-        "http://bw-serve:8087/list/object/items",
-        "http://bw-serve:8087/object/password/test_api_token",
-        "http://BW-SERVE:8087/status",
+        "https://vaultwarden/api/sync",
+        "https://vaultwarden/identity/connect/token",
+        "https://VAULTWARDEN/api/config",
+        "http://vaultwarden:8087/api/sync",
     ] {
         let resp = env.forward_url("GET", url, json!({}), None).await;
         assert_eq!(resp.status(), 403, "{url} must be refused");
         let text = resp.text().await.unwrap();
+        assert!(
+            text.contains("vault backend"),
+            "{url}: the refusal does not name the vault backend"
+        );
         assert!(
             !text.contains(TEST_API_TOKEN_VALUE),
             "{url}: response contained the credential value (not printed)"
@@ -1570,14 +1576,11 @@ async fn test_secure_note_values_and_binding() {
 
 /// Security: an item whose collection hides passwords from the account
 /// (`viewPassword: false`, seeded by docker/bw-seed-hidden.js) never releases
-/// its password, whichever backend is running, and nothing is sent to the
-/// target.
+/// its password, and nothing is sent to the target.
 ///
 /// The native backend leaves the whole item out (`vault.allow_hidden_passwords`
 /// is off): it is not listed and not usable, and the startup event says the
-/// opt-in is off. `bw serve` does not report `viewPassword`, but the CLI
-/// itself withholds such a password: the item is listed without a password
-/// placeholder (docs/native-vault.md).
+/// opt-in is off (docs/native-vault.md).
 #[tokio::test]
 async fn test_item_with_a_hidden_password_never_releases_it() {
     let Some(env) = TestEnv::load() else { return };
@@ -1596,7 +1599,9 @@ async fn test_item_with_a_hidden_password_never_releases_it() {
         .json()
         .await
         .unwrap();
-    let native = status["vault_backend"] == "native";
+    // The field stays, and is always `native` (dashboards and SIEM rules
+    // keep working).
+    assert_eq!(status["vault_backend"], "native");
 
     let detail: Vec<Value> = env
         .client
@@ -1608,16 +1613,10 @@ async fn test_item_with_a_hidden_password_never_releases_it() {
         .json()
         .await
         .unwrap();
-    let entry = detail.iter().find(|d| d["name"] == name);
-    if native {
-        assert!(entry.is_none(), "{name} must not be offered");
-    } else {
-        let entry = entry.expect("bw serve lists the item");
-        assert!(
-            entry.get("placeholder").is_none(),
-            "no password placeholder is offered"
-        );
-    }
+    assert!(
+        detail.iter().all(|d| d["name"] != name),
+        "{name} must not be offered"
+    );
 
     // The password placeholder never substitutes; nothing is forwarded.
     let resp = env
@@ -3003,9 +3002,8 @@ fn record_secret_for_gate(value: &str) {
     use std::io::Write;
     // Start from an empty file once per test run, so values of an earlier
     // run are not carried along, and no test erases another's.
-    // CI runs the suite more than once (once per vault backend) and the
-    // equivalence suite too, and sets FERROWARDEN_KEEP_GATE_SECRETS=1 so that
-    // the gate sees every run's values; it clears the file itself first.
+    // CI sets FERROWARDEN_KEEP_GATE_SECRETS=1 so that the gate sees the
+    // values of every run; it clears the file itself first.
     static FRESH: std::sync::Once = std::sync::Once::new();
     FRESH.call_once(|| {
         if env::var("FERROWARDEN_KEEP_GATE_SECRETS").unwrap_or_default() != "1" {
@@ -4163,10 +4161,9 @@ async fn test_notify_hosts_are_denied_to_agents_while_the_mock_api_stays_reachab
 
 // ── Prometheus metrics (#13) ──────────────────────────────────────────────────
 //
-// Both test instances run the metrics listener (docker-compose.test.yml) with a
-// bearer token from `secrets/metrics_token`: `ferrowarden` on 9095 and
-// `ferrowarden-native` on 9096, whichever one the suite targets through
-// `FERROWARDEN_TEST_METRICS_URL`.
+// The test instance runs the metrics listener (docker-compose.test.yml) on 9095
+// with a bearer token from `secrets/metrics_token`
+// (`FERROWARDEN_TEST_METRICS_URL`, `FERROWARDEN_TEST_METRICS_TOKEN`).
 
 /// Where the metrics listener is and the token it wants.
 struct MetricsEnv {
@@ -4305,7 +4302,7 @@ fn assert_scrape_is_clean(env: &TestEnv, m: &MetricsEnv, scrape: &Scrape) {
             value.len()
         );
     }
-    // `build_info` names the backend (`vault_backend="bw-serve"`), which is
+    // `build_info` names the backend (`vault_backend="native"`), which is
     // not a host of any request.
     let samples: String = scrape
         .text
@@ -4316,13 +4313,7 @@ fn assert_scrape_is_clean(env: &TestEnv, m: &MetricsEnv, scrape: &Scrape) {
             "
 ",
         );
-    for host in [
-        "mock-api",
-        "notify-sink",
-        "bw-serve",
-        "vaultwarden",
-        "localhost",
-    ] {
+    for host in ["mock-api", "notify-sink", "vaultwarden", "localhost"] {
         assert!(!samples.contains(host), "a scrape contains the host {host}");
     }
     let ip = regex::Regex::new(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b").unwrap();
@@ -4486,7 +4477,7 @@ async fn test_metrics_show_the_traffic_and_the_state() {
     assert_eq!(ok.status(), 200);
     let ok_id = request_id(&ok);
     let blocked = env
-        .forward_url("GET", "http://bw-serve:8087/status", json!({}), None)
+        .forward_url("GET", "https://vaultwarden/api/config", json!({}), None)
         .await;
     assert_eq!(blocked.status(), 403);
     let unknown = env
@@ -4641,14 +4632,9 @@ async fn test_metrics_show_the_traffic_and_the_state() {
         "last sync {last}, now {now}"
     );
 
-    // The seeded hidden-password item is left out by the native backend and
-    // counted; bw serve has no exclusions.
+    // The seeded hidden-password item is left out and counted.
     let excluded = after.gauge("ferrowarden_vault_excluded_items");
-    if backend == "native" {
-        assert!(excluded >= 1.0, "the hidden-password item is not counted");
-    } else {
-        assert_eq!(excluded, 0.0);
-    }
+    assert!(excluded >= 1.0, "the hidden-password item is not counted");
 
     // The rest exist, with the labels the documentation lists.
     assert!(after.gauge("ferrowarden_ui_sessions") >= 0.0);
@@ -4713,7 +4699,7 @@ async fn test_metrics_never_contain_values_urls_hosts_or_tokens() {
     let blocked = env
         .forward_url(
             "GET",
-            &format!("http://bw-serve:8087/{marker}?token={marker}"),
+            &format!("https://vaultwarden/{marker}?token={marker}"),
             json!({ header.clone(): marker.clone() }),
             None,
         )
@@ -4833,4 +4819,826 @@ async fn test_container_is_healthy_and_hardened() {
         config_env.contains("FERROWARDEN_ADMIN_KEY_FILE="),
         "the admin key should come from a secret file"
     );
+}
+
+// ── Seed-data checks ──────────────────────────────────────────────────────────
+//
+// These replace the backend equivalence suite (tests/equivalence.rs, removed
+// with the `bw serve` backend, #48), which compared the listing and every
+// substituted value between `bw serve` and the native backend. The same
+// coverage is now checked against what the fixtures define: the expected
+// listing and the expected value of every offered placeholder are derived from
+// `tests/seed/credentials.json` and `tests/seed/hidden.json`, the files the
+// seeders write (docker/bw-seed.js, docker/bw-seed-hidden.js).
+//
+//  * `test_listing_matches_the_seed_data`: `GET /v1/credentials` and
+//    `?detail=true`: names, kinds, placeholders, bindings, unavailable reasons.
+//  * `test_every_offered_placeholder_delivers_the_seeded_value`: each
+//    placeholder the listing offers, forwarded to the mock API, delivers
+//    exactly the seeded value (TOTP: the code for the seeded secret), and a set
+//    of deliberately bad placeholders fails the way it should.
+//
+// Values are compared in memory and never printed; a mismatch is reported by
+// placeholder label only.
+
+/// The only host the seeded items that are sent anywhere are bound to.
+const SEED_TARGET: &str = "http://mock-api:7777";
+
+/// How the seeded fixtures are expected to behave for one placeholder.
+enum SeedExpect {
+    /// Delivers exactly this value. (No `Debug`: it is a credential.)
+    Value(String),
+    /// Delivers the one-time code for this TOTP specification.
+    Totp(String),
+    /// Is refused with this HTTP status: the item is not bound to the mock
+    /// API's host (403), or the value is blank (404).
+    Refused(u16),
+}
+
+struct SeedProbe {
+    label: String,
+    placeholder: String,
+    expect: SeedExpect,
+}
+
+/// One seeded item as it should appear in the detailed listing.
+struct SeedItem {
+    name: String,
+    /// The expected entry of `GET /v1/credentials?detail=true`, with the
+    /// unavailable reasons shortened to a code (see `seed_normalize`).
+    detail: Value,
+    probes: Vec<SeedProbe>,
+    /// Archived on the server only if the server can archive (Vaultwarden
+    /// 1.36.0 cannot): the item is then either absent or listed as usual.
+    archived: bool,
+}
+
+/// How a name is written in a placeholder: bare when it is made of letters,
+/// digits, `_`, `-` and `.`, otherwise single-quoted with `\` and `'` escaped.
+fn seed_quote(name: &str) -> String {
+    if !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return name.to_string();
+    }
+    let mut out = String::from("'");
+    for c in name.chars() {
+        if c == '\\' || c == '\'' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
+}
+
+/// A placeholder: the item, and one of `username`, `totp`, `notes`,
+/// `field:<name>` (none: the password).
+fn seed_placeholder(item: &str, selector: Option<&str>) -> String {
+    let item = seed_quote(item);
+    match selector {
+        None => format!("{{{{vault:{item}}}}}"),
+        Some(sel) => match sel.strip_prefix("field:") {
+            Some(f) => format!("{{{{vault:{item}:field:{}}}}}", seed_quote(f)),
+            None => format!("{{{{vault:{item}:{sel}}}}}"),
+        },
+    }
+}
+
+/// The two seed files: the items every seeded account holds, and the one whose
+/// collection hides its password from the test account.
+fn seed_files() -> (Vec<Value>, Value) {
+    (
+        serde_json::from_str(include_str!("seed/credentials.json")).unwrap(),
+        serde_json::from_str(include_str!("seed/hidden.json")).unwrap(),
+    )
+}
+
+/// What the listing and the placeholders of one seeded item should be, or
+/// `None` for an item that is not offered at all (card, identity, SSH key).
+fn seed_expectation(item: &Value) -> Option<SeedItem> {
+    let kind = item["type"].as_str().unwrap_or("login");
+    if !matches!(kind, "login" | "secure_note") {
+        return None;
+    }
+    let login = kind == "login";
+    let name = item["name"].as_str().unwrap().to_string();
+    let text = |k: &str| item[k].as_str().unwrap_or("").to_string();
+    let (value, username, totp, note) =
+        (text("value"), text("username"), text("totp"), text("note"));
+    let empties: Vec<&str> = item["empty_string"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    // A value is "present" when the seeder wrote a ciphertext: any text, or an
+    // encrypted empty string. A blank value is present, and still not usable.
+    let present = |v: &str, what: &str| !v.is_empty() || empties.contains(&what);
+    let fields: Vec<&Value> = item["fields"]
+        .as_array()
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+
+    // Bindings: the reserved `ferrowarden_uris` field when it has a value,
+    // otherwise a login's URIs, minus the regular-expression (4) and "never"
+    // (5) match types.
+    let reserved = fields
+        .iter()
+        .find(|f| f["name"] == "ferrowarden_uris")
+        .and_then(|f| f["value"].as_str())
+        .filter(|v| !v.is_empty());
+    let bound: Vec<String> = match reserved {
+        Some(v) => v
+            .split([',', '\n', '\r'])
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+            .collect(),
+        None if login => item["uris"]
+            .as_array()
+            .map(|a| a.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|u| match u {
+                Value::String(s) => Some(s.clone()),
+                other if !matches!(other["match"].as_u64(), Some(4 | 5)) => {
+                    other["uri"].as_str().map(str::to_string)
+                }
+                _ => None,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
+    let mut detail = serde_json::Map::new();
+    detail.insert("name".into(), json!(name));
+    detail.insert("type".into(), json!(kind));
+    if !bound.is_empty() {
+        detail.insert("bound_to".into(), json!(bound));
+    }
+    let mut probes = Vec::new();
+    // A credential is only sent to the hosts its item is bound to: an item
+    // bound elsewhere, or to nothing, is refused whatever it holds.
+    let sendable = bound.iter().any(|u| u == SEED_TARGET);
+    let mut add = |label: String, selector: Option<&str>, expect: SeedExpect| {
+        probes.push(SeedProbe {
+            label,
+            placeholder: seed_placeholder(&name, selector),
+            expect: if sendable {
+                expect
+            } else {
+                SeedExpect::Refused(403)
+            },
+        });
+    };
+    // A value that is only whitespace counts as none, like the Bitwarden CLI.
+    let usable = |v: &str| !v.trim().is_empty();
+
+    if item["reprompt"].as_bool().unwrap_or(false) {
+        // Agents cannot use an item with master password re-prompt: no
+        // placeholders at all, only the reason.
+        detail.insert("unavailable".into(), json!("re-prompt"));
+        return Some(SeedItem {
+            name,
+            detail: Value::Object(detail),
+            probes,
+            archived: false,
+        });
+    }
+
+    if login && present(&value, "password") {
+        detail.insert("placeholder".into(), json!(seed_placeholder(&name, None)));
+        let expect = if usable(&value) {
+            SeedExpect::Value(value.clone())
+        } else {
+            SeedExpect::Refused(404)
+        };
+        add(format!("{name} (password)"), None, expect);
+    }
+    if login && present(&username, "username") {
+        detail.insert(
+            "username".into(),
+            json!(seed_placeholder(&name, Some("username"))),
+        );
+        let expect = if usable(&username) {
+            SeedExpect::Value(username.clone())
+        } else {
+            SeedExpect::Refused(404)
+        };
+        add(format!("{name} (username)"), Some("username"), expect);
+    }
+    if login && present(&totp, "totp") {
+        detail.insert("totp".into(), json!(seed_placeholder(&name, Some("totp"))));
+        add(
+            format!("{name} (totp)"),
+            Some("totp"),
+            SeedExpect::Totp(totp.clone()),
+        );
+    }
+    if present(&note, "notes") {
+        detail.insert(
+            "notes".into(),
+            json!(seed_placeholder(&name, Some("notes"))),
+        );
+        let expect = if usable(&note) {
+            SeedExpect::Value(note.clone())
+        } else {
+            SeedExpect::Refused(404)
+        };
+        add(format!("{name} (notes)"), Some("notes"), expect);
+    }
+
+    // Custom fields: the reserved field is not one; a name used twice is
+    // ambiguous; a linked field resolves to the login's username or password.
+    let mut offered = serde_json::Map::new();
+    let mut unavailable = serde_json::Map::new();
+    for f in &fields {
+        let fname = f["name"].as_str().unwrap();
+        if fname == "ferrowarden_uris"
+            || offered.contains_key(fname)
+            || unavailable.contains_key(fname)
+        {
+            continue;
+        }
+        let same_name = fields.iter().filter(|g| g["name"] == f["name"]).count();
+        let linked = f["type"] == "linked";
+        if same_name > 1 {
+            unavailable.insert(fname.to_string(), json!("ambiguous"));
+            continue;
+        }
+        if linked && !login {
+            unavailable.insert(fname.to_string(), json!("linked"));
+            continue;
+        }
+        offered.insert(
+            fname.to_string(),
+            json!(seed_placeholder(&name, Some(&format!("field:{fname}")))),
+        );
+        let field_value = if linked {
+            if f["linked"] == "username" {
+                username.clone()
+            } else {
+                value.clone()
+            }
+        } else {
+            f["value"].as_str().unwrap_or("").to_string()
+        };
+        let expect = if usable(&field_value) {
+            SeedExpect::Value(field_value)
+        } else {
+            SeedExpect::Refused(404)
+        };
+        add(
+            format!("{name} (field {fname})"),
+            Some(&format!("field:{fname}")),
+            expect,
+        );
+    }
+    if !offered.is_empty() {
+        detail.insert("fields".into(), Value::Object(offered));
+    }
+    if !unavailable.is_empty() {
+        detail.insert("unavailable_fields".into(), Value::Object(unavailable));
+    }
+
+    Some(SeedItem {
+        name,
+        detail: Value::Object(detail),
+        probes,
+        archived: item["archived"].as_bool().unwrap_or(false),
+    })
+}
+
+/// A listing entry with its free-text reasons shortened to the codes
+/// `seed_expectation` uses, so the comparison does not depend on wording.
+fn seed_normalize(mut entry: Value) -> Value {
+    let short = |reason: &str| {
+        if reason.contains("re-prompt") {
+            "re-prompt"
+        } else if reason.starts_with("ambiguous") {
+            "ambiguous"
+        } else if reason.starts_with("linked") {
+            "linked"
+        } else {
+            "other"
+        }
+    };
+    if let Some(r) = entry.get("unavailable").and_then(Value::as_str).map(short) {
+        entry["unavailable"] = json!(r);
+    }
+    if let Some(map) = entry
+        .get_mut("unavailable_fields")
+        .and_then(Value::as_object_mut)
+    {
+        for v in map.values_mut() {
+            if let Some(r) = v.as_str().map(short) {
+                *v = json!(r);
+            }
+        }
+    }
+    entry
+}
+
+/// The expectations of every item the seeders write (the hidden-password item
+/// is not among them: it is left out, see `SEED_HIDDEN`).
+fn seed_items() -> Vec<SeedItem> {
+    seed_files().0.iter().filter_map(seed_expectation).collect()
+}
+
+/// Names the seeders write that must not be offered: the item types
+/// Ferrowarden does not offer, and the item whose collection hides its
+/// password from the account.
+fn seed_not_offered() -> Vec<String> {
+    let (items, hidden) = seed_files();
+    let mut names: Vec<String> = items
+        .iter()
+        .filter(|i| {
+            !matches!(
+                i["type"].as_str().unwrap_or("login"),
+                "login" | "secure_note"
+            )
+        })
+        .map(|i| i["name"].as_str().unwrap().to_string())
+        .collect();
+    names.push(hidden["name"].as_str().unwrap().to_string());
+    names
+}
+
+impl TestEnv {
+    async fn agent_get_json(&self, path: &str) -> Value {
+        let resp = self
+            .client
+            .get(format!("{}{path}", self.fw_url))
+            .header("X-Agent-Key", &self.agent_key)
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status(), 200, "{path}");
+        resp.json().await.expect("not JSON")
+    }
+}
+
+/// Security and correctness: what `GET /v1/credentials` offers is what the
+/// fixtures define. Per item: its name, kind, the placeholder of each value it
+/// holds, its custom fields (and why one is unavailable), its host bindings
+/// and, for a re-prompt item, the reason it cannot be used. Items the
+/// seeders write but Ferrowarden does not offer (card, identity, SSH key, the
+/// hidden-password item) are absent. Differences are reported by item name and
+/// key, never by value.
+#[tokio::test]
+async fn test_listing_matches_the_seed_data() {
+    let Some(env) = TestEnv::load() else { return };
+
+    let detailed = env.agent_get_json("/v1/credentials?detail=true").await;
+    let plain = env.agent_get_json("/v1/credentials").await;
+    let actual: std::collections::BTreeMap<String, Value> = detailed
+        .as_array()
+        .expect("the detailed listing is an array")
+        .iter()
+        .map(|d| {
+            (
+                d["name"].as_str().unwrap().to_string(),
+                seed_normalize(d.clone()),
+            )
+        })
+        .collect();
+
+    let expected = seed_items();
+    let mut problems = Vec::new();
+    for item in &expected {
+        match actual.get(&item.name) {
+            Some(got) if *got == item.detail => {}
+            Some(got) => {
+                let (want, got) = (item.detail.as_object().unwrap(), got.as_object().unwrap());
+                let keys: std::collections::BTreeSet<&String> =
+                    want.keys().chain(got.keys()).collect();
+                for k in keys {
+                    if want.get(k) != got.get(k) {
+                        problems.push(format!("{}: `{k}` differs", item.name));
+                    }
+                }
+            }
+            // The archived fixture is absent when the server archived it.
+            None if item.archived => {}
+            None => problems.push(format!("{}: missing from the listing", item.name)),
+        }
+    }
+    let wanted: std::collections::BTreeSet<&str> =
+        expected.iter().map(|i| i.name.as_str()).collect();
+    for name in actual.keys() {
+        if !wanted.contains(name.as_str()) {
+            problems.push(format!("{name}: offered, but not in the seed data"));
+        }
+    }
+    for name in seed_not_offered() {
+        if actual.contains_key(&name) {
+            problems.push(format!("{name}: must not be offered"));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "the listing differs from the seed data:\n{}",
+        problems.join("\n")
+    );
+
+    // The plain listing is the same names, sorted.
+    let names: Vec<&str> = plain
+        .as_array()
+        .expect("the listing is an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(
+        names,
+        actual.keys().map(String::as_str).collect::<Vec<_>>(),
+        "the plain and the detailed listing name different credentials"
+    );
+
+    // The check must have been meaningful: the fixture families are in it.
+    for expected in [
+        "fx_cipherkey_login",
+        "fx_org_login",
+        "fx_org_note_ck",
+        "fx_totp_steam",
+        "fx_fields_mix",
+        "test_login_full",
+    ] {
+        assert!(
+            actual.contains_key(expected),
+            "{expected} missing: is the stack seeded?"
+        );
+    }
+    println!(
+        "listing matches the seed data: {} credentials, {} offered placeholders",
+        actual.len(),
+        expected.iter().map(|i| i.probes.len()).sum::<usize>()
+    );
+}
+
+/// A TOTP code from a stored specification (RFC 6238): a bare base32 secret
+/// (SHA-1, 6 digits, 30 s), an `otpauth://` URI with `algorithm`, `digits` and
+/// `period`, or `steam://<secret>` (five characters). Written for this test
+/// from the RFCs, not shared with the code under test.
+fn seed_totp_code(spec: &str, unix: u64) -> Option<String> {
+    use hmac::{Hmac, KeyInit, Mac};
+    fn base32(s: &str) -> Option<Vec<u8>> {
+        let (mut out, mut bits, mut have) = (Vec::new(), 0u32, 0u32);
+        for c in s
+            .chars()
+            .filter(|c| !c.is_whitespace() && !matches!(c, '=' | '-'))
+        {
+            let v = match c.to_ascii_uppercase() {
+                c @ 'A'..='Z' => c as u32 - 'A' as u32,
+                c @ '2'..='7' => c as u32 - '2' as u32 + 26,
+                _ => return None,
+            };
+            bits = (bits << 5) | v;
+            have += 5;
+            if have >= 8 {
+                have -= 8;
+                out.push((bits >> have) as u8);
+                bits &= (1 << have) - 1;
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+    let spec = spec.trim();
+    let (mut alg, mut digits, mut period, mut steam) = ("SHA1".to_string(), 6u32, 30u64, false);
+    let secret = if let Some(rest) = spec.strip_prefix("steam://") {
+        steam = true;
+        digits = 5;
+        rest.to_string()
+    } else if let Some(query) = spec
+        .strip_prefix("otpauth://")
+        .and_then(|r| r.split_once('?'))
+    {
+        let mut secret = None;
+        for pair in query.1.split('&') {
+            match pair.split_once('=') {
+                Some(("secret", v)) => secret = Some(v.to_string()),
+                Some(("algorithm", v)) => alg = v.to_ascii_uppercase(),
+                Some(("digits", v)) => digits = v.parse().ok()?,
+                Some(("period", v)) => period = v.parse().ok()?,
+                _ => {}
+            }
+        }
+        secret?
+    } else {
+        spec.to_string()
+    };
+    let key = base32(&secret)?;
+    let msg = (unix / period).to_be_bytes();
+    let digest: Vec<u8> = match alg.as_str() {
+        "SHA1" => {
+            let mut m = <Hmac<sha1::Sha1> as KeyInit>::new_from_slice(&key).ok()?;
+            m.update(&msg);
+            m.finalize().into_bytes().to_vec()
+        }
+        "SHA256" => {
+            let mut m = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(&key).ok()?;
+            m.update(&msg);
+            m.finalize().into_bytes().to_vec()
+        }
+        "SHA512" => {
+            let mut m = <Hmac<sha2::Sha512> as KeyInit>::new_from_slice(&key).ok()?;
+            m.update(&msg);
+            m.finalize().into_bytes().to_vec()
+        }
+        _ => return None,
+    };
+    let offset = (digest[digest.len() - 1] & 0x0f) as usize;
+    let mut n = u32::from_be_bytes([
+        digest[offset] & 0x7f,
+        digest[offset + 1],
+        digest[offset + 2],
+        digest[offset + 3],
+    ]);
+    if steam {
+        const ALPHABET: &[u8; 26] = b"23456789BCDFGHJKMNPQRTVWXY";
+        let mut out = String::new();
+        for _ in 0..5 {
+            out.push(ALPHABET[(n % 26) as usize] as char);
+            n /= 26;
+        }
+        return Some(out);
+    }
+    Some(format!(
+        "{:0width$}",
+        u64::from(n) % 10u64.pow(digits),
+        width = digits as usize
+    ))
+}
+
+/// The test's own TOTP reference against the RFC 6238 test vectors, so a
+/// wrong reference cannot make the placeholder test pass or fail. Needs no
+/// stack.
+#[test]
+fn test_seed_totp_reference_matches_rfc_6238() {
+    // Appendix B: the ASCII secrets "1234567890" repeated to 20 (SHA-1), 32
+    // (SHA-256) and 64 bytes (SHA-512), at 8 digits.
+    let ten = "GEZDGNBVGY3TQOJQ"; // base32 of "1234567890"
+    let sha1 = ten.repeat(2); // 20 bytes
+    let sha256 = format!("{}GEZA", ten.repeat(3)); // 32 bytes
+    let sha512 = format!("{}GEZDGNA", ten.repeat(6)); // 64 bytes
+    for (alg, secret, t, want) in [
+        ("SHA1", &sha1, 59, "94287082"),
+        ("SHA1", &sha1, 1111111109, "07081804"),
+        ("SHA256", &sha256, 59, "46119246"),
+        ("SHA256", &sha256, 1111111109, "68084774"),
+        ("SHA512", &sha512, 59, "90693936"),
+        ("SHA512", &sha512, 1111111109, "25091201"),
+    ] {
+        let spec = format!("otpauth://totp/x?secret={secret}&algorithm={alg}&digits=8");
+        assert_eq!(
+            seed_totp_code(&spec, t).as_deref(),
+            Some(want),
+            "{alg} at {t}"
+        );
+    }
+    // A bare secret is SHA-1, 6 digits: the last six digits of the 8-digit one.
+    assert_eq!(seed_totp_code(&sha1, 59).as_deref(), Some("287082"));
+    // Spaces, dashes and lower case are ignored.
+    assert_eq!(
+        seed_totp_code("gezd gnbv-gy3t qojq gezd gnbv gy3t qojq", 59).as_deref(),
+        Some("287082")
+    );
+    assert!(seed_totp_code("not base32 !", 59).is_none());
+}
+
+/// What a forward to the mock API through `placeholder` did: the HTTP status
+/// and, when it went through, the value the mock received.
+struct SeedOutcome {
+    status: u16,
+    received: Option<String>,
+}
+
+async fn seed_probe(env: &TestEnv, placeholder: &str) -> SeedOutcome {
+    env.reset_mock().await;
+    // The placeholder goes in a JSON body: unlike a header it can carry any
+    // text (multi-line notes, Unicode), so the substitution into the JSON
+    // structure is part of what is checked.
+    let resp = env
+        .forward(
+            "POST",
+            "/seed-check",
+            json!({}),
+            Some(json!({ "probe": placeholder })),
+        )
+        .await;
+    let status = resp.status().as_u16();
+    if status != 200 {
+        return SeedOutcome {
+            status,
+            received: None,
+        };
+    }
+    let captured = env.last_captured_request().await;
+    let received = captured["body"]
+        .as_str()
+        .and_then(|b| serde_json::from_str::<Value>(b).ok())
+        .and_then(|b| b["probe"].as_str().map(str::to_string));
+    SeedOutcome { status, received }
+}
+
+/// Wait for a safe point inside a 30 second TOTP window, so the forward and
+/// the reference code are computed in the same window (60 s periods too).
+async fn seed_wait_for_window() {
+    loop {
+        let into = seed_now() % 30;
+        if (1..=24).contains(&into) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+fn seed_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// Correctness and security: every placeholder the listing offers, forwarded
+/// to the mock API, delivers exactly the value the fixture seeded: passwords,
+/// usernames, notes (multi-line, Unicode, very long), every kind of custom
+/// field (text, hidden, boolean, linked) and TOTP codes for the bare, SHA-256
+/// 8-digit 60-second and Steam secrets. Values that are blank are refused, not
+/// delivered as empty. Items from organisations and with per-item keys are in
+/// the fixtures, so every encryption layout is read. Then a set of
+/// deliberately bad placeholders fails the way it should. Values are compared
+/// in memory and never printed; a mismatch is reported by the label only.
+#[tokio::test]
+async fn test_every_offered_placeholder_delivers_the_seeded_value() {
+    let Some(env) = TestEnv::load() else { return };
+    let listed: std::collections::BTreeSet<String> = env
+        .agent_get_json("/v1/credentials")
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n.as_str().map(str::to_string))
+        .collect();
+
+    seed_wait_for_window().await;
+    // kind -> (probed, delivered the expected value)
+    let mut counts: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
+    let mut mismatches = Vec::new();
+    for item in seed_items() {
+        // An archived fixture that this server could not archive is listed
+        // like any other item; one that was archived is not offered at all.
+        if item.archived && !listed.contains(&item.name) {
+            continue;
+        }
+        for probe in &item.probes {
+            let kind = if probe.label.ends_with("(totp)") {
+                "totp"
+            } else if probe.label.ends_with("(username)") {
+                "username"
+            } else if probe.label.ends_with("(notes)") {
+                "notes"
+            } else if probe.label.contains("(field ") {
+                "field"
+            } else {
+                "password"
+            };
+            let entry = counts.entry(kind).or_default();
+            entry.0 += 1;
+            let before = seed_now();
+            let outcome = seed_probe(&env, &probe.placeholder).await;
+            let after = seed_now();
+            match &probe.expect {
+                SeedExpect::Value(want) => match (outcome.status, &outcome.received) {
+                    (200, Some(got)) if got == want => entry.1 += 1,
+                    (200, Some(_)) => {
+                        mismatches.push(format!("{}: the delivered value differs", probe.label))
+                    }
+                    (status, _) => mismatches.push(format!(
+                        "{}: expected the value to be delivered, got HTTP {status}",
+                        probe.label
+                    )),
+                },
+                SeedExpect::Totp(spec) => {
+                    // The code of the window the request fell in (a request
+                    // can straddle a boundary: accept either end).
+                    let codes: Vec<Option<String>> = [before, after]
+                        .iter()
+                        .map(|t| seed_totp_code(spec, *t))
+                        .collect();
+                    match (outcome.status, &outcome.received) {
+                        (200, Some(got)) if codes.iter().flatten().any(|c| c == got) => {
+                            entry.1 += 1
+                        }
+                        (200, Some(_)) => mismatches.push(format!(
+                            "{}: the delivered code is not the TOTP code",
+                            probe.label
+                        )),
+                        (status, _) => mismatches.push(format!(
+                            "{}: expected a code to be delivered, got HTTP {status}",
+                            probe.label
+                        )),
+                    }
+                }
+                SeedExpect::Refused(status) => {
+                    if outcome.status != *status || outcome.received.is_some() {
+                        mismatches.push(format!(
+                            "{}: expected a refusal with HTTP {status}, got HTTP {}",
+                            probe.label, outcome.status
+                        ));
+                    } else {
+                        entry.1 += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Placeholders that must fail, and how: the HTTP status each gets.
+    // (Nothing is delivered for any of them.)
+    let archived_listed = listed.contains("fx_archived");
+    let negatives: Vec<(&str, &str, Vec<u16>)> = vec![
+        ("unknown item", "{{vault:does_not_exist}}", vec![422]),
+        (
+            "ambiguous field",
+            "{{vault:test_login_full:field:dup}}",
+            vec![409],
+        ),
+        ("re-prompt item", "{{vault:test_reprompt}}", vec![403]),
+        ("bound to another host", "{{vault:test_unbound}}", vec![403]),
+        ("card is not offered", "{{vault:fx_card}}", vec![422]),
+        ("SSH key is not offered", "{{vault:fx_ssh}}", vec![422]),
+        (
+            "identity is not offered",
+            "{{vault:fx_identity:notes}}",
+            vec![422],
+        ),
+        (
+            "missing field",
+            "{{vault:fx_cipherkey_login:field:nope}}",
+            vec![422],
+        ),
+        (
+            "note has no password",
+            "{{vault:fx_cipherkey_note:password}}",
+            vec![422],
+        ),
+        ("no URIs", "{{vault:fx_edge_no_uris}}", vec![403]),
+        // Neither the password nor anything else of an item whose collection
+        // hides it is released.
+        (
+            "hidden password",
+            "{{vault:hidden_password_item}}",
+            vec![422],
+        ),
+        (
+            "hidden password, explicit",
+            "{{vault:hidden_password_item:password}}",
+            vec![422],
+        ),
+        (
+            "hidden item's username",
+            "{{vault:hidden_password_item:username}}",
+            vec![422],
+        ),
+    ];
+    let mut negatives = negatives;
+    if !archived_listed {
+        // Archived on the server: not offered, so not usable.
+        negatives.push(("archived item", "{{vault:fx_archived}}", vec![422]));
+    }
+    for (label, placeholder, statuses) in &negatives {
+        let entry = counts.entry("negative").or_default();
+        entry.0 += 1;
+        let outcome = seed_probe(&env, placeholder).await;
+        // Nothing reached the target.
+        if !env.all_captured_requests().await.is_empty() {
+            mismatches.push(format!("negative: {label}: the request was forwarded"));
+            continue;
+        }
+        if outcome.received.is_some() || !statuses.contains(&outcome.status) {
+            mismatches.push(format!(
+                "negative: {label}: expected HTTP {statuses:?} and no delivery, got HTTP {}",
+                outcome.status
+            ));
+        } else {
+            entry.1 += 1;
+        }
+    }
+
+    println!("placeholders checked by kind (checked, as expected):");
+    for (kind, (n, ok)) in &counts {
+        println!("  {kind:<9} {n:>3} checked, {ok:>3} as expected");
+    }
+    assert!(
+        mismatches.is_empty(),
+        "the placeholders do not deliver what the seed data defines:\n{}",
+        mismatches.join("\n")
+    );
+    // The check must have covered every kind of value for real.
+    for kind in ["password", "username", "totp", "notes", "field"] {
+        assert!(
+            counts.get(kind).is_some_and(|c| c.0 >= 3),
+            "too few {kind} placeholders were checked: {counts:?}"
+        );
+    }
 }

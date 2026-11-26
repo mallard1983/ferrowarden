@@ -1,17 +1,18 @@
 //! The vault Ferrowarden reads credentials from.
 //!
-//! Two backends implement the [`Vault`] trait:
-//! - [`BwServe`]: the Bitwarden CLI's `bw serve` REST API (deprecated).
-//! - [`native::NativeVault`]: the Bitwarden client protocol and cryptography
-//!   implemented in Rust directly against Vaultwarden (docs/native-vault.md).
+//! The [`Vault`] trait is what the rest of Ferrowarden sees. Its one
+//! production implementation is [`native::NativeVault`]: the Bitwarden client
+//! protocol and cryptography implemented in Rust directly against Vaultwarden
+//! (docs/native-vault.md). The trait stays so that another backend can be
+//! added later without touching its callers.
 //!
 //! Everything else (the proxy, the refresher, the unlock endpoint, the admin
-//! UI, events) talks to [`ActiveVault`] and does not care which one is behind
-//! it. The surface is the same: lock and unlock, sync into the credential map
-//! (names, bindings, field names, which values exist, never a value), status,
-//! and one secret value at a time.
+//! UI, events) talks to [`ActiveVault`]. The surface: lock and unlock, sync
+//! into the credential map (names, bindings, field names, which values exist,
+//! never a value), status, and one secret value at a time.
 
-pub mod client;
+#[cfg(test)]
+pub mod fake;
 pub mod model;
 pub mod native;
 pub mod refresh;
@@ -22,14 +23,13 @@ use zeroize::Zeroizing;
 use crate::config::{Config, VaultBackend};
 use crate::error::FerroResult;
 
-pub use client::BwServe;
 pub use model::{Builtin, CredentialMap, Listing, VaultStatus};
 pub use unlock::read_password_file;
 
 /// What a vault backend offers the rest of Ferrowarden.
 #[allow(async_fn_in_trait)] // only used inside this binary, through `ActiveVault`
 pub trait Vault: Send + Sync {
-    /// `bw-serve` or `native`, as reported in events and on the status page.
+    /// `native`, as reported in events and on the status page.
     fn name(&self) -> &'static str;
 
     /// The `cause` of the `vault_lock` event when this backend reports the
@@ -69,39 +69,35 @@ pub trait Vault: Send + Sync {
 
 /// The backend chosen at startup by `vault.backend`.
 pub enum ActiveVault {
-    BwServe(BwServe),
     Native(Box<native::NativeVault>),
+    /// An in-memory stand-in for tests that need an `AppState` without a
+    /// Vaultwarden. Compiled only into the test build; no configuration value
+    /// selects it, and [`ActiveVault::from_config`] never builds it.
+    #[cfg(test)]
+    Fake(fake::FakeVault),
 }
 
 impl ActiveVault {
-    /// Build the configured backend. Fails on a native backend whose settings
-    /// cannot be used (unreadable CA file, missing API key).
+    /// Build the configured backend. Fails when its settings cannot be used
+    /// (unreadable CA file, missing API key).
     pub fn from_config(config: &Config) -> FerroResult<Self> {
         Ok(match config.vault.backend {
-            VaultBackend::BwServe => {
-                ActiveVault::BwServe(BwServe::new(config.bw_serve_url.clone()))
-            }
             VaultBackend::Native => {
                 ActiveVault::Native(Box::new(native::NativeVault::new(config)?))
             }
         })
-    }
-
-    /// True for the native backend: it holds the vault itself, so locking
-    /// also drops Ferrowarden's credential map.
-    pub fn is_native(&self) -> bool {
-        matches!(self, ActiveVault::Native(_))
     }
 }
 
 macro_rules! delegate {
     ($self:ident, $v:ident => $call:expr) => {
         match $self {
-            ActiveVault::BwServe($v) => $call,
             ActiveVault::Native(boxed) => {
                 let $v: &native::NativeVault = boxed;
                 $call
             }
+            #[cfg(test)]
+            ActiveVault::Fake($v) => $call,
         }
     };
 }

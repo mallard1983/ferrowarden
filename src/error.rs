@@ -8,7 +8,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum FerroError {
-    // Vault / bw serve errors
+    // Vault errors
     #[error("Vault is locked")]
     VaultLocked,
 
@@ -21,7 +21,7 @@ pub enum FerroError {
     #[error("Vault client error: {0}")]
     VaultClient(#[from] reqwest::Error),
 
-    #[error("Vault backend (bw serve) is unreachable")]
+    #[error("Vault backend is unreachable")]
     VaultUnavailable,
 
     #[error(

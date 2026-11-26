@@ -54,7 +54,7 @@ Ferrowarden narrows how credentials are exposed; it does not remove every risk. 
                                           └─────────────────┘
 ```
 
-The agent connects only to Ferrowarden. You manage credentials in Vaultwarden's web vault (published on `:8443`, or behind your reverse proxy), which works with Bitwarden-compatible clients. Ferrowarden holds the vault as ciphertext and decrypts only the one field a request needs, so no decrypted value ever crosses a network and there is no `bw serve` or Node.js in the deployment.
+The agent connects only to Ferrowarden. You manage credentials in Vaultwarden's web vault (published on `:8443`, or behind your reverse proxy), which works with Bitwarden-compatible clients. Ferrowarden holds the vault as ciphertext and decrypts only the one field a request needs, so no decrypted value ever crosses a network and there is no Bitwarden CLI or Node.js in the deployment.
 
 ---
 
@@ -80,7 +80,7 @@ cargo test --test integration -- --test-threads=1
 
 ### Production deployment
 
-Upgrading from 0.1.0? The default stack no longer has a `bw-serve` container: see the [upgrade note](docs/release-notes/v0.2.0.md#upgrading).
+Upgrading from 0.1.0? The default stack no longer has a `bw-serve` container: see the [upgrade note](docs/release-notes/v0.2.0.md#upgrading). Still on `bw-serve` in 0.2.0? The backend is removed in 0.3.0: see [Upgrading from bw-serve](docs/native-vault.md#upgrading-from-bw-serve).
 
 The full walkthrough, with Linux and Windows commands for every step, is in **[docs/setup.md](docs/setup.md)**. In outline:
 

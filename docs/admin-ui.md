@@ -272,6 +272,6 @@ Events never contain the password, the hash, a code, a token, a cookie or anythi
 - Sessions do not survive a restart.
 - No second-factor "remember this device" (Ferrowarden never sends `twoFactorRemember`).
 - WebAuthn, Duo and recovery-code sign-in are not supported.
-- The UI needs the vault backend to know the account email (the native backend looks it up from Vaultwarden; the deprecated bw-serve backend needs `bw serve` to be logged in).
+- The UI needs the vault backend to know the account email (the native backend looks it up from Vaultwarden).
 
 See also [Security Model §16](security.md#16-the-admin-web-ui) and [Operations](operations.md).

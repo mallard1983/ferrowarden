@@ -56,7 +56,7 @@ done
 echo "[setup] Vaultwarden is ready."
 
 # ── 2. Register account via bw-register.js ───────────────────────────────────
-# The bw CLI does not have a `register` command. bw-register.js performs the
+# There is no Bitwarden CLI command to register an account. bw-register.js performs the
 # equivalent client-side crypto (PBKDF2 key derivation, symmetric key
 # generation, RSA-2048 key pair, AES-256-CBC encryption) and calls
 # POST /api/accounts/register directly. Uses only Node.js built-in modules.
@@ -85,7 +85,7 @@ fi
 # the account's KDF (PBKDF2-SHA256 or Argon2id): bw-apikey.js reads it from
 # prelogin and derives the hash with Node's built-in crypto (the same code that
 # registered the account, bw-lib.js), logs in, and creates the API key
-# (client_id + client_secret) used by the native backend, bw serve and the
+# (client_id + client_secret) used by the native backend and the
 # seeder. It writes bw_client_id and bw_client_secret to $SECRETS_DIR.
 
 mkdir -p "$SECRETS_DIR"

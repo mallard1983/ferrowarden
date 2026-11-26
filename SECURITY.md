@@ -37,7 +37,7 @@ In scope — anything that breaks a guarantee in the [Security Model](docs/secur
 
 Out of scope:
 
-- The [threat model's out-of-scope items](docs/security.md#out-of-scope): host compromise, Vaultwarden or Bitwarden CLI vulnerabilities (report those upstream), theft of an agent or admin key
+- The [threat model's out-of-scope items](docs/security.md#out-of-scope): host compromise, Vaultwarden vulnerabilities (report those upstream), theft of an agent or admin key
 - A target service that is *bound* to a credential transforming and returning it in a form the scrubber cannot recognise — binding a credential to a host means trusting that host with it
 - Deployments that disable protections (`enforce_credential_hosts = false`, `allow_private_targets = true`, TLS disabled on a network hop)
 - Denial of service through request volume beyond the documented rate limits

@@ -5,7 +5,7 @@
  * Programmatic Bitwarden/Vaultwarden account registration.
  * Uses only Node.js built-in modules (crypto, https, http) — no extra deps.
  *
- * The Bitwarden CLI does not have a `register` command. This script
+ * There is no Bitwarden CLI command to register an account. This script
  * performs the equivalent client-side crypto and HTTP POST to register a new
  * account directly against the Vaultwarden API.
  *

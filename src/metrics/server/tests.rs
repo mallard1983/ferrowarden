@@ -13,7 +13,7 @@ const TOKEN: &str = "s3cr3t-metrics-token-0123456789abcdef";
 fn config(token: Option<&str>) -> Config {
     Config {
         bind_addr: "127.0.0.1:3000".to_string(),
-        bw_serve_url: "http://127.0.0.1:8087".to_string(),
+        bw_serve_url: None,
         unlock_mode: UnlockMode::Manual,
         unlock_file: None,
         admin_key: "a".repeat(32).into(),
@@ -36,10 +36,7 @@ fn config(token: Option<&str>) -> Config {
         events: Default::default(),
         ui: Default::default(),
         notify: Default::default(),
-        vault: crate::config::VaultConfig {
-            backend: crate::config::VaultBackend::BwServe,
-            ..Default::default()
-        },
+        vault: crate::config::VaultConfig::default(),
         metrics: MetricsConfig {
             bind: "127.0.0.1:9095".into(),
             token: MetricsToken(token.map(|t| Zeroizing::new(t.to_string()))),
@@ -60,7 +57,7 @@ fn fixture(token: Option<&str>) -> Fixture {
         cfg.clone(),
         Arc::new(EventLog::buffer_only(1000)),
     ));
-    let metrics = Metrics::new("0.0.0", "bw-serve", false);
+    let metrics = Metrics::new("0.0.0", "native", false);
     let server = MetricsServer::new(state.clone(), metrics.clone(), &cfg.metrics, None);
     Fixture {
         app: router(server),
@@ -330,7 +327,7 @@ fn the_token_is_kept_as_a_digest_only() {
     ));
     let server = MetricsServer::new(
         state,
-        Metrics::new("0", "bw-serve", false),
+        Metrics::new("0", "native", false),
         &cfg.metrics,
         None,
     );

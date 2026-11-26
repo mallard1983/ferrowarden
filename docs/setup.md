@@ -2,13 +2,13 @@
 
 # Setup Guide
 
-This guide walks through a complete Ferrowarden deployment using Docker Compose. Ferrowarden runs as a sidecar to [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (it is not a fork or replacement, and is not affiliated with Vaultwarden or Bitwarden) and reads your vault itself, over the Bitwarden client protocol (the native backend, the default since 0.2.0). By the end you will have:
+This guide walks through a complete Ferrowarden deployment using Docker Compose. Ferrowarden runs as a sidecar to [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (it is not a fork or replacement, and is not affiliated with Vaultwarden or Bitwarden) and reads your vault itself, over the Bitwarden client protocol (the native vault backend). By the end you will have:
 
 - Vaultwarden running and configured, with an account and an API key
 - Ferrowarden signed in to that account and proxying credential requests
 - One agent key ready to use
 
-Upgrading from 0.1.0? The `bw-serve` container is gone from the default stack: read the [upgrade note](release-notes/v0.2.0.md#upgrading) first. The old way is deprecated and described [at the end of this guide](#staying-on-the-deprecated-bw-serve-backend).
+Upgrading from 0.1.0? The `bw-serve` container is gone from the default stack: read the [upgrade note](release-notes/v0.2.0.md#upgrading) first. Still on `bw-serve` in 0.2.0? Move to native on 0.2.0 first, then upgrade: [Upgrading from bw-serve](native-vault.md#upgrading-from-bw-serve).
 
 ---
 
@@ -306,12 +306,11 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | Config key | Environment variable | Default |
 |---|---|---|
 | `bind_addr` | `FERROWARDEN_BIND_ADDR` | `0.0.0.0:3000` |
-| `vault.backend` | `FERROWARDEN_VAULT__BACKEND` | `native` — Ferrowarden reads the vault itself ([native-vault.md](native-vault.md)). `bw-serve` is deprecated and removed in the next release |
+| `vault.backend` | `FERROWARDEN_VAULT__BACKEND` | `native`, the only value — Ferrowarden reads the vault itself ([native-vault.md](native-vault.md)). `bw-serve` was removed in 0.3.0 and is a startup error |
 | `vault.url` | `FERROWARDEN_VAULT__URL` | `https://vaultwarden` — how Ferrowarden reaches Vaultwarden (the vault connection and the admin UI sign-in) |
 | `vault.ca_file` | `FERROWARDEN_VAULT__CA_FILE` | *(empty; the Compose files set `/ca-public/ca.crt`)* — extra CA for `vault.url`, on top of the public roots |
-| `vault.allow_hidden_passwords` | `FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS` | `false` — the native backend leaves out items whose collection hides passwords from the account ("Hide passwords"); `true` makes them usable by agents (warning at startup). No effect with the deprecated `bw-serve`, which withholds those passwords itself. See [native-vault.md](native-vault.md#hidden-passwords-collections-that-hide-them) |
+| `vault.allow_hidden_passwords` | `FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS` | `false` — items whose collection hides passwords from the account ("Hide passwords") are left out; `true` makes them usable by agents (warning at startup). See [native-vault.md](native-vault.md#hidden-passwords-collections-that-hide-them) |
 | *(env or file only)* | `FERROWARDEN_VAULT_CLIENT_ID` / `_FILE`, `FERROWARDEN_VAULT_CLIENT_SECRET` / `_FILE` | Vaultwarden personal API key, **required** by the native backend (`secrets/bw_client_id` and `secrets/bw_client_secret` in the Compose file) |
-| `bw_serve_url` | `FERROWARDEN_BW_SERVE_URL` | `http://127.0.0.1:8087` — deprecated `bw-serve` backend only |
 | `unlock_mode` | `FERROWARDEN_UNLOCK_MODE` | *(required)* |
 | `unlock_file` | `FERROWARDEN_UNLOCK_FILE` | *(required in file mode)* |
 | *(env or file only)* | `FERROWARDEN_ADMIN_KEY` or `FERROWARDEN_ADMIN_KEY_FILE` | *(one required)*: the file variant names a file holding the key (the Compose files use `/run/secrets/ferrowarden_admin_key`). Ferrowarden reads the file itself and never puts the key in its environment; a plain `FERROWARDEN_ADMIN_KEY` wins if both are set |
@@ -337,18 +336,6 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `ui.session_idle_minutes` | `FERROWARDEN_UI__SESSION_IDLE_MINUTES` | `15` |
 | `ui.session_max_hours` | `FERROWARDEN_UI__SESSION_MAX_HOURS` | `8` |
 | *(env only)* | `FERROWARDEN_LOG_LEVEL` | `info` — requires restart to change |
-
----
-
-### Staying on the deprecated bw-serve backend
-
-The `bw-serve` backend (the Bitwarden CLI's `bw serve`) is **deprecated** and is removed in the release after 0.2.0. If you cannot move to the native backend yet, add the override file:
-
-```sh
-docker compose -f docker-compose.yml -f docker-compose.bw-serve.yml up -d
-```
-
-See [native-vault.md](native-vault.md#switching). Ferrowarden logs a deprecation warning at every start in this mode.
 
 ---
 

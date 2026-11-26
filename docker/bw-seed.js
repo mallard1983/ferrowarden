@@ -191,9 +191,9 @@ async function seed() {
       const uris = ((c.login && c.login.uris) || [])
         .filter((u) => u.uri)
         .map((u) => ({ uri: decryptCipherString(k, u.uri).toString('utf8'), match: u.match ?? null }));
-      // Current clients write a checksum with every URI; bw serve ignores the
-      // URIs of an item that has its own key and no checksum, so such an item
-      // (an earlier version of this seeder wrote them) is rewritten below.
+      // Current clients write a checksum with every URI; an item that has its
+      // own key and URIs without one (an earlier version of this seeder wrote
+      // them) is rewritten below.
       const checksums = ((c.login && c.login.uris) || []).filter((u) => u.uri).every((u) => u.uriChecksum);
       if (!existingAll.has(name)) existingAll.set(name, []);
       existingAll.get(name).push({ id: c.id, uris, orgId: c.organizationId || null, stale: !!c.key && !checksums });
