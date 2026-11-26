@@ -54,7 +54,7 @@ services:
     # against this release. Upgrade both deliberately and re-run the tests.
     # VAULTWARDEN_VERSION selects another release, with the BW_CLI_VERSION of
     # its time: CI runs the whole suite against the previous minor
-    # (1.36.0, CLI 2026.5.0) with an Argon2id account (TEST_KDF=argon2id).
+    # (1.36.0, CLI 2026.6.0) with an Argon2id account (TEST_KDF=argon2id).
     # See docs/cicd.md.
     image: vaultwarden/server:${VAULTWARDEN_VERSION:-1.37.5}
     restart: unless-stopped

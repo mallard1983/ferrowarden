@@ -91,7 +91,7 @@ jobs:
             kdf: pbkdf2
           - name: Integration tests (Vaultwarden 1.36.0, Argon2id)
             vaultwarden: "1.36.0"
-            bw_cli: "2026.5.0"
+            bw_cli: "2026.6.0"
             kdf: argon2id
     # Read by docker-compose.test.yml and scripts/dev-setup.sh.
     env:

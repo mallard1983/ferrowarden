@@ -133,7 +133,7 @@ The native backend implements the protocol itself, so the Vaultwarden release ma
 | Vaultwarden | Test account KDF | Bitwarden CLI for `bw serve` |
 |---|---|---|
 | 1.37.5 (current) | PBKDF2-SHA256, 600 000 iterations | 2026.11.0 |
-| 1.36.0 (previous minor) | Argon2id, 64 MiB, 3 iterations, parallelism 4 | 2026.5.0 |
+| 1.36.0 (previous minor) | Argon2id, 64 MiB, 3 iterations, parallelism 4 | 2026.6.0 |
 
 The statement of support is: the current and the previous minor release. A newer Vaultwarden that changes the formats is first run against the stack. Native became the default in 0.2.0 once the equivalence suite was green on both and a vault written by a real web vault, with organisation items, had been checked (#36).
 
