@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Ferrowarden API
-  version: 0.1.0
+  version: 0.2.0
   summary: HTTP API of Ferrowarden, the credential boundary for AI agents.
   description: |
     Ferrowarden lets AI agents make API requests with named credentials without exposing credential values to the agent.

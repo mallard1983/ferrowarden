@@ -34,7 +34,7 @@ One JSON object per line. Field names follow the [Elastic Common Schema](https:/
   "source": { "ip": "172.18.0.1" },
   "http": { "request": { "method": "GET" }, "response": { "status_code": 403 } },
   "url": { "original": "http://mock-api:7777/mock-api/api/unbound", "domain": "mock-api" },
-  "service": { "name": "ferrowarden", "version": "0.1.0" },
+  "service": { "name": "ferrowarden", "version": "0.2.0" },
   "ferrowarden": {
     "schema_version": 1,
     "request_id": "01a1fede-aa62-717e-b0dd-10a8660ac84d",
@@ -122,13 +122,13 @@ A flood of `429`s must not flood the event stream. For each client IP and limite
 A successful forward:
 
 ```json
-{"@timestamp":"2026-11-21T16:09:25.075Z","message":"forward succeeded","event":{"kind":"event","dataset":"ferrowarden.security","action":"forward","category":["web"],"type":["access"],"outcome":"success","duration":21662683},"source":{"ip":"172.18.0.1"},"http":{"request":{"method":"GET"},"response":{"status_code":200}},"url":{"original":"http://mock-api:7777/mock-api/api/audited","domain":"mock-api"},"service":{"name":"ferrowarden","version":"0.1.0"},"ferrowarden":{"schema_version":1,"request_id":"01a1fede-9f3e-76eb-985e-c6beffe1e906","key":{"id":"a35c6bd3-1a1e-48ea-8e90-ebc0718399c4","name":"integration-test"},"credentials":["grafana_service_account"]}}
+{"@timestamp":"2026-11-21T16:09:25.075Z","message":"forward succeeded","event":{"kind":"event","dataset":"ferrowarden.security","action":"forward","category":["web"],"type":["access"],"outcome":"success","duration":21662683},"source":{"ip":"172.18.0.1"},"http":{"request":{"method":"GET"},"response":{"status_code":200}},"url":{"original":"http://mock-api:7777/mock-api/api/audited","domain":"mock-api"},"service":{"name":"ferrowarden","version":"0.2.0"},"ferrowarden":{"schema_version":1,"request_id":"01a1fede-9f3e-76eb-985e-c6beffe1e906","key":{"id":"a35c6bd3-1a1e-48ea-8e90-ebc0718399c4","name":"integration-test"},"credentials":["grafana_service_account"]}}
 ```
 
 A failed agent authentication (the presented key is never logged, not even a prefix):
 
 ```json
-{"@timestamp":"2026-11-21T16:09:24.110Z","message":"agent authentication blocked: no agent key presented","event":{"kind":"event","dataset":"ferrowarden.security","action":"agent_auth","category":["authentication"],"type":["start"],"outcome":"failure","reason":"missing_key"},"source":{"ip":"172.18.0.1"},"http":{"response":{"status_code":401}},"service":{"name":"ferrowarden","version":"0.1.0"},"ferrowarden":{"schema_version":1,"request_id":"01a1fede-9b8e-7625-aec4-0a429b12598a","details":{"endpoint":"/v1/credentials"}}}
+{"@timestamp":"2026-11-21T16:09:24.110Z","message":"agent authentication blocked: no agent key presented","event":{"kind":"event","dataset":"ferrowarden.security","action":"agent_auth","category":["authentication"],"type":["start"],"outcome":"failure","reason":"missing_key"},"source":{"ip":"172.18.0.1"},"http":{"response":{"status_code":401}},"service":{"name":"ferrowarden","version":"0.2.0"},"ferrowarden":{"schema_version":1,"request_id":"01a1fede-9b8e-7625-aec4-0a429b12598a","details":{"endpoint":"/v1/credentials"}}}
 ```
 
 `details.endpoint` is the route template (`/v1/forward`, `/v1/admin/keys/{id}`), not the raw path: it never contains the `api_prefix` or an id from the URL.
@@ -136,13 +136,13 @@ A failed agent authentication (the presented key is never logged, not even a pre
 An authenticated request with a bad body:
 
 ```json
-{"@timestamp":"2026-11-21T16:09:33.259Z","message":"request blocked: invalid JSON body","event":{"kind":"event","dataset":"ferrowarden.security","action":"request_rejected","category":["web"],"type":["denied"],"outcome":"failure","reason":"invalid_json"},"source":{"ip":"172.18.0.1"},"http":{"response":{"status_code":400}},"service":{"name":"ferrowarden","version":"0.1.0"},"ferrowarden":{"schema_version":1,"request_id":"01a1fede-bf4b-77a0-ae8d-a73ed5b694e9","key":{"id":"a35c6bd3-1a1e-48ea-8e90-ebc0718399c4","name":"integration-test"},"details":{"endpoint":"/v1/forward","error":"Invalid JSON: duplicate key \"k\" (line 1, column 105)"}}}
+{"@timestamp":"2026-11-21T16:09:33.259Z","message":"request blocked: invalid JSON body","event":{"kind":"event","dataset":"ferrowarden.security","action":"request_rejected","category":["web"],"type":["denied"],"outcome":"failure","reason":"invalid_json"},"source":{"ip":"172.18.0.1"},"http":{"response":{"status_code":400}},"service":{"name":"ferrowarden","version":"0.2.0"},"ferrowarden":{"schema_version":1,"request_id":"01a1fede-bf4b-77a0-ae8d-a73ed5b694e9","key":{"id":"a35c6bd3-1a1e-48ea-8e90-ebc0718399c4","name":"integration-test"},"details":{"endpoint":"/v1/forward","error":"Invalid JSON: duplicate key \"k\" (line 1, column 105)"}}}
 ```
 
 A key creation (id and name only; never the token or its hash):
 
 ```json
-{"@timestamp":"2026-11-21T16:09:23.487Z","message":"agent key created","event":{"kind":"event","dataset":"ferrowarden.security","action":"key_create","category":["iam"],"type":["creation"],"outcome":"success"},"source":{"ip":"172.18.0.1"},"http":{"response":{"status_code":201}},"service":{"name":"ferrowarden","version":"0.1.0"},"ferrowarden":{"schema_version":1,"request_id":"01a1fede-991d-7505-b535-ee18d0f043d7","details":{"key_id":"0dcc9fd5-eba6-4290-9887-8fe440e0e17b","key_name":"lifecycle-test-key"}}}
+{"@timestamp":"2026-11-21T16:09:23.487Z","message":"agent key created","event":{"kind":"event","dataset":"ferrowarden.security","action":"key_create","category":["iam"],"type":["creation"],"outcome":"success"},"source":{"ip":"172.18.0.1"},"http":{"response":{"status_code":201}},"service":{"name":"ferrowarden","version":"0.2.0"},"ferrowarden":{"schema_version":1,"request_id":"01a1fede-991d-7505-b535-ee18d0f043d7","details":{"key_id":"0dcc9fd5-eba6-4290-9887-8fe440e0e17b","key_name":"lifecycle-test-key"}}}
 ```
 
 The startup event (shown formatted):
@@ -153,11 +153,11 @@ The startup event (shown formatted):
   "message": "ferrowarden started",
   "event": { "kind": "event", "dataset": "ferrowarden.security", "action": "startup",
              "category": ["configuration"], "type": ["start"], "outcome": "success" },
-  "service": { "name": "ferrowarden", "version": "0.1.0" },
+  "service": { "name": "ferrowarden", "version": "0.2.0" },
   "ferrowarden": {
     "schema_version": 1,
     "details": {
-      "version": "0.1.0", "tls_enabled": false, "unlock_mode": "file",
+      "version": "0.2.0", "tls_enabled": false, "unlock_mode": "file",
       "enforce_credential_hosts": true, "allow_private_targets": false,
       "allowed_targets": 1, "trusted_proxies": 0, "api_prefix_set": false,
       "agent_key_count": 3, "keys_without_policy": 0, "sinks": ["stdout", "file"]
