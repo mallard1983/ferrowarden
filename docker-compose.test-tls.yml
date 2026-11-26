@@ -13,6 +13,9 @@
 # Revert to the default (loopback, plaintext):
 #   docker compose -f docker-compose.test.yml up -d ferrowarden
 #
+# The metrics listener (port 9095) uses the same certificate, so its scrapes need
+# https:// and a client that trusts it.
+#
 # The hardening (read-only root filesystem, no capabilities) and the container
 # health check come from docker-compose.test.yml. `ferrowarden healthcheck`
 # reads the same settings as the server, so with TLS on it checks over HTTPS and

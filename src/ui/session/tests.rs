@@ -330,3 +330,18 @@ fn pending_login_is_zeroized_on_drop() {
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     assert!(bytes.iter().all(|b| *b == 0));
 }
+
+#[test]
+fn live_counts_only_sessions_that_have_not_expired() {
+    let mut s = store();
+    let t0 = Instant::now();
+    assert_eq!(s.live(t0), 0);
+    s.create(t0).unwrap();
+    s.create(t0 + secs(600)).unwrap();
+    assert_eq!(s.live(t0 + secs(700)), 2);
+    // The first has been idle for more than 15 minutes, the second has not;
+    // the expired one is still stored but not counted.
+    assert_eq!(s.live(t0 + secs(16 * 60)), 1);
+    assert_eq!(s.len(), 2);
+    assert_eq!(s.live(t0 + secs(40 * 60)), 0);
+}

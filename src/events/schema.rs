@@ -70,12 +70,13 @@ pub enum Action {
     UiSessionExpired,
     UiTwoFactorEmailSent,
     NotifyTest,
+    MetricsAuth,
 }
 
 impl Action {
     /// Every action, in the order the audit view lists them. Keep in step
     /// with the enum: the `all_actions_are_listed` test counts the variants.
-    pub const ALL: [Action; 25] = [
+    pub const ALL: [Action; 26] = [
         Action::Forward,
         Action::CredentialsList,
         Action::AgentAuth,
@@ -101,6 +102,7 @@ impl Action {
         Action::UiSessionExpired,
         Action::UiTwoFactorEmailSent,
         Action::NotifyTest,
+        Action::MetricsAuth,
     ];
 
     /// The action whose wire name (`as_str`) is `name`.
@@ -135,6 +137,7 @@ impl Action {
             Action::UiSessionExpired => "ui_session_expired",
             Action::UiTwoFactorEmailSent => "ui_two_factor_email_sent",
             Action::NotifyTest => "notify_test",
+            Action::MetricsAuth => "metrics_auth",
         }
     }
 
@@ -149,6 +152,7 @@ impl Action {
             | Action::OpenapiRead => "web",
             Action::AgentAuth
             | Action::AdminAuth
+            | Action::MetricsAuth
             | Action::VaultUnlock
             | Action::UiLogin
             | Action::UiLogout
@@ -173,7 +177,11 @@ impl Action {
     fn failure_only(self) -> bool {
         matches!(
             self,
-            Action::AgentAuth | Action::AdminAuth | Action::RateLimited | Action::RequestRejected
+            Action::AgentAuth
+                | Action::AdminAuth
+                | Action::MetricsAuth
+                | Action::RateLimited
+                | Action::RequestRejected
         )
     }
 
@@ -184,6 +192,7 @@ impl Action {
             Action::CredentialsList => "credentials list",
             Action::AgentAuth => "agent authentication",
             Action::AdminAuth => "admin authentication",
+            Action::MetricsAuth => "metrics authentication",
             Action::RateLimited | Action::RequestRejected => "request",
             Action::KeyCreate => "key creation",
             Action::KeyRevoke => "key revocation",
@@ -214,6 +223,7 @@ impl Action {
             Action::CredentialsList => "credentials listed",
             Action::AgentAuth => "agent authenticated",
             Action::AdminAuth => "admin authenticated",
+            Action::MetricsAuth => "metrics authenticated",
             Action::RateLimited => "request rate limited",
             Action::RequestRejected => "request rejected",
             Action::KeyCreate => "agent key created",
@@ -299,12 +309,14 @@ pub enum Reason {
     LoginLockedOut,
     UpstreamRateLimited,
     InsecureTransport,
+    MissingMetricsToken,
+    InvalidMetricsToken,
 }
 
 impl Reason {
     /// Every reason, in declaration order (tests and the notifier tables).
     #[cfg(test)]
-    pub const ALL: [Reason; 30] = [
+    pub const ALL: [Reason; 32] = [
         Reason::MissingKey,
         Reason::InvalidKey,
         Reason::MissingAdminKey,
@@ -335,6 +347,8 @@ impl Reason {
         Reason::LoginLockedOut,
         Reason::UpstreamRateLimited,
         Reason::InsecureTransport,
+        Reason::MissingMetricsToken,
+        Reason::InvalidMetricsToken,
     ];
 
     /// The wire code (`event.reason`), the same text serde writes.
@@ -370,6 +384,8 @@ impl Reason {
             Reason::LoginLockedOut => "login_locked_out",
             Reason::UpstreamRateLimited => "upstream_rate_limited",
             Reason::InsecureTransport => "insecure_transport",
+            Reason::MissingMetricsToken => "missing_metrics_token",
+            Reason::InvalidMetricsToken => "invalid_metrics_token",
         }
     }
 
@@ -395,6 +411,8 @@ impl Reason {
                 | Reason::TwoFactorFailed
                 | Reason::LoginLockedOut
                 | Reason::InsecureTransport
+                | Reason::MissingMetricsToken
+                | Reason::InvalidMetricsToken
         )
     }
 
@@ -431,6 +449,8 @@ impl Reason {
             Reason::LoginLockedOut => "too many failed attempts",
             Reason::UpstreamRateLimited => "Vaultwarden rate limit reached",
             Reason::InsecureTransport => "the connection is not HTTPS",
+            Reason::MissingMetricsToken => "no metrics token presented",
+            Reason::InvalidMetricsToken => "invalid metrics token",
         }
     }
 }
@@ -508,6 +528,15 @@ pub struct HttpRequest {
 pub struct HttpResponse {
     /// A number, not a string.
     pub status_code: u16,
+    /// ECS `http.response.body`: only the size, never content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<HttpBody>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HttpBody {
+    /// Size in bytes of the upstream response body (`forward` only).
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -565,6 +594,12 @@ pub struct SecurityEvent {
     pub url: Option<UrlInfo>,
     pub service: Service,
     pub ferrowarden: FerrowardenInfo,
+    /// Vault item names of the placeholders a request used, without the
+    /// selector (`Grafana` for `{{vault:Grafana:username}}`). For the metrics
+    /// consumer only and never serialized: the wire format carries the
+    /// placeholder labels in `ferrowarden.credentials`.
+    #[serde(skip)]
+    pub items: Vec<String>,
 }
 
 impl SecurityEvent {
@@ -601,6 +636,7 @@ impl SecurityEvent {
                 credentials: Vec::new(),
                 details: None,
             },
+            items: Vec::new(),
         };
         event.refresh();
         event
@@ -625,7 +661,9 @@ impl SecurityEvent {
             | Action::StatusRead
             | Action::OpenapiRead => vec!["access"],
             Action::KeyPolicyChange => vec!["change"],
-            Action::AgentAuth | Action::AdminAuth | Action::VaultUnlock => vec!["start"],
+            Action::AgentAuth | Action::AdminAuth | Action::MetricsAuth | Action::VaultUnlock => {
+                vec!["start"]
+            }
             Action::UiLogin => {
                 if denied {
                     vec!["start", "denied"]
@@ -704,7 +742,24 @@ impl SecurityEvent {
     }
 
     pub fn status(mut self, status_code: u16) -> Self {
-        self.http.get_or_insert_with(Http::default).response = Some(HttpResponse { status_code });
+        let http = self.http.get_or_insert_with(Http::default);
+        // Keep a body size recorded earlier.
+        let body = http.response.take().and_then(|r| r.body);
+        http.response = Some(HttpResponse { status_code, body });
+        self
+    }
+
+    /// `http.response.body.bytes`: the size of the upstream response body. A
+    /// size only; there is no field for content.
+    pub fn response_bytes(mut self, bytes: usize) -> Self {
+        let http = self.http.get_or_insert_with(Http::default);
+        let response = http.response.get_or_insert(HttpResponse {
+            status_code: 0,
+            body: None,
+        });
+        response.body = Some(HttpBody {
+            bytes: u64::try_from(bytes).unwrap_or(u64::MAX),
+        });
         self
     }
 
@@ -730,6 +785,21 @@ impl SecurityEvent {
             .into_iter()
             .take(MAX_CREDENTIAL_LABELS)
             .map(|l| truncate(l.as_ref(), MAX_FIELD_CHARS))
+            .collect();
+        self
+    }
+
+    /// The item names behind the placeholders (see [`SecurityEvent::items`]).
+    /// Capped in count and length like the labels.
+    pub fn items<I, S>(mut self, items: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.items = items
+            .into_iter()
+            .take(MAX_CREDENTIAL_LABELS)
+            .map(|i| truncate(i.as_ref(), MAX_FIELD_CHARS))
             .collect();
         self
     }

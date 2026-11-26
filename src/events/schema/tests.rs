@@ -51,6 +51,7 @@ fn all_actions_are_listed() {
             Action::UiSessionExpired => 22,
             Action::UiTwoFactorEmailSent => 23,
             Action::NotifyTest => 24,
+            Action::MetricsAuth => 25,
         }
     }
     for (i, a) in Action::ALL.into_iter().enumerate() {
@@ -334,6 +335,8 @@ fn reason_codes_are_the_documented_snake_case_list() {
         (Reason::LoginLockedOut, "login_locked_out"),
         (Reason::UpstreamRateLimited, "upstream_rate_limited"),
         (Reason::InsecureTransport, "insecure_transport"),
+        (Reason::MissingMetricsToken, "missing_metrics_token"),
+        (Reason::InvalidMetricsToken, "invalid_metrics_token"),
     ];
     assert_eq!(all.len(), Reason::ALL.len());
     for ((reason, code), listed) in all.into_iter().zip(Reason::ALL) {
@@ -489,4 +492,66 @@ fn builder_details_and_message() {
 fn duration_saturates_instead_of_overflowing() {
     let e = SecurityEvent::new(Action::Forward).duration(Duration::MAX);
     assert_eq!(e.event.duration, Some(u64::MAX));
+}
+
+#[test]
+fn the_response_body_size_is_an_ecs_field_and_a_number() {
+    let e = SecurityEvent::new(Action::Forward)
+        .response_bytes(1500)
+        .status(200);
+    let v = to_json(&e);
+    assert_eq!(v["http"]["response"]["status_code"], 200);
+    assert_eq!(v["http"]["response"]["body"]["bytes"], 1500);
+    assert!(v["http"]["response"]["body"]["bytes"].is_u64());
+    // Order does not matter, and without a size there is no `body`.
+    let e = SecurityEvent::new(Action::Forward)
+        .status(200)
+        .response_bytes(7);
+    assert_eq!(to_json(&e)["http"]["response"]["body"]["bytes"], 7);
+    let e = SecurityEvent::new(Action::Forward).status(502);
+    assert!(to_json(&e)["http"]["response"].get("body").is_none());
+}
+
+#[test]
+fn item_names_for_the_metrics_are_not_part_of_the_wire_format() {
+    let e = SecurityEvent::new(Action::Forward)
+        .credentials(["'Proxmox (prod)':username"])
+        .items(["Proxmox (prod)"]);
+    assert_eq!(e.items, ["Proxmox (prod)"]);
+    let text = to_json(&e).to_string();
+    assert!(text.contains("'Proxmox (prod)':username"));
+    assert!(!text.contains("\"items\""), "{text}");
+    // Capped like the labels.
+    let many: Vec<String> = (0..200).map(|i| format!("i{i}")).collect();
+    assert_eq!(
+        SecurityEvent::new(Action::Forward).items(&many).items.len(),
+        64
+    );
+    let long = "x".repeat(500);
+    assert_eq!(
+        SecurityEvent::new(Action::Forward).items([&long]).items[0]
+            .chars()
+            .count(),
+        MAX_FIELD_CHARS
+    );
+}
+
+#[test]
+fn metrics_auth_is_an_authentication_failure_event() {
+    let e = SecurityEvent::new(Action::MetricsAuth).reason(Reason::InvalidMetricsToken);
+    let v = to_json(&e);
+    assert_eq!(v["event"]["action"], "metrics_auth");
+    assert_eq!(v["event"]["category"], json!(["authentication"]));
+    assert_eq!(v["event"]["type"], json!(["start"]));
+    assert_eq!(v["event"]["outcome"], "failure");
+    assert_eq!(v["event"]["reason"], "invalid_metrics_token");
+    assert_eq!(
+        v["message"],
+        "metrics authentication blocked: invalid metrics token"
+    );
+    let e = SecurityEvent::new(Action::MetricsAuth).reason(Reason::MissingMetricsToken);
+    assert_eq!(
+        to_json(&e)["message"],
+        "metrics authentication blocked: no metrics token presented"
+    );
 }

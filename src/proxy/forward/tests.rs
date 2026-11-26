@@ -28,6 +28,7 @@ fn policy(allowed: &str) -> Arc<TargetPolicy> {
         ui: Default::default(),
         notify: Default::default(),
         vault: Default::default(),
+        metrics: Default::default(),
     }))
 }
 
@@ -111,4 +112,47 @@ fn proxy_request_rejects_unknown_fields_and_duplicate_keys() {
     assert!(parse(r#"{"method":"GET","method":"POST","url":"http://x"}"#).is_err());
     assert!(parse(r#"{"method":"GET","url":"http://x","headers":{"a":"1","a":"2"}}"#).is_err());
     assert!(parse(r#"{"method":"GET","url":"http://x","body":{"k":{"a":1,"a":2}}}"#).is_err());
+}
+
+/// A server that answers every request with `body`, once per connection.
+async fn body_server(body: Vec<u8>) -> std::net::SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = s.write_all(head.as_bytes()).await;
+            let _ = s.write_all(&body).await;
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn the_upstream_body_size_is_recorded_but_never_sent_to_the_agent() {
+    // Text: the size of the body as received, before scrubbing.
+    let addr = body_server(vec![b'a'; 700]).await;
+    let resp = fwd("GET", &format!("http://{addr}/"), "127.0.0.1")
+        .await
+        .unwrap();
+    assert_eq!(resp.upstream_bytes, 700);
+    assert_eq!(resp.body_encoding, "utf8");
+    // Bytes that are not text: the size of the bytes, not of their base64.
+    let addr = body_server(vec![0xff; 30]).await;
+    let resp = fwd("GET", &format!("http://{addr}/"), "127.0.0.1")
+        .await
+        .unwrap();
+    assert_eq!(resp.upstream_bytes, 30);
+    assert_eq!(resp.body_encoding, "base64");
+    assert!(resp.body.len() > 30);
+    // It is bookkeeping for the event: the response the agent gets has no
+    // such field (the API description does not list one).
+    let json = serde_json::to_value(&resp).unwrap();
+    assert!(json.get("upstream_bytes").is_none(), "{json}");
 }

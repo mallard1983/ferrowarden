@@ -130,6 +130,14 @@ serde_norway = "0.9"
 # tested against docs/openapi.yaml.
 rmcp = { version = "3.11", default-features = false, features = ["server", "transport-io"] }
 
+# ── Prometheus metrics (docs/metrics.md) ──────────────────────────────────────
+# The official Prometheus client for Rust (Apache-2.0 OR MIT). Pure Rust with
+# no active build script (the protobuf build step belongs to an optional
+# feature we leave off), so it builds for the static musl target like the
+# rest. Output is the OpenMetrics text format. Its small dependencies (dtoa,
+# itoa, parking_lot) are MIT and/or Apache-2.0 as well.
+prometheus-client = "0.26"
+
 # Process hardening of the native vault backend (PR_SET_DUMPABLE, RLIMIT_CORE).
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

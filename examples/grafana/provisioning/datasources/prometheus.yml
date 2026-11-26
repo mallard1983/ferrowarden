@@ -1,0 +1,10 @@
+# Grafana datasource for the Ferrowarden dashboard. The dashboard picks its
+# data source with a variable, so the name and UID here are free to change.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

@@ -69,6 +69,8 @@ struct Unlocked {
     last_full_sync: Instant,
     /// Exclusions from the last rebuild, handed out once.
     pending_report: Option<ExclusionReport>,
+    /// How many items the last rebuild left out (kept, for the metrics).
+    excluded_count: usize,
 }
 
 enum State {
@@ -358,6 +360,7 @@ impl Vault for NativeVault {
             email: profile.email,
             last_sync: Utc::now(),
             last_full_sync: now,
+            excluded_count: report.total(),
             pending_report: (!report.is_empty()).then_some(report),
         }));
         self.set_cause("vault_locked");
@@ -435,6 +438,7 @@ impl Vault for NativeVault {
         u.revision = revision;
         u.last_sync = Utc::now();
         u.last_full_sync = Instant::now();
+        u.excluded_count = report.total();
         u.pending_report = (!report.is_empty()).then_some(report);
         Ok(())
     }
@@ -447,6 +451,7 @@ impl Vault for NativeVault {
         Ok(Listing {
             map: u.meta.clone(),
             excluded: u.pending_report.take(),
+            excluded_count: u.excluded_count,
         })
     }
 

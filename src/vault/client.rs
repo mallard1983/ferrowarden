@@ -369,6 +369,7 @@ impl Vault for BwServe {
         Ok(Listing {
             map: BwServe::list_credentials(self).await?,
             excluded: None,
+            excluded_count: 0,
         })
     }
 

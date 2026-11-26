@@ -1,0 +1,64 @@
+# Prometheus and Grafana for Ferrowarden metrics, with the dashboard in
+# ../grafana loaded automatically. Images are pinned.
+#
+#   docker network create ferrowarden-metrics
+#   # attach the ferrowarden service to it (docker-compose.yml: networks:), set
+#   # FERROWARDEN_METRICS__BIND=0.0.0.0:9095 and FERROWARDEN_METRICS_TOKEN_FILE
+#   docker compose up -d
+#   # Prometheus http://localhost:9090   Grafana http://localhost:3030 (admin / admin)
+#
+# The network is shared only by Ferrowarden and Prometheus, so the metrics port
+# is not published and no agent can reach it. Set FERROWARDEN_METRICS_NETWORK to
+# use another existing network (the Ferrowarden service must be on it).
+#
+# The token file is the one Ferrowarden reads (secrets/metrics_token). Prometheus
+# runs as user nobody (65534): the file must be readable by it, for example
+# `chmod 644` for a throwaway test token or `chown 65534` and `chmod 400` otherwise.
+#
+# Grafana's default admin password is for a local look; change it, or put the
+# ports behind your reverse proxy, before anyone else can reach them.
+services:
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../secrets/metrics_token:/etc/prometheus/secrets/ferrowarden_metrics_token:ro
+      - prometheus-data:/prometheus
+    networks:
+      - ferrowarden-metrics
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.2.7
+    ports:
+      - "127.0.0.1:3030:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ../grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ../grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ../grafana/ferrowarden-dashboard.json:/var/lib/grafana/dashboards/ferrowarden-dashboard.json:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - ferrowarden-metrics
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+networks:
+  ferrowarden-metrics:
+    name: ${FERROWARDEN_METRICS_NETWORK:-ferrowarden-metrics}
+    external: true
+
+volumes:
+  prometheus-data:
+  grafana-data:

@@ -201,6 +201,8 @@ services:
       - bw_master_password
       # Notifier tokens, as needed (see the FERROWARDEN_NOTIFY_* lines below):
       # - gotify_token
+      # The metrics bearer token (see FERROWARDEN_METRICS_* below):
+      # - metrics_token
     volumes:
       # TLS certificate and private key. Generate before first start.
       # See docs/setup.md Step 0 or scripts/dev-setup.ps1 / dev-setup.sh.
@@ -285,6 +287,16 @@ services:
       # FERROWARDEN_NOTIFY__EVENTS: "blocked,auth_failure,vault,system"      # add admin for key changes
       # FERROWARDEN_NOTIFY__MIN_INTERVAL_SECS: "60"
       # FERROWARDEN_NOTIFY__MAX_PER_HOUR: "60"
+      # Prometheus metrics (docs/metrics.md): off unless a bind address is set.
+      # A separate listener that serves GET /metrics only, behind a bearer token
+      # from a secret file (declare `metrics_token` under `secrets:` below and in
+      # this service's `secrets:` list). A non-loopback bind with no token is
+      # refused. The token is sent in clear text unless FERROWARDEN_TLS_ENABLED
+      # is true (the listener then uses the same certificate), so publish the
+      # port only on a network you trust.
+      # FERROWARDEN_METRICS__BIND: "0.0.0.0:9095"
+      # FERROWARDEN_METRICS_TOKEN_FILE: "/run/secrets/metrics_token"
+      # FERROWARDEN_METRICS__CREDENTIAL_LABELS: "false"   # true: vault item names become labels
       # Admin web UI (docs/admin-ui.md): off unless FERROWARDEN_UI__BIND is set.
       # It accepts the vault master password, so it only serves its sign-in form
       # over HTTPS: put a TLS reverse proxy in front and list it in
@@ -309,6 +321,11 @@ services:
       # Admin web UI port (when FERROWARDEN_UI__BIND is set). Loopback only;
       # reach it through your TLS reverse proxy.
       # - "127.0.0.1:3001:3001"
+      # Metrics port (when FERROWARDEN_METRICS__BIND is set). Prefer an internal
+      # network: put Prometheus on a Docker network it shares with this service
+      # and leave the port unpublished, or publish it on loopback or a
+      # management VLAN only.
+      # - "127.0.0.1:9095:9095"
     depends_on:
       internal-certs:
         # The CA certificate copy exists once the one-shot has finished.
@@ -403,6 +420,9 @@ secrets:
     file: ./secrets/bw_master_password
   ferrowarden_admin_key:
     file: ./secrets/ferrowarden_admin_key
+  # Metrics bearer token (docs/metrics.md), only if you enable the metrics listener.
+  # metrics_token:
+  #   file: ./secrets/metrics_token
   # Notifier tokens (docs/notifications.md): one file each, only if you use them.
   # gotify_token:
   #   file: ./secrets/gotify_token

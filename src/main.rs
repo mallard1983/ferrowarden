@@ -4,6 +4,7 @@ mod error;
 mod events;
 mod healthcheck;
 mod keys;
+mod metrics;
 mod middleware;
 mod net;
 mod notify;
@@ -67,6 +68,16 @@ fn startup_event(
         .detail(
             "ui_insecure_http",
             config.ui.enabled() && config.ui.insecure_http,
+        )
+        .detail("metrics_enabled", config.metrics.enabled())
+        .detail("metrics_auth", config.metrics.auth().as_str())
+        .detail(
+            "metrics_tls",
+            config.metrics.enabled() && config.tls_enabled,
+        )
+        .detail(
+            "metrics_credential_labels",
+            config.metrics.enabled() && config.metrics.credential_labels,
         )
 }
 
@@ -184,6 +195,11 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Prometheus metrics: one more consumer of the event stream, started
+    // before the first event so `startup` is counted. Nothing starts unless
+    // `metrics.bind` is set.
+    let metrics = metrics::start(&config.metrics, config.vault.backend.as_str(), &events);
+
     if config.vault.backend == config::VaultBackend::Native {
         // The native backend keeps the vault's keys in this process: no core
         // dumps, no ptrace by other unprivileged processes (Linux; best effort).
@@ -262,9 +278,11 @@ async fn main() -> anyhow::Result<()> {
 
     // The admin UI is a separate server on its own port: never merged into
     // the API router above. Disabled unless `ui.bind` is set.
+    let mut ui_for_metrics = None;
     let ui_server = if config.ui.enabled() {
         let addr: SocketAddr = config.ui.bind.trim().parse()?;
         let ui_state = ui::UiState::new(state.clone()).map_err(|e| anyhow::anyhow!(e))?;
+        ui_for_metrics = Some(ui_state.clone());
         if config.ui.insecure_http {
             tracing::warn!(
                 "ui.insecure_http = true: the admin UI serves its sign-in form over plain HTTP. \
@@ -275,6 +293,45 @@ async fn main() -> anyhow::Result<()> {
         Some((addr, ui::router(ui_state)))
     } else {
         None
+    };
+
+    // The metrics endpoint is a third server on its own port, serving
+    // `GET /metrics` only. Never merged into the API or UI router.
+    let metrics_server = match (&metrics, config.metrics.addr()) {
+        (Some(metrics), Some(addr)) => {
+            match config.metrics.auth() {
+                config::MetricsAuth::Token => {
+                    if !config.tls_enabled {
+                        tracing::warn!(
+                            "tls_enabled = false: the metrics bearer token crosses the network in clear text. Keep the metrics port on an internal-only network."
+                        );
+                    }
+                }
+                config::MetricsAuth::None if config.metrics.allow_unauthenticated => {
+                    tracing::warn!(
+                        "metrics.allow_unauthenticated = true: anyone who can reach {addr} can read the metrics"
+                    );
+                }
+                config::MetricsAuth::None => {
+                    tracing::info!(
+                        "No metrics token set: the metrics listener is on a loopback address"
+                    );
+                }
+            }
+            if config.metrics.credential_labels {
+                tracing::warn!(
+                    "metrics.credential_labels = true: credential names appear as metric labels and reveal what the vault holds"
+                );
+            }
+            let server = metrics::server::MetricsServer::new(
+                state.clone(),
+                metrics.clone(),
+                &config.metrics,
+                ui_for_metrics,
+            );
+            Some((addr, metrics::server::router(server)))
+        }
+        _ => None,
     };
 
     // Set by the signal handler, read after the servers stop.
@@ -322,13 +379,22 @@ async fn main() -> anyhow::Result<()> {
         tls_config.clone(),
         stop_rx.clone(),
     );
-    let ui = async {
+    let (ui_tls, ui_stop) = (tls_config.clone(), stop_rx.clone());
+    let ui = async move {
         match ui_server {
             Some((ui_addr, ui_router)) => {
+                serve("Admin UI listening", ui_router, ui_addr, ui_tls, ui_stop).await
+            }
+            None => Ok(()),
+        }
+    };
+    let metrics_listener = async {
+        match metrics_server {
+            Some((metrics_addr, metrics_router)) => {
                 serve(
-                    "Admin UI listening",
-                    ui_router,
-                    ui_addr,
+                    "Metrics listening",
+                    metrics_router,
+                    metrics_addr,
                     tls_config,
                     stop_rx,
                 )
@@ -337,7 +403,7 @@ async fn main() -> anyhow::Result<()> {
             None => Ok(()),
         }
     };
-    tokio::try_join!(api, ui)?;
+    tokio::try_join!(api, ui, metrics_listener)?;
 
     // Graceful stop: tell the stream, then flush the sinks before exiting.
     events.emit(
