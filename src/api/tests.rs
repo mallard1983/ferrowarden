@@ -24,7 +24,17 @@ fn build_with(
     admin_burst: u32,
     keys_file: Option<std::path::PathBuf>,
 ) -> (Router, Arc<AppState>) {
-    let cfg = Config {
+    build_configured(prefix, admin_burst, keys_file, |_| {})
+}
+
+/// [`build_with`] with a last look at the configuration.
+fn build_configured(
+    prefix: &str,
+    admin_burst: u32,
+    keys_file: Option<std::path::PathBuf>,
+    tweak: impl FnOnce(&mut Config),
+) -> (Router, Arc<AppState>) {
+    let mut cfg = Config {
         bind_addr: "127.0.0.1:3000".to_string(),
         bw_serve_url: None,
         unlock_mode: UnlockMode::Manual,
@@ -51,7 +61,9 @@ fn build_with(
         notify: Default::default(),
         vault: crate::config::VaultConfig::default(),
         metrics: Default::default(),
+        sessions: Default::default(),
     };
+    tweak(&mut cfg);
     let state = Arc::new(AppState::new(cfg, Arc::new(EventLog::buffer_only(100))));
     (router(state.clone()), state)
 }
@@ -1762,4 +1774,881 @@ async fn openapi_shares_the_agent_rate_limit_even_for_the_admin_key() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
+}
+
+// ── Captured sessions (docs/sessions.md) ──────────────────────────────────
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+
+/// The tokens the test upstream issues.
+const T_JWT: &str = "tok-jwt-AbCdEf0123456789";
+const T_HDR: &str = "tok-hdr-ZyXwVu9876543210";
+const T_COOKIE: &str = "tok-cookie-QrStUv5555555555";
+
+/// A small HTTP server on a loopback port: answers every request with what
+/// `respond(path, headers)` returns and keeps what it was sent.
+struct Upstream {
+    addr: std::net::SocketAddr,
+    hits: Arc<AtomicUsize>,
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl Upstream {
+    fn base(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+    fn hits(&self) -> usize {
+        self.hits.load(Ordering::SeqCst)
+    }
+    /// Every request as the upstream received it (head and first bytes of the body).
+    fn requests(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+fn http(status: u16, headers: &[(&str, &str)], body: &str) -> String {
+    let mut out = format!(
+        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/json\r\n",
+        body.len()
+    );
+    for (k, v) in headers {
+        out.push_str(&format!("{k}: {v}\r\n"));
+    }
+    out.push_str("\r\n");
+    out.push_str(body);
+    out
+}
+
+async fn upstream(
+    respond: impl Fn(&str, &HashMap<String, String>) -> String + Send + Sync + 'static,
+) -> Upstream {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (h, s) = (hits.clone(), seen.clone());
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 16 * 1024];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+            h.fetch_add(1, Ordering::SeqCst);
+            s.lock().unwrap().push(raw.clone());
+            let path = raw.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let headers: HashMap<String, String> = raw
+                .lines()
+                .skip(1)
+                .take_while(|l| !l.is_empty())
+                .filter_map(|l| l.split_once(':'))
+                .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+                .collect();
+            let _ = sock.write_all(respond(&path, &headers).as_bytes()).await;
+        }
+    });
+    Upstream { addr, hits, seen }
+}
+
+/// A login service that issues the three tokens above and a few other
+/// answers, and an endpoint that reflects what it was sent.
+async fn login_service() -> Upstream {
+    upstream(|path, headers| {
+        let route = path.split('?').next().unwrap_or("/");
+        let reflected = |h: &str| headers.get(h).cloned().unwrap_or_default();
+        match route {
+            "/login" => http(
+                200,
+                &[
+                    ("X-Auth-Token", T_HDR),
+                    (
+                        "Set-Cookie",
+                        &format!("sess={T_COOKIE}; Path=/; Max-Age=600"),
+                    ),
+                ],
+                &format!(r#"{{"jwt":"{T_JWT}","note":"hello"}}"#),
+            ),
+            // Reflects the credentials in the body and a header, like a
+            // careless target.
+            "/me" => http(
+                200,
+                &[("X-Echo", &reflected("authorization"))],
+                &serde_json::json!({
+                    "auth": reflected("authorization"),
+                    "cookie": reflected("cookie"),
+                    "token": reflected("x-auth-token"),
+                    "path": path,
+                })
+                .to_string(),
+            ),
+            // A 4xx error page that quotes the token, raw and in base64.
+            "/denied" => http(
+                403,
+                &[],
+                &format!(r#"{{"error":"bad token {T_JWT}","b64":"{}"}}"#, {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD.encode(T_JWT)
+                }),
+            ),
+            // Mentions a token without being asked about one.
+            "/leak" => http(200, &[], &format!(r#"{{"leaked":"{T_JWT}"}}"#)),
+            _ => http(200, &[], r#"{"ok":true}"#),
+        }
+    })
+    .await
+}
+
+/// A router that may forward to loopback, with room for many requests.
+async fn local_app(tweak: impl FnOnce(&mut Config)) -> (Router, Arc<AppState>) {
+    let (app, state) = build_configured("", 1000, None, |cfg| {
+        cfg.allowed_targets = "127.0.0.1".to_string();
+        cfg.agent_rate_limit_burst = 1000;
+        cfg.max_response_bytes = 1 << 20;
+        tweak(cfg);
+    });
+    state.set_unlocked().await;
+    (app, state)
+}
+
+async fn fwd(
+    app: &Router,
+    token: &str,
+    payload: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let (s, _, j) = call(
+        app,
+        "POST",
+        "/v1/forward",
+        &[("x-agent-key", token)],
+        Some(&payload.to_string()),
+    )
+    .await;
+    (s, j)
+}
+
+fn login_payload(base: &str, capture: serde_json::Value) -> serde_json::Value {
+    json!({"request": {"method": "GET", "url": format!("{base}/login")}, "capture": capture})
+}
+
+fn use_payload(base: &str, headers: serde_json::Value) -> serde_json::Value {
+    json!({"request": {"method": "GET", "url": format!("{base}/me"), "headers": headers}})
+}
+
+fn bearer(name: &str) -> serde_json::Value {
+    json!({ "Authorization": format!("Bearer {{{{session:{name}}}}}") })
+}
+
+fn assert_no_token(what: &str, text: &str) {
+    for t in [T_JWT, T_HDR, T_COOKIE] {
+        assert!(!text.contains(t), "{what} contains a token");
+    }
+}
+
+async fn login_all(app: &Router, token: &str, base: &str) -> serde_json::Value {
+    let (s, body) = fwd(
+        app,
+        token,
+        login_payload(
+            base,
+            json!([
+                {"from": "json:/jwt", "as": "jwt"},
+                {"from": "header:X-Auth-Token", "as": "hdr"},
+                {"from": "cookie:sess", "as": "cookie"}
+            ]),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    body
+}
+
+#[tokio::test]
+async fn a_login_is_captured_hidden_and_used_through_the_router() {
+    let up = login_service().await;
+    let (app, state) = local_app(|_| {}).await;
+    let (_, token) = make_agent(&app, "agent-a").await;
+
+    let login = login_all(&app, &token, &up.base()).await;
+    assert_no_token("the login response", &login.to_string());
+    // Body, header and cookie header carry the marker instead.
+    assert!(login["body"]
+        .as_str()
+        .unwrap()
+        .contains(r#""jwt":"[CAPTURED:jwt]""#));
+    assert_eq!(login["headers"]["x-auth-token"], "[CAPTURED:hdr]");
+    assert!(login["headers"]["set-cookie"]
+        .as_str()
+        .unwrap()
+        .starts_with("sess=[CAPTURED:cookie];"));
+    let captures = login["captures"].as_array().unwrap();
+    assert_eq!(
+        captures
+            .iter()
+            .map(|c| c["as"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["jwt", "hdr", "cookie"]
+    );
+    for c in captures {
+        assert_eq!(c["status"], "captured");
+        assert!(c["expires_at"].as_str().unwrap().ends_with('Z'));
+    }
+    // The cookie's own Max-Age (600 s) is shorter than the default (30 min).
+    let exp = |name: &str| {
+        let c = captures.iter().find(|c| c["as"] == name).unwrap();
+        chrono::DateTime::parse_from_rfc3339(c["expires_at"].as_str().unwrap())
+            .unwrap()
+            .timestamp()
+    };
+    let now = chrono::Utc::now().timestamp();
+    assert!(
+        (now + 590..=now + 601).contains(&exp("cookie")),
+        "cookie lifetime"
+    );
+    assert!(
+        (now + 1790..=now + 1801).contains(&exp("jwt")),
+        "default ttl"
+    );
+
+    // The agent can list names and hosts, never values.
+    let (s, _, list) = call(
+        &app,
+        "GET",
+        "/v1/sessions",
+        &[("x-agent-key", &token)],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_no_token("the session list", &list.to_string());
+    let rows = list.as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["cookie", "hdr", "jwt"]
+    );
+    assert!(rows
+        .iter()
+        .all(|r| r["host"] == up.addr.to_string() && r.get("value").is_none()));
+
+    // Use: header, query and body placeholders reach the target as the exact value.
+    let (s, used) = fwd(
+        &app,
+        &token,
+        use_payload(
+            &up.base(),
+            json!({
+                "Authorization": "Bearer {{session:jwt}}",
+                "Cookie": "sess={{session:cookie}}",
+                "X-Auth-Token": "{{session:hdr}}"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{used}");
+    let sent = up.requests().pop().unwrap();
+    assert!(
+        sent.contains(&format!("authorization: Bearer {T_JWT}")),
+        "{sent}"
+    );
+    assert!(sent.contains(&format!("cookie: sess={T_COOKIE}")));
+    assert!(sent.contains(&format!("x-auth-token: {T_HDR}")));
+    // The target reflected all three; none comes back.
+    assert_no_token("the reflecting response", &used.to_string());
+    assert!(used["body"]
+        .as_str()
+        .unwrap()
+        .contains("Bearer [CAPTURED:jwt]"));
+    assert_eq!(used["headers"]["x-echo"], "Bearer [CAPTURED:jwt]");
+
+    let (s, _) = fwd(
+        &app,
+        &token,
+        json!({"request": {"method": "POST",
+            "url": format!("{}/me?t={{{{session:hdr}}}}", up.base()),
+            "body": {"{{session:cookie}}": "{{session:jwt}}"}}}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let sent = up.requests().pop().unwrap();
+    assert!(sent.contains(&format!("/me?t={T_HDR}")), "{sent}");
+    assert!(
+        sent.contains(&format!(r#"{{"{T_COOKIE}":"{T_JWT}"}}"#)),
+        "{sent}"
+    );
+
+    // Events: names and outcomes, never values.
+    assert_no_token("an event", &all_events_text(&state));
+    let caps = events_of(&state, "session_capture");
+    assert_eq!(caps.len(), 3);
+    assert!(caps.iter().all(|e| e["event"]["outcome"] == "success"
+        && e["ferrowarden"]["key"]["name"] == "agent-a"
+        && e["url"]["domain"] == "127.0.0.1"));
+    let uses = events_of(&state, "session_use");
+    assert_eq!(uses.len(), 2);
+    assert_eq!(
+        uses[1]["ferrowarden"]["sessions"],
+        json!(["cookie", "hdr", "jwt"])
+    );
+    // Newest first: the two uses, then the login.
+    let forwards = events_of(&state, "forward");
+    assert_eq!(forwards.len(), 3);
+    assert_eq!(
+        forwards[0]["ferrowarden"]["sessions"],
+        json!(["cookie", "hdr", "jwt"])
+    );
+    assert!(forwards[0]["ferrowarden"].get("credentials").is_none());
+    assert!(forwards[2]["ferrowarden"].get("sessions").is_none());
+}
+
+#[tokio::test]
+async fn every_session_of_the_key_is_scrubbed_even_when_the_request_did_not_use_it() {
+    let up = login_service().await;
+    let (app, _) = local_app(|_| {}).await;
+    let (_, token) = make_agent(&app, "agent-a").await;
+    login_all(&app, &token, &up.base()).await;
+    // An error page that quotes the token, raw and base64.
+    let (s, denied) = fwd(
+        &app,
+        &token,
+        json!({"request": {"method": "GET", "url": format!("{}/denied", up.base())}}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(denied["status"], 403);
+    assert_no_token("an error body", &denied.to_string());
+    assert!(denied["body"].as_str().unwrap().contains("[CAPTURED:jwt]"));
+    let (_, leak) = fwd(
+        &app,
+        &token,
+        json!({"request": {"method": "GET", "url": format!("{}/leak", up.base())}}),
+    )
+    .await;
+    assert_eq!(leak["body"], r#"{"leaked":"[CAPTURED:jwt]"}"#);
+}
+
+#[tokio::test]
+async fn a_bad_capture_is_refused_before_anything_is_sent() {
+    let up = login_service().await;
+    let (app, _) = local_app(|_| {}).await;
+    let (_, token) = make_agent(&app, "agent-a").await;
+    let too_many: Vec<_> = (0..9)
+        .map(|i| json!({"from": "json:/jwt", "as": format!("n{i}")}))
+        .collect();
+    let cases: Vec<(serde_json::Value, &str)> = vec![
+        (json!([]), "1 to 8"),
+        (json!(too_many), "1 to 8"),
+        (
+            json!([{"from": "json:/jwt", "as": "x"}, {"from": "json:/a", "as": "x"}]),
+            "more than once",
+        ),
+        (json!([{"from": "json:/jwt", "as": "a b"}]), "`as`"),
+        (
+            json!([{"from": "json:/jwt", "as": "{{vault:x}}"}]),
+            "placeholder",
+        ),
+        (
+            json!([{"from": "json:/jwt{{vault:x}}", "as": "x"}]),
+            "placeholder",
+        ),
+        (json!([{"from": "json:jwt", "as": "x"}]), "JSON pointer"),
+        (json!([{"from": "body:/jwt", "as": "x"}]), "`json:`"),
+        (
+            json!([{"from": "header:bad name", "as": "x"}]),
+            "header name",
+        ),
+        (json!([{"from": "cookie:", "as": "x"}]), "cookie name"),
+        (
+            json!([{"from": "json:/jwt", "as": "x", "ttl_secs": 0}]),
+            "ttl_secs",
+        ),
+        (
+            json!([{"from": "json:/jwt", "as": "x", "ttl_secs": 86401}]),
+            "ttl_secs",
+        ),
+        (
+            json!([{"from": "json:/jwt", "as": "x", "ttl_secs": null}]),
+            "Invalid JSON",
+        ),
+        (
+            json!([{"from": "json:/jwt", "as": "x", "extra": 1}]),
+            "unknown field",
+        ),
+        (json!([{"from": "json:/jwt"}]), "missing field"),
+        (json!(null), "Invalid JSON"),
+        (json!("json:/jwt"), "Invalid JSON"),
+    ];
+    for (capture, needle) in cases {
+        let (s, body) = fwd(&app, &token, login_payload(&up.base(), capture.clone())).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{capture}: {body}");
+        assert!(
+            body["error"].as_str().unwrap().contains(needle),
+            "{capture}: {body}"
+        );
+    }
+    // A duplicate key in the body is refused like anywhere else.
+    let raw = format!(
+        r#"{{"request":{{"method":"GET","url":"{}/login"}},"capture":[{{"from":"json:/jwt","as":"a","as":"b"}}]}}"#,
+        up.base()
+    );
+    let (s, _, body) = call(
+        &app,
+        "POST",
+        "/v1/forward",
+        &[("x-agent-key", &token)],
+        Some(&raw),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("duplicate key"));
+    // A malformed session placeholder is refused too.
+    let (s, _) = fwd(&app, &token, use_payload(&up.base(), bearer("a b"))).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(up.hits(), 0, "nothing was sent");
+    // An absent `capture` is fine.
+    let (s, plain) = fwd(
+        &app,
+        &token,
+        json!({"request": {"method": "GET", "url": format!("{}/login", up.base())}}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(
+        plain.get("captures").is_none(),
+        "no capture asked, no captures answered"
+    );
+    assert_eq!(up.hits(), 1, "only the last request was sent");
+}
+
+#[tokio::test]
+async fn a_failed_capture_does_not_fail_the_forward_and_hides_what_was_found() {
+    let expired = {
+        use base64::Engine;
+        let p = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"exp":{}}}"#,
+            chrono::Utc::now().timestamp() - 60
+        ));
+        format!("eyJhbGciOiJub25lIn0.{p}.c2ln")
+    };
+    let long = "L".repeat(20_000);
+    let body = serde_json::json!({
+        "n": 12345, "short": "abc", "long": long, "old": expired, "fine": "fine-value-123456"
+    })
+    .to_string();
+    let up = upstream(move |_, _| {
+        http(
+            200,
+            &[
+                ("Set-Cookie", "dup=aaaa-1111-aaaa; Path=/"),
+                ("Set-Cookie", "dup=bbbb-2222-bbbb; Path=/x"),
+            ],
+            &body,
+        )
+    })
+    .await;
+    let (app, state) = local_app(|c| c.sessions.max_per_key = 1).await;
+    let (_, token) = make_agent(&app, "agent-a").await;
+    let (s, r) = fwd(
+        &app,
+        &token,
+        login_payload(
+            &up.base(),
+            json!([
+                {"from": "json:/missing", "as": "a"},
+                {"from": "json:/n", "as": "b"},
+                {"from": "json:/short", "as": "c"},
+                {"from": "json:/long", "as": "d"},
+                {"from": "json:/old", "as": "e"},
+                {"from": "cookie:dup", "as": "f"},
+                {"from": "json:/fine", "as": "g"},
+                {"from": "header:x-none", "as": "h"}
+            ]),
+        ),
+    )
+    .await;
+    // The login happened at the target, so the agent still gets its answer.
+    assert_eq!(s, StatusCode::OK, "{r}");
+    let statuses: Vec<&str> = r["captures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            "not_found",
+            "not_a_string",
+            "too_short",
+            "too_long",
+            "expired",
+            "ambiguous",
+            "captured",
+            "not_found"
+        ]
+    );
+    let text = r.to_string();
+    // Found but not stored: hidden anyway, as [REDACTED]. Stored: the marker.
+    assert!(!text.contains(&long) && !text.contains(&expired));
+    assert!(!text.contains("fine-value-123456"));
+    let b = r["body"].as_str().unwrap();
+    assert!(b.contains(r#""long":"[REDACTED]""#));
+    assert!(b.contains(r#""old":"[REDACTED]""#));
+    assert!(b.contains(r#""fine":"[CAPTURED:g]""#));
+    // Too short to be hidden, so it stays visible (and was not stored).
+    assert!(b.contains(r#""short":"abc""#));
+    assert_eq!(state.sessions.active(chrono::Utc::now()), 1);
+    // The failures are events too, with the status and no value.
+    let events = events_of(&state, "session_capture");
+    assert_eq!(events.len(), 8);
+    let failed: Vec<_> = events
+        .iter()
+        .filter(|e| e["event"]["outcome"] == "failure")
+        .collect();
+    assert_eq!(failed.len(), 7);
+    assert!(failed
+        .iter()
+        .all(|e| e["event"]["reason"] == "capture_failed"));
+    assert!(!all_events_text(&state).contains("fine-value"));
+
+    // The key now holds its one allowed session: a second name is refused (and
+    // hidden), while the same name again replaces the first.
+    let (_, r) = fwd(
+        &app,
+        &token,
+        login_payload(
+            &up.base(),
+            json!([
+                {"from": "json:/fine", "as": "other"},
+                {"from": "json:/fine", "as": "g"}
+            ]),
+        ),
+    )
+    .await;
+    assert_eq!(r["captures"][0]["status"], "limit_reached");
+    assert_eq!(r["captures"][1]["status"], "captured");
+    assert!(!r.to_string().contains("fine-value-123456"));
+}
+
+#[tokio::test]
+async fn a_session_is_refused_at_another_origin_before_anything_is_sent() {
+    let a = login_service().await;
+    let b = login_service().await;
+    let (app, state) = local_app(|_| {}).await;
+    let (_, token) = make_agent(&app, "agent-a").await;
+    login_all(&app, &token, &a.base()).await;
+    let before = b.hits();
+
+    let (s, body) = fwd(&app, &token, use_payload(&b.base(), bearer("jwt"))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("another origin"));
+    assert_eq!(b.hits(), before, "nothing was sent to the other origin");
+    assert_no_token("the refusal", &body.to_string());
+
+    let uses = events_of(&state, "session_use");
+    assert_eq!(uses[0]["event"]["outcome"], "failure");
+    assert_eq!(uses[0]["event"]["reason"], "session_host_not_allowed");
+    assert_eq!(uses[0]["ferrowarden"]["sessions"], json!(["jwt"]));
+    let f = &events_of(&state, "forward")[0];
+    assert_eq!(f["event"]["reason"], "session_host_not_allowed");
+    assert_eq!(f["http"]["response"]["status_code"], 403);
+    // At its own origin it still works.
+    let (s, _) = fwd(&app, &token, use_payload(&a.base(), bearer("jwt"))).await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn another_agent_key_cannot_use_see_or_delete_a_session() {
+    let up = login_service().await;
+    let (app, state) = local_app(|_| {}).await;
+    let (_, a) = make_agent(&app, "agent-a").await;
+    let (_, b) = make_agent(&app, "agent-b").await;
+    login_all(&app, &a, &up.base()).await;
+    let before = up.hits();
+
+    let (s_theirs, theirs) = fwd(&app, &b, use_payload(&up.base(), bearer("jwt"))).await;
+    let (s_nobody, nobody) = fwd(&app, &b, use_payload(&up.base(), bearer("nobody"))).await;
+    assert_eq!(s_theirs, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(s_nobody, s_theirs);
+    // The same answer for a session that is somebody else's and one that does not exist.
+    assert_eq!(
+        theirs["error"].as_str().unwrap().replace("jwt", "X"),
+        nobody["error"].as_str().unwrap().replace("nobody", "X")
+    );
+    assert_eq!(up.hits(), before);
+    let uses = events_of(&state, "session_use");
+    assert!(uses
+        .iter()
+        .all(|e| e["event"]["reason"] == "unknown_session"));
+    assert_eq!(
+        events_of(&state, "forward")[0]["event"]["reason"],
+        "unknown_session"
+    );
+
+    let (s, _, list) = call(&app, "GET", "/v1/sessions", &[("x-agent-key", &b)], None).await;
+    assert_eq!((s, list), (StatusCode::OK, json!([])));
+    let (s, _, _) = call(
+        &app,
+        "DELETE",
+        "/v1/sessions/jwt",
+        &[("x-agent-key", &b)],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    // Still there for its owner.
+    let (_, _, list) = call(&app, "GET", "/v1/sessions", &[("x-agent-key", &a)], None).await;
+    assert_eq!(list.as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn deleting_a_session_ends_its_use_and_expiry_does_too() {
+    let up = login_service().await;
+    let (app, state) = local_app(|_| {}).await;
+    let (_, token) = make_agent(&app, "agent-a").await;
+    login_all(&app, &token, &up.base()).await;
+    let h = [("x-agent-key", token.as_str())];
+
+    let (s, _, body) = call(&app, "DELETE", "/v1/sessions/jwt", &h, None).await;
+    assert_eq!((s, body), (StatusCode::NO_CONTENT, serde_json::Value::Null));
+    let (s, _, _) = call(&app, "DELETE", "/v1/sessions/jwt", &h, None).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "already gone");
+    let (s, _, _) = call(&app, "DELETE", "/v1/sessions/no%20such", &h, None).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let (s, body) = fwd(&app, &token, use_payload(&up.base(), bearer("jwt"))).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        body["error"],
+        "Session jwt is unknown or expired; log in again"
+    );
+    let deletes = events_of(&state, "session_delete");
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(deletes[0]["ferrowarden"]["details"]["cause"], "agent");
+    assert_eq!(deletes[0]["ferrowarden"]["details"]["session"], "jwt");
+    assert_eq!(deletes[0]["http"]["response"]["status_code"], 204);
+
+    // A one-second session is gone after a second, and the sweep reports it.
+    let (s, r) = fwd(
+        &app,
+        &token,
+        login_payload(
+            &up.base(),
+            json!([{"from": "json:/jwt", "as": "short", "ttl_secs": 1}]),
+        ),
+    )
+    .await;
+    assert_eq!(
+        (s, &r["captures"][0]["status"]),
+        (StatusCode::OK, &json!("captured"))
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let (s, _) = fwd(&app, &token, use_payload(&up.base(), bearer("short"))).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let (_, _, list) = call(&app, "GET", "/v1/sessions", &h, None).await;
+    assert!(list
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["name"] != "short"));
+    crate::sessions::sweep_once(&state, chrono::Utc::now());
+    let expired = events_of(&state, "session_expire");
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0]["ferrowarden"]["details"]["session"], "short");
+    assert_eq!(expired[0]["ferrowarden"]["key"]["name"], "agent-a");
+}
+
+#[tokio::test]
+async fn revoking_a_key_changing_its_policy_or_locking_the_vault_clears_sessions() {
+    let up = login_service().await;
+    let (app, state) = local_app(|_| {}).await;
+    let (id_a, a) = make_agent(&app, "agent-a").await;
+    let (id_b, b) = make_agent(&app, "agent-b").await;
+    let (_, c) = make_agent(&app, "agent-c").await;
+    for t in [&a, &b, &c] {
+        login_all(&app, t, &up.base()).await;
+    }
+    assert_eq!(state.sessions.active(chrono::Utc::now()), 9);
+    let causes = |state: &AppState| -> Vec<String> {
+        events_of(state, "session_delete")
+            .iter()
+            .map(|e| {
+                e["ferrowarden"]["details"]["cause"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    };
+
+    let (s, _) = admin(&app, "DELETE", &format!("/v1/admin/keys/{id_a}"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(state.sessions.active(chrono::Utc::now()), 6);
+    assert_eq!(causes(&state), ["key_revoke"; 3]);
+
+    let (s, _) = admin(
+        &app,
+        "PATCH",
+        &format!("/v1/admin/keys/{id_b}"),
+        Some(r#"{"methods":["GET"]}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(state.sessions.active(chrono::Utc::now()), 3);
+    // Key c is untouched; key b has to log in again.
+    let (s, _, list) = call(&app, "GET", "/v1/sessions", &[("x-agent-key", &c)], None).await;
+    assert_eq!((s, list.as_array().unwrap().len()), (StatusCode::OK, 3));
+    let (s, _) = fwd(&app, &b, use_payload(&up.base(), bearer("jwt"))).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+
+    state.set_locked("test").await;
+    assert_eq!(state.sessions.active(chrono::Utc::now()), 0);
+    let all = causes(&state);
+    assert_eq!(all.iter().filter(|c| *c == "key_policy_change").count(), 3);
+    assert_eq!(all.iter().filter(|c| *c == "vault_lock").count(), 3);
+    assert_no_token("an event", &all_events_text(&state));
+}
+
+#[tokio::test]
+async fn the_key_policy_covers_methods_not_session_names() {
+    let up = login_service().await;
+    let (app, _) = local_app(|_| {}).await;
+    // No credentials at all, GET only: a session name is not a credential name.
+    let (_, token) = make_agent_with(&app, "reader", "[]", r#"["GET"]"#).await;
+    login_all(&app, &token, &up.base()).await;
+    let (s, _) = fwd(&app, &token, use_payload(&up.base(), bearer("jwt"))).await;
+    assert_eq!(s, StatusCode::OK);
+    // But the method policy applies to a request that carries one.
+    let (s, body) = fwd(
+        &app,
+        &token,
+        json!({"request": {"method": "POST", "url": format!("{}/me", up.base()),
+            "headers": bearer("jwt")}}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("Method POST"));
+    // A vault placeholder next to a session is still checked against the scope.
+    let (s, _) = fwd(
+        &app,
+        &token,
+        use_payload(
+            &up.base(),
+            json!({"Authorization": "Bearer {{session:jwt}}", "X": "{{vault:lab_nas}}"}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn sessions_can_be_switched_off() {
+    let up = login_service().await;
+    let (app, state) = local_app(|c| c.sessions.enabled = false).await;
+    let (_, token) = make_agent(&app, "agent-a").await;
+    let (s, body) = fwd(
+        &app,
+        &token,
+        login_payload(&up.base(), json!([{"from": "json:/jwt", "as": "x"}])),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("sessions.enabled = false"));
+    let (s, _) = fwd(&app, &token, use_payload(&up.base(), bearer("x"))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(up.hits(), 0);
+    let f = events_of(&state, "forward");
+    assert!(f
+        .iter()
+        .all(|e| e["event"]["reason"] == "sessions_disabled"));
+    // Everything else works, and the listing is empty.
+    let (s, plain) = fwd(&app, &token, use_payload(&up.base(), json!({}))).await;
+    assert_eq!((s, up.hits()), (StatusCode::OK, 1));
+    assert_eq!(plain["status"], 200);
+    let (s, _, list) = call(
+        &app,
+        "GET",
+        "/v1/sessions",
+        &[("x-agent-key", &token)],
+        None,
+    )
+    .await;
+    assert_eq!((s, list), (StatusCode::OK, json!([])));
+}
+
+#[tokio::test]
+async fn the_sessions_endpoints_need_an_agent_key() {
+    let (app, state) = local_app(|_| {}).await;
+    for (method, path) in [("GET", "/v1/sessions"), ("DELETE", "/v1/sessions/x")] {
+        let (s, _, _) = call(&app, method, path, &[], None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{method} {path}");
+        let (s, _, _) = call(&app, method, path, &[("x-admin-key", ADMIN_KEY)], None).await;
+        assert_eq!(
+            s,
+            StatusCode::UNAUTHORIZED,
+            "{method} {path} with the admin key"
+        );
+        let (s, _, _) = call(&app, method, path, &[("x-agent-key", "wrong")], None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(events_of(&state, "agent_auth").len(), 6);
+}
+
+#[tokio::test]
+async fn the_policy_preview_checks_session_syntax_but_not_the_store() {
+    let (app, state) = local_app(|_| {}).await;
+    state.credentials.write().await.insert(
+        "lab_nas".into(),
+        vec![crate::vault::model::CredentialEntry::login(
+            "1",
+            &["http://127.0.0.1"],
+        )],
+    );
+    let (id, _) = make_agent_with(&app, "pv", r#"["lab_*"]"#, r#"["GET"]"#).await;
+    let path = format!("/v1/admin/keys/{id}/preview");
+    let body = |method: &str, headers: serde_json::Value| {
+        json!({"request": {"method": method, "url": "http://127.0.0.1:9/x", "headers": headers}})
+            .to_string()
+    };
+    let run = |method: &'static str, headers: serde_json::Value| {
+        let (app, path) = (app.clone(), path.clone());
+        async move {
+            admin(&app, "POST", &path, Some(&body(method, headers)))
+                .await
+                .1["request_check"]
+                .clone()
+        }
+    };
+    // A session that nobody has captured: sessions are runtime state.
+    let ok = run("GET", json!({"A": "Bearer {{session:ghost}}"})).await;
+    assert_eq!(ok["allowed"], true, "{ok}");
+    let bad = run("GET", json!({"A": "{{session:a b}}"})).await;
+    assert_eq!(bad["allowed"], false);
+    assert_eq!(bad["status"], 422);
+    assert_eq!(bad["reason"], "malformed_placeholder");
+    // The method policy still decides.
+    let off = run("POST", json!({"A": "{{session:ghost}}"})).await;
+    assert_eq!(off["reason"], "method_not_allowed");
+
+    let (app2, state2) = local_app(|c| c.sessions.enabled = false).await;
+    state2.credentials.write().await.insert(
+        "lab_nas".into(),
+        vec![crate::vault::model::CredentialEntry::login(
+            "1",
+            &["http://127.0.0.1"],
+        )],
+    );
+    let (id2, _) = make_agent_with(&app2, "pv", r#"["*"]"#, r#"["*"]"#).await;
+    let (_, j) = admin(
+        &app2,
+        "POST",
+        &format!("/v1/admin/keys/{id2}/preview"),
+        Some(&body("GET", json!({"A": "{{session:ghost}}"}))),
+    )
+    .await;
+    assert_eq!(j["request_check"]["reason"], "sessions_disabled");
+    assert_eq!(j["request_check"]["status"], 400);
 }

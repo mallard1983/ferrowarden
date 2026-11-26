@@ -31,6 +31,7 @@ Substitutes placeholders, forwards the request, and returns the scrubbed respons
 | `request.url` | string | yes | Must start with `http://` or `https://` |
 | `request.headers` | object | no | String values only. `x-fw-*` headers are stripped. |
 | `request.body` | string or JSON | no | JSON string → sent as raw text. Object/array → sent as JSON (`Content-Type: application/json` added if absent) |
+| `capture` | array | no | 1-8 entries `{ "from": "json:/pointer" \| "header:Name" \| "cookie:name", "as": "name", "ttl_secs": n }` (`ttl_secs` optional). Keeps a login token inside Ferrowarden; the response shows `[CAPTURED:name]`. `null` and `[]` are errors |
 
 **Response 200:**
 
@@ -40,6 +41,17 @@ Substitutes placeholders, forwards the request, and returns the scrubbed respons
 | `headers` | object | Response headers from the target (hop-by-hop stripped) |
 | `body` | string | Target response body; substituted values and credential patterns replaced with `[REDACTED]` |
 | `body_encoding` | string | `"utf8"`, or `"base64"` when the response was binary |
+| `captures` | array | Only when the request had `capture`: `[{ "as", "status", "expires_at" }]` per entry. `status`: `captured`, `not_found`, `not_a_string`, `ambiguous`, `too_short`, `too_long`, `expired`, `limit_reached`. `expires_at` only for `captured`. Never a value |
+
+---
+
+### GET /v1/sessions
+
+Lists the sessions your key captured: `[{ "name", "host", "expires_at" }]`, sorted by name. Never values.
+
+### DELETE /v1/sessions/{name}
+
+Forgets one captured session. `204`, or `422` when the name is unknown, expired or not yours.
 
 ---
 
@@ -66,8 +78,10 @@ Returns `200 OK` with no body. No authentication required. Used by health checks
 | 403 | Forbidden | Credential not bound to this host, or target blocked (internal address / vault backend) | Do not try other hosts. Tell the user which credential/host was refused |
 | 403 | Forbidden | "Credential X is not available to this agent key" (your key's scope excludes it; same answer whether or not it exists) | Do not retry with other names. Tell the user which credential you needed |
 | 403 | Forbidden | "Method M is not allowed for this agent key" | Do not switch methods to work around it. Tell the user which method you needed |
+| 403 | Forbidden | "Session X may not be sent to H: it was captured from another origin" | Do not work around it. Log in to that host with its own `capture`, or tell the user |
 | 409 | Conflict | Credential name matches several vault items | Tell the user; the operator must rename one |
 | 422 | Unprocessable Entity | Malformed placeholder, unknown name, or value/field the item lacks | Copy a placeholder from `GET /v1/credentials?detail=true` |
+| 422 | Unprocessable Entity | "Session X is unknown or expired; log in again" | Repeat the login request with `capture`, then retry |
 | 429 | Too Many Requests | Rate limit exceeded | Wait `Retry-After` seconds; retry once |
 | 502 | Bad Gateway | Target unreachable, timed out, or response too large | Check URL; notify the operator if it persists |
 | 503 | Service Unavailable | Vault is locked or vault backend unreachable | Notify the operator to unlock the vault |
@@ -88,6 +102,7 @@ All error responses: `{ "error": "message" }`
 - An unknown name causes the entire request to be rejected (422) before any outbound call is made.
 - Multiple different placeholders in one request: allowed.
 - Same placeholder repeated: allowed.
+- `{{session:NAME}}` uses a value captured earlier: NAME is a plain word (1-64 of letters, digits, `_ - .`), no quoting. It works in the same places, only for the scheme/host/port it was captured from, and only for your key.
 
 ---
 
@@ -95,7 +110,7 @@ All error responses: `{ "error": "message" }`
 
 | Route group | Sustained rate | Burst |
 |---|---|---|
-| Agent endpoints (`/v1/credentials`, `/v1/forward`) | 120 req/min (operator-configurable) | 20 (operator-configurable) |
+| Agent endpoints (`/v1/credentials`, `/v1/forward`, `/v1/sessions`) | 120 req/min (operator-configurable) | 20 (operator-configurable) |
 | Admin endpoints (`/v1/admin/*`, `/v1/unlock`) | 30 req/min | 5 |
 
 Limits are per source IP. `Retry-After` header on 429 gives seconds until the next token is available.
@@ -118,6 +133,6 @@ When the harness runs `ferrowarden-mcp`, the same API is available as two tools.
 | Tool | Does | Arguments |
 |---|---|---|
 | `list_credentials` | `GET /v1/credentials?detail=true` | none |
-| `http_request` | `POST /v1/forward` | `method`, `url`, `headers` (optional), `body` (optional) |
+| `http_request` | `POST /v1/forward` | `method`, `url`, `headers` (optional), `body` (optional), `capture` (optional) |
 
 Results have structured content (as the API returns it; the credential list is under `credentials`) and a text rendering. A non-success answer from Ferrowarden itself is a tool error carrying the HTTP status, Ferrowarden's message, the request id and one line of guidance (`403`: do not retry with other credentials, hosts or methods, tell the user; `422`: copy a placeholder from `list_credentials`; `429`: wait `Retry-After` seconds; `503`: the vault is locked, tell the user). A `404` or `500` from the target is a normal result with that status.

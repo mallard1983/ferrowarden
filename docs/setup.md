@@ -335,6 +335,10 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `ui.insecure_http` | `FERROWARDEN_UI__INSECURE_HTTP` | `false` — serve the sign-in form over plain HTTP (local testing only) |
 | `ui.session_idle_minutes` | `FERROWARDEN_UI__SESSION_IDLE_MINUTES` | `15` |
 | `ui.session_max_hours` | `FERROWARDEN_UI__SESSION_MAX_HOURS` | `8` |
+| `sessions.enabled` | `FERROWARDEN_SESSIONS__ENABLED` | `true` — accept `capture` and `{{session:name}}` ([sessions.md](sessions.md)); `false` refuses both with a `400` |
+| `sessions.default_ttl_secs` | `FERROWARDEN_SESSIONS__DEFAULT_TTL_SECS` | `1800` — lifetime of a captured session when the request gives none |
+| `sessions.max_ttl_secs` | `FERROWARDEN_SESSIONS__MAX_TTL_SECS` | `86400` — the most a request may ask for; at least the default, at most 7 days |
+| `sessions.max_per_key` | `FERROWARDEN_SESSIONS__MAX_PER_KEY` | `32` — live sessions one agent key may hold (1 to 256) |
 | *(env only)* | `FERROWARDEN_LOG_LEVEL` | `info` — requires restart to change |
 
 ---

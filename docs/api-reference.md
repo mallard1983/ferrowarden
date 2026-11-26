@@ -6,7 +6,7 @@ This page is the narrative reference. The machine-readable description of the sa
 
 All requests require an authentication header. The header name depends on the endpoint:
 
-- **Agent endpoints** (`/v1/credentials`, `/v1/forward`, `/v1/openapi.json`): `X-Agent-Key: <token>`
+- **Agent endpoints** (`/v1/credentials`, `/v1/forward`, `/v1/sessions`, `/v1/openapi.json`): `X-Agent-Key: <token>`
 - **Admin endpoints** (`/v1/admin/*`, `/v1/unlock`): `X-Admin-Key: <key>`
 
 `GET /health` needs no authentication.
@@ -146,18 +146,20 @@ The agent sends the request it wants to make, with `{{vault:name}}` placeholders
 | `request.url` | string | yes | Target URL. Must be `http://` or `https://`. |
 | `request.headers` | object | no | Headers to send. `x-fw-*` headers are stripped. |
 | `request.body` | any JSON | no | Request body. A JSON **string** is sent as raw text (e.g. form data). An object, array, number or boolean is serialized and sent as JSON, with `Content-Type: application/json` added if you did not set one. `null` sends no body. |
+| `capture` | array | no | 1 to 8 values of the response to keep inside Ferrowarden instead of returning them: a login token. Each entry is `{ "from": "json:/pointer" or "header:Name" or "cookie:name", "as": "name", "ttl_secs": 1800 }` (`ttl_secs` optional). `null` and `[]` are errors. See [Captured sessions](#captured-sessions) and [sessions.md](sessions.md). |
 
-Placeholders (`{{vault:name}}`) may appear in the URL's path, query or user info, in any header value, and anywhere in the body (inside JSON string values and object keys). They may **not** appear in the URL's scheme, host or port.
+Placeholders (`{{vault:name}}`) may appear in the URL's path, query or user info, in any header value, and anywhere in the body (inside JSON string values and object keys). They may **not** appear in the URL's scheme, host or port. `{{session:name}}` placeholders follow the same rules.
 
 In a JSON body, values are substituted into the parsed structure, so a credential containing `"` or `\` is escaped correctly.
 
 **Checks before anything is sent** (failures return an error and nothing is forwarded), in this order:
-- The request is well formed: strict JSON, no duplicate headers, a method from the list above, every placeholder parses (`400` / `422`).
+- The request is well formed: strict JSON, no duplicate headers, a method from the list above, every `capture` entry is valid, every placeholder parses (`400` / `422`). With `sessions.enabled = false`, a `capture` or a `{{session:` is a `400` (`sessions_disabled`).
 - **The key's method policy** allows the method (`403`, reason `method_not_allowed`).
-- **The key's credential scope** covers every placeholder's credential name (`403`, reason `credential_out_of_scope`). This runs before the vault, the target or DNS is touched, and **before the unknown-credential check**: an out-of-scope name returns the same `403`, with the same message format and the same security event, whether or not a credential of that name exists, so an agent cannot use it to discover what is in the vault. The message is `Credential <name> is not available to this agent key`, where `<name>` is the placeholder the agent sent.
+- **The key's credential scope** covers every `{{vault:...}}` placeholder's credential name (`403`, reason `credential_out_of_scope`). This runs before the vault, the target or DNS is touched, and **before the unknown-credential check**: an out-of-scope name returns the same `403`, with the same message format and the same security event, whether or not a credential of that name exists, so an agent cannot use it to discover what is in the vault. The message is `Credential <name> is not available to this agent key`, where `<name>` is the placeholder the agent sent.
 - Every placeholder names exactly one vault login item (`422` unknown, `409` ambiguous).
 - Each credential is bound to the target: the target's host (and scheme/port, if the item's URI states them) matches one of the URIs on the vault item (`403`). See [Security Model §13](security.md#13-credential-host-binding).
 - The target is allowed by the outbound policy: never the vault endpoint (Vaultwarden); private/internal addresses only if listed in `allowed_targets` (`403`). See [Security Model §14](security.md#14-outbound-target-policy-ssrf-protection).
+- Every `{{session:NAME}}` is a live session of this key (`422`, reason `unknown_session`, the same answer when it is absent, expired or another key's) captured from the target's origin: scheme, host and port (`403`, reason `session_host_not_allowed`). Session names are not credential names and are not matched against the key's credential patterns.
 
 **Response `200 OK`**
 ```json
@@ -174,7 +176,9 @@ In a JSON body, values are substituted into the parsed structure, so a credentia
 
 The `body` is always a string. If the target returned JSON, it is a JSON string (not parsed). If the response was not valid UTF-8 (an image, a binary file), `body` is its base64 encoding and `body_encoding` is `"base64"`. Hop-by-hop headers (`transfer-encoding`, `connection`, etc.) and `content-length` are excluded from the response headers.
 
-Every credential value used in the request is redacted (`[REDACTED]`) wherever it appears in the response body or header values, in raw, JSON-escaped, URL-encoded or base64 form. Responses larger than `max_response_bytes` (default 10 MiB) are rejected.
+Every credential value used in the request is redacted (`[REDACTED]`) wherever it appears in the response body or header values, in raw, JSON-escaped, URL-encoded or base64 form. Every captured session value of the calling key is replaced with `[CAPTURED:name]` the same way, whether or not the request used it. Responses larger than `max_response_bytes` (default 10 MiB) are rejected.
+
+When the request had a `capture`, the response also has a `captures` list, in request order: `[{ "as": "portainer", "status": "captured", "expires_at": "2026-01-01T12:30:00Z" }]`. `status` is one of `captured`, `not_found`, `not_a_string`, `ambiguous`, `too_short`, `too_long`, `expired`, `limit_reached`; `expires_at` is only there for `captured`. It never holds a value.
 
 **Errors**
 | Status | Condition |
@@ -185,10 +189,44 @@ Every credential value used in the request is redacted (`[REDACTED]`) wherever i
 | `403 Forbidden` (method) | `Method <M> is not allowed for this agent key` (the key's `methods` list does not include it) |
 | `403 Forbidden` (scope) | `Credential <name> is not available to this agent key` (no `credentials` pattern matches it; same response whether or not it exists) |
 | `403 Forbidden` (re-prompt) | The item has master password re-prompt enabled |
+| `403 Forbidden` (session) | `Session <name> may not be sent to <host>: it was captured from another origin` (`session_host_not_allowed`) |
 | `409 Conflict` | Placeholder name matches more than one vault item, or a field name appears more than once on the item |
-| `422 Unprocessable Entity` | Malformed placeholder, unknown credential, or a value/field the item does not have |
+| `422 Unprocessable Entity` | Malformed placeholder, unknown credential, or a value/field the item does not have; a `{{session:NAME}}` that is unknown, expired or another key's (`unknown_session`) |
 | `502 Bad Gateway` | Forward to target failed (connection error, timeout) or response exceeded `max_response_bytes`. The message never includes the target URL. |
 | `503 Service Unavailable` | Vault is locked |
+
+### Captured sessions
+
+A login that returns a token can keep the token out of the agent's sight. Add `capture` to the login request, and use `{{session:name}}` afterwards:
+
+```json
+{
+  "request": {
+    "method": "POST",
+    "url": "https://portainer.lan:9443/api/auth",
+    "body": { "username": "{{vault:portainer:username}}", "password": "{{vault:portainer}}" }
+  },
+  "capture": [{ "from": "json:/jwt", "as": "portainer" }]
+}
+```
+
+The response shows `[CAPTURED:portainer]` where the token was, and `captures[0].status` says `captured`. Then `"Authorization": "Bearer {{session:portainer}}"` in any later request to the same origin. [sessions.md](sessions.md) has the rules (sources, expiry, scoping, what is hidden, limits) and worked Portainer and Proxmox examples.
+
+### `GET /v1/sessions`
+
+The calling key's live captured sessions, sorted by name. Never a value. Uses the agent key and the agent rate limit.
+
+```json
+[
+  { "name": "portainer", "host": "portainer.lan:9443", "expires_at": "2026-01-01T12:30:00Z" }
+]
+```
+
+`host` is the host the session is bound to, with `:port` when the port is not the default for its scheme. Sessions of other keys and expired ones are not listed.
+
+### `DELETE /v1/sessions/{name}`
+
+Forgets one captured session of the calling key. `204 No Content`, or `422` (`unknown_session`) when the name is absent, expired or another key's. Recorded as `session_delete` with cause `agent`.
 
 ---
 
@@ -385,7 +423,7 @@ Show what a draft policy would allow for an existing key, **without saving anyth
 
 - `credentials`: what the key would reach under the draft, in the same format as `GET /v1/credentials?detail=true`. Names, ready-made placeholders and bound hosts only; never values.
 - `gained` / `lost`: credential names reachable under the draft but not the saved policy, and the reverse.
-- `request_check` (only when `request` is given): runs every check `/v1/forward` would run, in the same order and with the same status codes, reasons and messages: request validation, placeholder parsing, method policy, credential scope, the outbound target policy, then unknown / ambiguous / re-prompt / missing value or field / host binding. It never fetches a value or connects. `allowed: true` carries no reason. **The target check is by name and IP literal only**: the private-address check on a resolved DNS name happens only when a request is really forwarded.
+- `request_check` (only when `request` is given): runs every check `/v1/forward` would run, in the same order and with the same status codes, reasons and messages: request validation, placeholder parsing, method policy, credential scope, the outbound target policy, then unknown / ambiguous / re-prompt / missing value or field / host binding. It never fetches a value or connects. `allowed: true` carries no reason. **The target check is by name and IP literal only**: the private-address check on a resolved DNS name happens only when a request is really forwarded. `{{session:name}}` placeholders are checked for syntax (and for sessions being switched on), but **not** against the session store: sessions are runtime state of an agent key, so the preview answers the same for a name nobody has captured. The preview takes a `request` only, so it does not check `capture` entries ([sessions.md](sessions.md#policy)).
 - With the vault locked, the answer comes from the cached credential list; with no cache it is `503`.
 
 **Errors**
@@ -532,6 +570,8 @@ Placeholders select a value of a Vaultwarden **Login** or **Secure note** item:
 Single quotes are used because placeholders usually sit inside JSON strings, where double quotes would need escaping. Names are case-sensitive and must match the vault exactly. **You rarely need to write quoting yourself:** `GET /v1/credentials?detail=true` returns the exact placeholder for every available value.
 
 Anything starting with `{{vault:` that does not parse is rejected with `422` — malformed placeholders are never forwarded.
+
+**Session placeholders.** `{{session:NAME}}` is replaced with a value captured earlier from a login response (see [Captured sessions](#captured-sessions)). `NAME` is a plain word of 1 to 64 letters, digits, `_`, `-` and `.`: no quoting, because the agent chose the name. It works in the same places as a vault placeholder, can be mixed with them, and is only substituted for the origin it was captured from. Anything starting with `{{session:` that does not parse is a `422` too.
 
 **Placement**
 Placeholders may appear anywhere in:

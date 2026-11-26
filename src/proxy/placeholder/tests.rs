@@ -3,7 +3,19 @@ use super::*;
 fn one(s: &str) -> Placeholder {
     let occ = scan(s).unwrap();
     assert_eq!(occ.len(), 1, "{s}");
-    occ[0].placeholder.clone()
+    match &occ[0].token {
+        Token::Vault(p) => p.clone(),
+        other => panic!("{s}: expected a vault placeholder, got {other:?}"),
+    }
+}
+
+fn session(s: &str) -> String {
+    let occ = scan(s).unwrap();
+    assert_eq!(occ.len(), 1, "{s}");
+    match &occ[0].token {
+        Token::Session(name) => name.clone(),
+        other => panic!("{s}: expected a session, got {other:?}"),
+    }
 }
 
 fn ph(item: &str, selector: Selector) -> Placeholder {
@@ -134,18 +146,118 @@ fn rendering() {
 
 #[test]
 fn collect_json_includes_keys_and_rejects_malformed() {
-    let mut out = BTreeSet::new();
+    let mut out = Collected::default();
     collect_json(
         &serde_json::json!({"{{vault:k}}": ["{{vault:'v w':notes}}", 1]}),
         &mut out,
     )
     .unwrap();
-    assert!(out.contains(&ph("k", Selector::Password)));
-    assert!(out.contains(&ph("v w", Selector::Notes)));
+    assert!(out.vault.contains(&ph("k", Selector::Password)));
+    assert!(out.vault.contains(&ph("v w", Selector::Notes)));
+    assert!(out.sessions.is_empty());
     let err = collect_json(
         &serde_json::json!({"a": "{{vault:bad name}}"}),
-        &mut BTreeSet::new(),
+        &mut Collected::default(),
     )
     .unwrap_err();
     assert!(matches!(err, FerroError::MalformedPlaceholder(_)));
+}
+
+// ── Session placeholders ──────────────────────────────────────────────────────
+
+#[test]
+fn a_session_placeholder_parses_to_its_name() {
+    assert_eq!(session("{{session:portainer}}"), "portainer");
+    assert_eq!(session("{{session:a.b-c_D9}}"), "a.b-c_D9");
+    assert_eq!(
+        session(&format!("{{{{session:{}}}}}", "x".repeat(64))).len(),
+        64
+    );
+}
+
+#[test]
+fn session_and_vault_placeholders_are_found_in_position_order() {
+    let s = "u={{vault:a:username}} t={{session:tok}} p={{vault:'b c'}}{{session:two}}";
+    let occ = scan(s).unwrap();
+    let kinds: Vec<String> = occ.iter().map(|o| o.token.label()).collect();
+    assert_eq!(kinds, ["a:username", "session:tok", "'b c'", "session:two"]);
+    assert_eq!(&s[occ[1].start..occ[1].end], "{{session:tok}}");
+    assert_eq!(&s[occ[3].start..occ[3].end], "{{session:two}}");
+    assert!(occ.windows(2).all(|w| w[0].end <= w[1].start));
+}
+
+#[test]
+fn a_quoted_vault_name_may_contain_the_session_prefix() {
+    // The vault name is consumed whole, so what is inside it is not a session.
+    let occ = scan("{{vault:'x {{session:y}} z'}}").unwrap();
+    assert_eq!(occ.len(), 1);
+    assert!(matches!(&occ[0].token, Token::Vault(p) if p.item == "x {{session:y}} z"));
+}
+
+#[test]
+fn malformed_session_placeholders_are_errors() {
+    let too_long = format!("{{{{session:{}}}}}", "x".repeat(65));
+    for bad in [
+        "{{session:}}",
+        "{{session:a b}}",
+        "{{session:a",
+        "{{session:'quoted'}}",
+        "{{session:a:b}}",
+        "{{session:a}x",
+        "{{session:ä}}",
+        "{{session:{{vault:x}}}}",
+        too_long.as_str(),
+    ] {
+        let err = scan(bad).unwrap_err();
+        assert!(
+            matches!(err, FerroError::MalformedPlaceholder(_)),
+            "{bad} -> {err:?}"
+        );
+    }
+}
+
+#[test]
+fn near_misses_are_not_placeholders() {
+    // Only the exact prefixes start a placeholder.
+    assert!(
+        scan("{{Session:x}} {{ session:x}} {session:x} {{sessions:x}}")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn labels_keep_the_vault_form_and_prefix_sessions() {
+    assert_eq!(
+        Token::Vault(ph("Proxmox (prod)", Selector::Username)).label(),
+        "'Proxmox (prod)':username"
+    );
+    assert_eq!(Token::Vault(ph("tok", Selector::Password)).label(), "tok");
+    assert_eq!(
+        Token::Session("portainer".into()).label(),
+        "session:portainer"
+    );
+}
+
+#[test]
+fn collect_splits_vault_placeholders_and_sessions() {
+    let mut out = Collected::default();
+    collect_json(
+        &serde_json::json!({"{{session:k}}": ["{{vault:v}}", "{{session:a}} {{session:a}}", 1]}),
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(out.vault.len(), 1);
+    assert_eq!(out.sessions.iter().cloned().collect::<Vec<_>>(), ["a", "k"]);
+}
+
+#[test]
+fn session_names() {
+    assert!(is_session_name("portainer"));
+    assert!(is_session_name(&"x".repeat(64)));
+    assert!(!is_session_name(""));
+    assert!(!is_session_name(&"x".repeat(65)));
+    assert!(!is_session_name("a b"));
+    assert!(!is_session_name("a{{b"));
+    assert!(!is_session_name("é"));
 }

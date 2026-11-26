@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{FerroError, FerroResult};
-use crate::proxy::placeholder::{scan, Placeholder, Selector};
+use crate::proxy::placeholder::{scan, Placeholder, Selector, Token};
 use crate::vault::model::{CredentialEntry, FieldKind, FieldLookup, ItemKind};
 use crate::vault::{Builtin, CredentialMap, Vault};
 
@@ -222,16 +222,28 @@ pub async fn resolve_credentials<V: Vault + ?Sized>(
     fetch_credentials(&plan, vault).await
 }
 
+/// The values of the captured sessions a request uses, by session name. Every
+/// value is Zeroizing and wiped when the map is dropped.
+pub type SessionValues = BTreeMap<String, Zeroizing<String>>;
+
 /// Replace every placeholder in `input` with its resolved value. Placeholders
-/// not in `values` are left untouched (callers resolve every placeholder
-/// first, and malformed ones are rejected before substitution).
-pub fn substitute_str(input: &str, values: &ResolvedValues) -> Zeroizing<String> {
+/// not in `values` or `sessions` are left untouched (callers resolve every
+/// placeholder first, and malformed ones are rejected before substitution).
+pub fn substitute_str(
+    input: &str,
+    values: &ResolvedValues,
+    sessions: &SessionValues,
+) -> Zeroizing<String> {
     let mut result = Zeroizing::new(String::with_capacity(input.len()));
     let mut last_end = 0;
     for occ in scan(input).unwrap_or_default() {
-        if let Some(resolved) = values.get(&occ.placeholder) {
+        let value = match &occ.token {
+            Token::Vault(p) => values.get(p).map(|r| r.value.as_str()),
+            Token::Session(name) => sessions.get(name).map(|v| v.as_str()),
+        };
+        if let Some(value) = value {
             result.push_str(&input[last_end..occ.start]);
-            result.push_str(resolved.value.as_str());
+            result.push_str(value);
             last_end = occ.end;
         }
     }
@@ -244,18 +256,21 @@ pub fn substitute_str(input: &str, values: &ResolvedValues) -> Zeroizing<String>
 /// text, means credential values containing `"` or `\` are escaped correctly
 /// and cannot alter the JSON structure. The caller must pass the result to
 /// [`zeroize_json`] once it is no longer needed.
-pub fn substitute_json(value: &Value, values: &ResolvedValues) -> Value {
+pub fn substitute_json(value: &Value, values: &ResolvedValues, sessions: &SessionValues) -> Value {
     match value {
-        Value::String(s) => Value::String(substitute_str(s, values).to_string()),
-        Value::Array(items) => {
-            Value::Array(items.iter().map(|v| substitute_json(v, values)).collect())
-        }
+        Value::String(s) => Value::String(substitute_str(s, values, sessions).to_string()),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|v| substitute_json(v, values, sessions))
+                .collect(),
+        ),
         Value::Object(map) => Value::Object(
             map.iter()
                 .map(|(k, v)| {
                     (
-                        substitute_str(k, values).to_string(),
-                        substitute_json(v, values),
+                        substitute_str(k, values, sessions).to_string(),
+                        substitute_json(v, values, sessions),
                     )
                 })
                 .collect(),

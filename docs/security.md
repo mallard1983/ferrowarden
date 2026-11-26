@@ -26,6 +26,7 @@ This document describes what Ferrowarden is designed to protect against, the sec
 | The AI agent | Exfiltrates credentials through conversation or logs, or by steering the proxy (sending a credential to a host that echoes it back, or calling the vault directly) | Agent API tokens are scoped to the proxy only; credentials are bound to the hosts in their vault item URIs; internal targets (always including the vault endpoint and the notifier hosts) are blocked; every encoding of each substituted value is scrubbed from responses and errors |
 | The model provider | Logs prompt content including credentials | Credential values are not placed in the agent conversation by design: the agent only handles placeholders and scrubbed responses |
 | Target services | Return credential values or credential-shaped content in responses | Exact substituted values (raw, JSON-escaped, URL-encoded, base64) are scrubbed from body and headers, then common credential patterns |
+| A service that logs in and returns a session token | The token reaches the agent, and with it the conversation, a log or an injected request | The agent asks Ferrowarden to capture the token; it is kept in memory, bound to the agent key and the origin, and hidden from every response (property 20) |
 | An attacker who compromises the agent process | Reads credential values from agent memory or conversation | Same as AI agent above |
 | A network observer between agent and Ferrowarden | Reads credentials in transit | Native TLS (rustls) is enabled by default; TLS can be disabled only when both agent and Ferrowarden run on the same host |
 | Another container or process on the internal Docker network | Reads decrypted credential values off the wire between the vault component and Ferrowarden | There are none: the only traffic to Vaultwarden is the login and the encrypted vault, over verified HTTPS, and a value is decrypted inside Ferrowarden only for the request that needs it |
@@ -118,7 +119,9 @@ Ferrowarden's HTTP client is configured with `redirect::Policy::none()`, so it d
 
 ### 8. Response Scrubbing
 
-First, every credential value substituted into the request is removed from the response body, every response header value, and any error message — in its raw form and its JSON-escaped, URL-encoded, and base64 (standard and URL-safe, padded and unpadded) encodings. Values shorter than 4 characters are not exact-matched (they would shred ordinary text). Non-UTF-8 bodies are scrubbed byte-wise and returned base64-encoded.
+First, every credential value substituted into the request is removed from the response body, every response header value, and any error message — in its raw form and its JSON-escaped, URL-encoded, and base64 (standard and URL-safe, padded and unpadded) encodings. Values shorter than 4 characters are not exact-matched (they would shred ordinary text). The URL-encoded form is matched with upper and lower case hex. If a UTF-8 body is JSON and a decoded string still holds a value (the target escaped it in a way the text match does not know: PHP's `\/`, Go's `\u0026`, every character as `\uXXXX`), the body is scrubbed string by string and re-serialized, so its formatting may change in that case only. Matches are replaced longest first across all values. Non-UTF-8 bodies are scrubbed byte-wise and returned base64-encoded.
+
+The same exact-value pass also removes every value in the calling key's [captured sessions](sessions.md), replaced with `[CAPTURED:name]` (property 20).
 
 Then the body is run through a set of regex patterns that redact:
 
@@ -291,6 +294,30 @@ The cost is that the tests no longer have an independent reference implementatio
 
 ---
 
+### 20. Captured Sessions
+
+Some APIs log in first and return a session token (a JWT, a cookie, a ticket). Without help the login works through Ferrowarden, but the token comes back to the agent: a live credential in its context. With `capture` ([sessions.md](sessions.md)) the agent names a value of the login response, Ferrowarden keeps it, and the agent sees `[CAPTURED:name]`. Later requests write `{{session:name}}`.
+
+| Risk | Control |
+|---|---|
+| The token reaching the agent in the login response | The value is read from the **raw** response, before scrubbing, on any status code, and every encoding of it (raw, JSON-escaped, URL-encoded, four base64 forms) is replaced with `[CAPTURED:name]` in the body and in header values, `Set-Cookie` included |
+| The token reaching the agent later, in an echo or an error page | **Every** session value of the calling key is scrubbed from **every** response of that key, whether or not the request used it. A value found at a capture source that could not be stored (`too_long`, `expired`, `limit_reached`) is removed too, as `[REDACTED]` |
+| Using a session at a host it did not come from | A session is bound to the origin (scheme, host, port) of the login request and refused anywhere else with `403` before a connection is made |
+| One agent key using another's session, or learning that it exists | Sessions are keyed by (agent key, name). Another key's name, an absent name and an expired name give the same `422` (`unknown_session`) |
+| A token outliving the access it was captured under | Sessions live in memory only, with a lifetime of at most `sessions.max_ttl_secs`, shortened by the token's own `exp` or the cookie's `Max-Age`/`Expires`. They are cleared when the key is revoked, when its policy changes, when the vault locks, and by a restart. The agent can delete one at any time |
+| Token values in events, logs or metrics | Events carry the session name, host and outcome. The store has a `Debug` that prints counts only; values are `Zeroizing` and never serialized. Metrics have no session label. The CI secret gate reads every token the mock login services issued and scans the logs, the event file and a metrics scrape for them |
+| A response mentioning the token so the agent can pick it up | Exact-value scrubbing, as above. `too_short` values (under 4 characters) cannot be scrubbed and are not stored |
+| An agent filling memory | At most `sessions.max_per_key` live sessions per key (default 32), at most 16 KiB each, at most 8 captures per request |
+
+**What this does not protect against.** It narrows what the agent can *see*, not what it can *do*:
+
+- While a session lives, the agent can use it for any request the key's method policy and the outbound target policy allow to that origin. A prompt-injected agent can act as the logged-in user. Keep TTLs short and policies tight.
+- A target that returns a token in a form the scrubber does not know (cut up, hex-encoded, hashed) leaks it. The exact-value scrubber is defense in depth, as for vault credentials (property 8).
+- Tokens in the login response that you did not capture (a refresh token, a second cookie) stay visible. Capture each one you do not want the agent to see.
+- The URL-encoded cookie form: Proxmox sets the ticket in a cookie URL-encoded. Capture the ticket from the JSON body; its URL-encoded form is scrubbed from `Set-Cookie`. Captured from the cookie, the raw ticket in the JSON body would be a different string and stay visible.
+- A process memory dump contains the sessions, as it contains the vault's keys (property 18).
+- There is no key-policy field for sessions in this release. A key that may call a login endpoint may capture; `sessions.enabled = false` turns the feature off. The decision, and why every policy change clears the key's sessions, are in [sessions.md](sessions.md#policy).
+
 ### 19. The Metrics Listener
 
 The optional [Prometheus endpoint](metrics.md) (`metrics.bind`) is a third listener, off by default. It exposes counts and state, not secrets, but it is still an information source about your vault and your agents, so it is built to leak as little as possible and to be hard to misconfigure.
@@ -317,6 +344,7 @@ Every security-relevant action produces one structured event with a stable schem
 - every forwarded request (agent key id and name, method, target URL as the agent sent it, credential names, outcome, a reason code when it failed, the HTTP status, duration);
 - failed agent and admin authentication (missing or invalid key), with source IP and request ID;
 - credential listings, key creation and revocation, vault unlock/lock/sync, startup (security-relevant settings) and shutdown;
+- captured sessions: each capture, each use, each expiry and each deletion, by session name (never the value);
 - admin UI sign-ins (success, failure with a fixed reason, lockouts, the first step of a two-step login), sign-outs and session expiry;
 - rate limiting (aggregated: at most one event per client IP per minute), and requests rejected for an invalid body or query.
 

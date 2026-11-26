@@ -65,6 +65,7 @@ Ferrowarden is the proxy. It manages:
 - **Substitution**: Finds `{{vault:name}}` placeholders, validates names against the cache (known, unambiguous, bound to the target host via the item's URIs), decrypts the one field each placeholder names, on demand, and substitutes it into the URL, headers, and the parsed JSON body
 - **Forwarding**: Sends the substituted request to the target with a configurable timeout (default 30 seconds), no redirect following, no HTTP proxy, and a response size cap
 - **Scrubbing**: Removes every encoding of each substituted value from the response body, headers and errors, then runs regex patterns that redact bearer tokens, API key JSON fields, Proxmox tokens, basic auth in URLs, and PEM private key blocks
+- **Captured sessions**: When a login request asks for it (`capture`), reads a token from the raw response (a JSON pointer, a header or a cookie), keeps it in memory under (agent key, name) and bound to the login's origin, and shows the agent `[CAPTURED:name]`. Later requests use `{{session:name}}`; every session value of the key is scrubbed from every response of that key. In memory only, never persisted; cleared on revoke, policy change, vault lock and restart ([sessions.md](sessions.md))
 - **Agent key persistence**: On create, appends a SHA-256 hash of the token to a JSON file (never the plaintext). On startup, re-loads those hashes so keys survive container restarts.
 - **Security event log**: Records every security-relevant action (forwards with credential names and outcome, failed authentication, key changes, vault lock/unlock, startup/shutdown) as structured events to stdout, an optional rotating file, optional syslog, and a ring buffer ([events.md](events.md))
 
@@ -102,12 +103,15 @@ Agent                    Ferrowarden                Vaultwarden        Target Se
   │                           │──────────────────────────────────────────► │
   │                           │◄─────────────────────────────────────────── │
   │                           │  Response body          │                    │
-  │                           │ 8. Scrub response       │                    │
+  │                           │ 8. Capture (if asked)   │                    │
+  │                           │    and scrub response   │                    │
   │                           │ 9. Record security event│                    │
   │◄──────────────────────────│                         │                    │
   │  {"status":200,           │                         │                    │
   │   "body":"...scrubbed..."}│                         │                    │
 ```
+
+A request can also carry `{{session:name}}` placeholders. They are resolved in step 4 against the session store (the agent key's own sessions, captured from the same origin as the target) instead of the vault, and substituted in step 6. A request with `capture` stores the token it asks for in step 8, from the raw response, before scrubbing; the session store is not part of the vault and holds nothing after a restart.
 
 Vaultwarden is not in the request path. Ferrowarden contacted it earlier (login and sync, then a cheap revision check on every refresh tick), and the only thing it received was ciphertext. Between steps 5 and 8 the credential value exists in Ferrowarden's memory, as a `Zeroizing<String>` that overwrites the memory location when it is dropped at the end of step 7.
 

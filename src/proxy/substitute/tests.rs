@@ -37,6 +37,7 @@ fn substitute_str_replaces_all_occurrences_and_selectors() {
     let out = substitute_str(
         "a {{vault:t}} b {{vault:t:password}} u={{vault:'a b':username}}",
         &v,
+        &SessionValues::new(),
     );
     assert_eq!(out.as_str(), "a SECRET b SECRET u=USER");
 }
@@ -44,7 +45,11 @@ fn substitute_str_replaces_all_occurrences_and_selectors() {
 #[test]
 fn substitute_json_escapes_special_characters() {
     let v = values(&[(ph("pw", Selector::Password), r#"pa"ss\word"#)]);
-    let mut out = substitute_json(&json!({"password": "{{vault:pw}}", "n": 5}), &v);
+    let mut out = substitute_json(
+        &json!({"password": "{{vault:pw}}", "n": 5}),
+        &v,
+        &SessionValues::new(),
+    );
     let text = serde_json::to_string(&out).unwrap();
     let reparsed: Value = serde_json::from_str(&text).expect("still valid JSON");
     assert_eq!(reparsed["password"], r#"pa"ss\word"#);
@@ -54,8 +59,36 @@ fn substitute_json_escapes_special_characters() {
 
 #[test]
 fn substitute_no_placeholders_returns_input() {
-    let out = substitute_str("no placeholders here", &ResolvedValues::new());
+    let out = substitute_str(
+        "no placeholders here",
+        &ResolvedValues::new(),
+        &SessionValues::new(),
+    );
     assert_eq!(out.as_str(), "no placeholders here");
+}
+
+#[test]
+fn sessions_are_substituted_next_to_vault_values_in_strings_and_json() {
+    let v = values(&[(ph("t", Selector::Password), "SECRET")]);
+    let mut sessions = SessionValues::new();
+    sessions.insert("login".to_string(), Zeroizing::new("tok\"en".to_string()));
+    let out = substitute_str(
+        "{{vault:t}}/{{session:login}}/{{session:other}}",
+        &v,
+        &sessions,
+    );
+    // A session that is not in the map is left as it is (the caller checks first).
+    assert_eq!(out.as_str(), "SECRET/tok\"en/{{session:other}}");
+
+    let mut out = substitute_json(
+        &json!({"{{session:login}}": "Bearer {{session:login}}"}),
+        &v,
+        &sessions,
+    );
+    let text = serde_json::to_string(&out).unwrap();
+    let reparsed: Value = serde_json::from_str(&text).expect("still valid JSON");
+    assert_eq!(reparsed["tok\"en"], "Bearer tok\"en");
+    zeroize_json(&mut out);
 }
 
 #[test]

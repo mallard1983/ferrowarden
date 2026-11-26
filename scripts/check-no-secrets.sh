@@ -15,6 +15,10 @@
 #   - the metrics bearer token (secrets/metrics_token)
 #   - agent tokens the integration tests created during the run, from
 #     target/integration-secrets.txt (or $FERROWARDEN_GATE_EXTRA_SECRETS_FILE)
+#   - every session token the mock API's login services issued during the run
+#     (captured sessions, docs/sessions.md): Ferrowarden must have kept them
+#     from the agent, so they must not be in its logs, events or metrics either.
+#     Read from the mock's GET /__issued__, with the URL-encoded form of each.
 # then greps (fixed-string) for each of them in
 #   - `docker compose -f docker-compose.test.yml logs <service>`
 #   - the event file(s) copied out of the container with `docker compose cp`
@@ -37,6 +41,9 @@
 #                                   "ferrowarden")
 #   FERROWARDEN_GATE_METRICS_HOST   host the metrics port is published on
 #                                   (default: localhost)
+#   FERROWARDEN_GATE_MOCK_URL       where the mock API is published, for the
+#                                   issued session tokens (default:
+#                                   http://localhost:7777)
 
 set -euo pipefail
 # Git Bash on Windows would otherwise rewrite the container path below.
@@ -53,6 +60,7 @@ SERVICES="${FERROWARDEN_GATE_SERVICES:-ferrowarden}"
 CONTAINER_EVENTS_DIR="/data/events"
 METRICS_TOKEN_FILE="secrets/metrics_token"
 METRICS_HOST="${FERROWARDEN_GATE_METRICS_HOST:-localhost}"
+MOCK_URL="${FERROWARDEN_GATE_MOCK_URL:-http://localhost:7777}"
 
 # The published metrics port of a compose service (empty: not scraped).
 metrics_port_for() {
@@ -152,6 +160,33 @@ if [ -f "$EXTRA_SECRETS_FILE" ]; then
         printf 'run_secret_%s\t%s\n' "$n" "$v" >> "$secrets"
     done < "$EXTRA_SECRETS_FILE"
     echo "Including $n run-generated secret(s) from $EXTRA_SECRETS_FILE."
+fi
+
+# Session tokens issued by the mock API's login services. The mock lists them
+# at /__issued__ (JSON, kind -> [tokens]); each goes in raw and URL-encoded, the
+# two forms that can reach a log or an event unchanged. Never printed.
+if [ "${FERROWARDEN_GATE_SKIP_DOCKER:-}" != "1" ]; then
+    curl -sf --max-time 20 "$MOCK_URL/__issued__" > "$work/issued.json" \
+        || fail "could not read the issued session tokens from $MOCK_URL/__issued__ (is the test stack up and the mock API image rebuilt?)"
+    "$PYTHON" -I - "$(native_path "$work/issued.json")" <<'PY' | tr -d '\r' >> "$secrets"
+import json, sys, urllib.parse
+
+sys.stdout.reconfigure(newline="\n", encoding="utf-8")  # no CRLF on Windows
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    issued = json.load(f)
+n = 0
+for kind, tokens in sorted(issued.items()):
+    for token in tokens:
+        forms = {token, urllib.parse.quote(token, safe="")}
+        for form in sorted(forms):
+            if len(form) >= 6 and "\t" not in form and "\n" not in form:
+                n += 1
+                print(f"issued_{kind}_{n}\t{form}")
+PY
+    issued_n="$(grep -c '^issued_' "$secrets" || true)"
+    [ "$issued_n" -ge 1 ] || fail "the mock API has issued no session tokens; run the integration tests first (nothing meaningful to check)"
+    echo "Including $issued_n issued session token form(s) from the mock API."
 fi
 
 count="$(wc -l < "$secrets" | tr -d ' ')"

@@ -37,7 +37,12 @@ allowed in the URL path and query, in header values and in the body, not in the 
 or port. A credential is only sent to the hosts it is bound to. The result has the target's \
 status, response headers and body; a 4xx or 5xx from the target is a normal result with that \
 status. Known credential values are replaced with [REDACTED] in the response; do not ask a \
-target to echo or transform a credential. If Ferrowarden itself refuses the call, the result is \
+target to echo or transform a credential. To log in to a service without ever seeing its token, \
+add capture to the login request, for example [{\"from\": \"json:/jwt\", \"as\": \"portainer\"}]: \
+Ferrowarden keeps the value (a JSON pointer, a header: or a cookie: of the response) and shows \
+[CAPTURED:portainer] instead; later calls write {{session:portainer}} where the token belongs, \
+and it is only sent to the host it came from. The result lists what each capture did. If \
+Ferrowarden itself refuses the call, the result is \
 an error: 403 means the request is not allowed for this key or target, so do not retry it with \
 other credentials, hosts or methods, and tell the user; 422 means a placeholder is malformed or \
 unknown, so call list_credentials and copy a placeholder from it.";
@@ -79,6 +84,33 @@ pub fn http_request_schema() -> JsonObject {
             },
             "body": {
                 "description": "The request body. A string is sent as it is (raw text such as form data). Any other JSON value (object, array, number or boolean) is sent as JSON. Placeholders are allowed inside strings. Leave it out for no body."
+            },
+            "capture": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "description": "Values of the response to keep inside Ferrowarden instead of showing them (a login token). Each is stored under a name for later {{session:NAME}} placeholders, and the response shows [CAPTURED:NAME] in its place. Leave it out for no capture.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "from": {
+                            "type": "string",
+                            "description": "Where the value is: json:/pointer (an RFC 6901 pointer into a JSON response body, to a string), header:Name, or cookie:name (from the response's Set-Cookie headers)."
+                        },
+                        "as": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_.-]{1,64}$",
+                            "description": "The session name: 1 to 64 letters, digits, '_', '-' or '.'. Used as {{session:NAME}}."
+                        },
+                        "ttl_secs": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "How long to keep it, in seconds. Default 30 minutes; never longer than the token's own expiry."
+                        }
+                    },
+                    "required": ["from", "as"],
+                    "additionalProperties": false
+                }
             }
         },
         "required": ["method", "url"],
@@ -125,6 +157,20 @@ pub struct HttpRequestArgs {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub body: Option<Value>,
+    #[serde(default)]
+    pub capture: Option<Vec<CaptureArg>>,
+}
+
+/// One entry of `capture`. Ferrowarden validates the values; this only keeps
+/// the shape (and the unknown-field refusal) of the schema.
+#[derive(Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureArg {
+    pub from: String,
+    #[serde(rename = "as")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
 }
 
 impl HttpRequestArgs {
@@ -139,7 +185,12 @@ impl HttpRequestArgs {
         if let Some(body) = &self.body {
             request.insert("body".into(), body.clone());
         }
-        json!({ "request": Value::Object(request) })
+        let mut payload = serde_json::Map::new();
+        payload.insert("request".into(), Value::Object(request));
+        if let Some(capture) = &self.capture {
+            payload.insert("capture".into(), json!(capture));
+        }
+        Value::Object(payload)
     }
 }
 
@@ -163,7 +214,8 @@ fn argument_error(error: &serde_json::Error) -> CallToolResult {
     tool_error(
         format!(
             "Invalid arguments for {TOOL_HTTP_REQUEST}: {detail}. \
-             Required: method, url. Optional: headers (object of strings), body."
+             Required: method, url. Optional: headers (object of strings), body, \
+             capture (list of {{from, as, ttl_secs}})."
         ),
         json!({ "error_source": "mcp", "error": "invalid arguments" }),
     )

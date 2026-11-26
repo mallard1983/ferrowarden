@@ -42,6 +42,7 @@ use tokio::sync::mpsc;
 
 use crate::config::MetricsConfig;
 use crate::events::{Action, EventLog, Outcome, Reason, SecurityEvent};
+use crate::sessions::CaptureStatus;
 use crate::state::AppState;
 
 /// The `Content-Type` of a scrape: the OpenMetrics text format.
@@ -122,6 +123,8 @@ const LIMITERS: [&str; 3] = ["agent", "admin", "notify_test"];
 const AUTH_KINDS: [&str; 4] = ["agent", "admin", "ui", "metrics"];
 /// `sender` of the notification counters the notifier keeps for all senders.
 const ALL_SENDERS: &str = "all";
+/// The values of `ferrowarden_session_uses_total{outcome}`.
+const SESSION_USE_OUTCOMES: [&str; 3] = ["success", "unknown_session", "session_host_not_allowed"];
 
 fn duration_histogram() -> Histogram {
     Histogram::new(DURATION_BUCKETS)
@@ -147,6 +150,9 @@ pub struct Metrics {
     metrics_dropped: Counter,
     notifications: Family<NotifyLabels, Counter>,
     ui_sessions: Gauge,
+    session_captures: Family<OutcomeLabels, Counter>,
+    session_uses: Family<OutcomeLabels, Counter>,
+    sessions_active: Gauge,
     /// Only with `metrics.credential_labels = true`.
     credential_uses: Option<Family<CredentialLabels, Counter>>,
 }
@@ -190,6 +196,9 @@ impl Metrics {
             metrics_dropped: Counter::default(),
             notifications: Family::default(),
             ui_sessions: Gauge::default(),
+            session_captures: Family::default(),
+            session_uses: Family::default(),
+            sessions_active: Gauge::default(),
             credential_uses: credential_labels.then(Family::default),
             registry: Registry::default(),
         };
@@ -272,6 +281,21 @@ impl Metrics {
             "Admin UI sessions that are signed in now (0 when the UI is off)",
             m.ui_sessions.clone(),
         );
+        registry.register(
+            "session_captures",
+            "Capture entries of forward requests by outcome (the capture status: captured, not_found, not_a_string, ambiguous, too_short, too_long, expired or limit_reached)",
+            m.session_captures.clone(),
+        );
+        registry.register(
+            "session_uses",
+            "Forward requests that used a captured session, by outcome (success, unknown_session or session_host_not_allowed)",
+            m.session_uses.clone(),
+        );
+        registry.register(
+            "sessions_active",
+            "Captured sessions that are live now, across all agent keys (names and values are never exported)",
+            m.sessions_active.clone(),
+        );
         if let Some(family) = &m.credential_uses {
             registry.register(
                 "forward_credential_uses",
@@ -296,6 +320,14 @@ impl Metrics {
         }
         for policy_set in ["true", "false"] {
             let _ = m.agent_keys.get_or_create(&PolicyLabels { policy_set });
+        }
+        for status in CaptureStatus::ALL {
+            let _ = m.session_captures.get_or_create(&OutcomeLabels {
+                outcome: status.as_str(),
+            });
+        }
+        for outcome in SESSION_USE_OUTCOMES {
+            let _ = m.session_uses.get_or_create(&OutcomeLabels { outcome });
         }
 
         Arc::new(Self { registry, ..m })
@@ -327,6 +359,8 @@ impl Metrics {
         }
         self.ui_sessions
             .set(i64::try_from(s.ui_sessions).unwrap_or(i64::MAX));
+        self.sessions_active
+            .set(i64::try_from(s.sessions_active).unwrap_or(i64::MAX));
         // Counters that the rest of the program keeps: copy their totals.
         self.events_dropped
             .inner()
@@ -363,6 +397,8 @@ pub struct Snapshot {
     pub events_dropped: u64,
     pub notify: crate::notify::Snapshot,
     pub ui_sessions: usize,
+    /// Live captured sessions, all keys together.
+    pub sessions_active: usize,
 }
 
 impl Snapshot {
@@ -384,6 +420,7 @@ impl Snapshot {
             events_dropped: state.events.dropped_total(),
             notify: state.notify.snapshot(),
             ui_sessions: ui_sessions.unwrap_or(0),
+            sessions_active: state.sessions.active(chrono::Utc::now()),
         }
     }
 }
@@ -494,6 +531,33 @@ impl Consumer {
             // password.
             Action::UiLogin if failed && info.reason != Some(Reason::InsecureTransport) => {
                 self.auth_failure("ui")
+            }
+            Action::SessionCapture => {
+                // The status is one of a fixed set; anything else is not counted.
+                if let Some(status) = CaptureStatus::ALL
+                    .into_iter()
+                    .find(|s| Some(s.as_str()) == detail_str(e, "status"))
+                {
+                    self.m
+                        .session_captures
+                        .get_or_create(&OutcomeLabels {
+                            outcome: status.as_str(),
+                        })
+                        .inc();
+                }
+            }
+            Action::SessionUse => {
+                let outcome = match info.reason {
+                    None => "success",
+                    Some(Reason::UnknownSession) => "unknown_session",
+                    Some(Reason::SessionHostNotAllowed) => "session_host_not_allowed",
+                    // No other reason is recorded on a `session_use` event.
+                    Some(_) => return,
+                };
+                self.m
+                    .session_uses
+                    .get_or_create(&OutcomeLabels { outcome })
+                    .inc();
             }
             // `metrics_auth` failures are counted where they happen
             // ([`Metrics::count_metrics_auth_failure`]), all of them.

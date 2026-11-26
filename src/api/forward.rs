@@ -1,4 +1,5 @@
 use axum::{extract::State, http::HeaderMap, Json};
+use chrono::Utc;
 use reqwest::Url;
 use serde::Deserialize;
 use serde_json::Value;
@@ -13,19 +14,25 @@ use crate::error::{FerroError, FerroResult};
 use crate::events::{emit_rejected, Action, SecurityEvent};
 use crate::middleware::request_context::RequestContext;
 use crate::policy::KeyPolicy;
-use crate::proxy::forward::{ProxyRequest, ZeroizingHeaders};
-use crate::proxy::placeholder::{self, Placeholder};
+use crate::proxy::forward::{ProxyRequest, ProxyResponse, ZeroizingHeaders};
+use crate::proxy::placeholder::{self, Collected, Placeholder};
+use crate::proxy::scrub::Secret;
 use crate::proxy::{
-    check_credentials, fetch_credentials, forward_request, substitute_json, substitute_str,
-    zeroize_json, CredentialPlan, ForwardLimits,
+    check_credentials, fetch_credentials, render_response, send_request, substitute_json,
+    substitute_str, zeroize_json, CredentialPlan, ForwardLimits,
 };
-use crate::state::AppState;
+use crate::sessions::{self, Capture, CaptureSpec, Origin, Owner};
+use crate::state::{AgentKey, AppState};
 use crate::vault::refresh::reunlock_if_possible;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForwardPayload {
     pub request: ProxyRequest,
+    /// Values to keep inside Ferrowarden instead of showing them to the agent
+    /// (docs/sessions.md). May be left out; `null` and `[]` are errors.
+    #[serde(default, deserialize_with = "crate::sessions::present")]
+    pub capture: Option<Vec<CaptureSpec>>,
 }
 
 /// POST /v1/forward
@@ -35,12 +42,16 @@ pub struct ForwardPayload {
 /// credential's host binding, substitutes real credentials, forwards to the
 /// target, scrubs the response, and returns it. The agent never sees
 /// credential values.
+///
+/// With `capture`, values of the response (a login token) are kept in
+/// Ferrowarden under a name, hidden from the agent, and later requests use
+/// them as `{{session:name}}`.
 pub async fn forward(
     State(state): State<Arc<AppState>>,
     ctx: RequestContext,
     headers: HeaderMap,
     body: Result<StrictJson<ForwardPayload>, FerroError>,
-) -> FerroResult<Json<crate::proxy::forward::ProxyResponse>> {
+) -> FerroResult<Json<ProxyResponse>> {
     const ENDPOINT: &str = "/v1/forward";
     // Authenticate the agent first — before looking at the body (so a caller
     // without a valid key learns nothing from parse errors), touching the
@@ -55,23 +66,31 @@ pub async fn forward(
     };
     let req = payload.request;
 
-    // Parse every placeholder (URL, header values, body) before anything
-    // else. A malformed one is rejected here rather than forwarded literally.
-    let collected = req.validate().and_then(|()| collect_placeholders(&req));
-    let names = collected.as_ref().cloned().unwrap_or_default();
+    // Parse every placeholder (URL, header values, body) and every `capture`
+    // entry before anything else. A malformed one is rejected here rather than
+    // forwarded literally, and nothing has been sent.
+    let (checked, captures, used) = match check_request(&state, &req, payload.capture.as_deref()) {
+        Ok((captures, used)) => (Ok(()), captures, used),
+        Err(e) => (Err(e), Vec::new(), Collected::default()),
+    };
     // Audit labels: the canonical placeholder text, e.g. `grafana_token` or
-    // `'Proxmox (prod)':username` — never values.
-    let placeholder_names: Vec<String> = names.iter().map(Placeholder::label).collect();
+    // `'Proxmox (prod)':username` — never values. Sessions are listed apart.
+    let placeholder_names: Vec<String> = used.vault.iter().map(Placeholder::label).collect();
+    let session_names: Vec<String> = used.sessions.iter().cloned().collect();
 
     // The key's policy is enforced here, before run_forward: so before any
     // vault access, target check or DNS lookup. The checks see only the
     // method and the placeholder names the agent sent, never the vault, which
     // is what keeps an out-of-scope name from revealing whether it exists.
-    let mut result = match collected {
-        Ok(_) => match agent.policy.check_request(&req.normalized_method(), &names) {
-            Ok(()) => run_forward(&state, &req, &names).await,
-            Err(e) => Err(e),
-        },
+    // Session names are not credential names and are not matched against the
+    // credential patterns: a session can only ever be sent back to the origin
+    // it came from, and the method policy applies as it does to any request.
+    let mut result = match checked.and_then(|()| {
+        agent
+            .policy
+            .check_request(&req.normalized_method(), &used.vault)
+    }) {
+        Ok(()) => run_forward(&state, &agent, &req, &used, &captures).await,
         Err(e) => Err(e),
     };
 
@@ -84,7 +103,36 @@ pub async fn forward(
         // before anything is sent to the target.
         state.set_locked("forward_vault_locked").await;
         if reunlock_if_possible(&state).await {
-            result = run_forward(&state, &req, &names).await;
+            result = run_forward(&state, &agent, &req, &used, &captures).await;
+        }
+    }
+
+    // One event per capture entry, and one for the use of sessions: names and
+    // outcomes, never values.
+    if let Ok(resp) = &result {
+        for r in resp.captures.iter().flatten() {
+            state.events.emit(
+                sessions::capture_event(r)
+                    .request(&ctx)
+                    .key(&agent)
+                    .url(&req.url),
+            );
+        }
+    }
+    if !session_names.is_empty() {
+        let event = SecurityEvent::new(Action::SessionUse)
+            .request(&ctx)
+            .key(&agent)
+            .url(&req.url)
+            .sessions(&session_names);
+        match &result {
+            Ok(_) => state.events.emit(event),
+            // The session was refused: say which way. Other failures say
+            // nothing about the session, so they leave no `session_use`.
+            Err(e @ (FerroError::UnknownSession(_) | FerroError::SessionHostNotAllowed { .. })) => {
+                state.events.emit(event.failed_with(e));
+            }
+            Err(_) => {}
         }
     }
 
@@ -96,7 +144,8 @@ pub async fn forward(
         .method(&req.method)
         .url(&req.url)
         .credentials(&placeholder_names)
-        .items(names.iter().map(|p| p.item.as_str()))
+        .sessions(&session_names)
+        .items(used.vault.iter().map(|p| p.item.as_str()))
         .duration(ctx.started.elapsed());
     state.events.emit(match &result {
         Ok(resp) => event
@@ -108,9 +157,24 @@ pub async fn forward(
     result.map(Json)
 }
 
+/// Everything about the body that can be checked on its own: the method and
+/// headers, the `capture` entries, every placeholder (and that sessions are
+/// switched on when they are used).
+fn check_request(
+    state: &AppState,
+    req: &ProxyRequest,
+    capture: Option<&[CaptureSpec]>,
+) -> FerroResult<(Vec<Capture>, Collected)> {
+    req.validate()?;
+    let captures = sessions::parse_captures(capture, &state.config.sessions)?;
+    let used = collect_placeholders(req)?;
+    sessions::check_enabled(&state.config.sessions, &used.sessions)?;
+    Ok((captures, used))
+}
+
 /// Every distinct placeholder in the request's URL, header values and body.
-pub(crate) fn collect_placeholders(req: &ProxyRequest) -> FerroResult<BTreeSet<Placeholder>> {
-    let mut out = BTreeSet::new();
+pub(crate) fn collect_placeholders(req: &ProxyRequest) -> FerroResult<Collected> {
+    let mut out = Collected::default();
     placeholder::collect(&req.url, &mut out)?;
     for v in req.headers.values() {
         placeholder::collect(v, &mut out)?;
@@ -163,27 +227,42 @@ async fn prepare(
 /// same order, without fetching a value or opening a connection. Used by the
 /// policy preview. (Name-based hosts are additionally checked at DNS
 /// resolution time, which only happens when a request is really forwarded.)
+///
+/// Session placeholders are checked for syntax, and for sessions being
+/// switched on, but not against the session store: sessions are runtime state
+/// of an agent key, not something a policy decides.
 pub(crate) async fn check_only(
     state: &Arc<AppState>,
     policy: &KeyPolicy,
     req: &ProxyRequest,
 ) -> FerroResult<()> {
-    req.validate()?;
-    let names = collect_placeholders(req)?;
-    policy.check_request(&req.normalized_method(), &names)?;
-    prepare(state, req, &names, true).await.map(|_| ())
+    let (_, used) = check_request(state, req, None)?;
+    policy.check_request(&req.normalized_method(), &used.vault)?;
+    prepare(state, req, &used.vault, true).await.map(|_| ())
 }
 
 async fn run_forward(
     state: &Arc<AppState>,
+    agent: &AgentKey,
     req: &ProxyRequest,
-    names: &BTreeSet<Placeholder>,
-) -> FerroResult<crate::proxy::forward::ProxyResponse> {
-    let (target, plan) = prepare(state, req, names, false).await?;
+    used: &Collected,
+    captures: &[Capture],
+) -> FerroResult<ProxyResponse> {
+    let (target, plan) = prepare(state, req, &used.vault, false).await?;
+
+    // Sessions: every name must be this key's own, live, and captured from the
+    // origin this request goes to. Checked before a value is fetched and
+    // before any connection is made.
+    let origin = Origin::of(&target)
+        .ok_or_else(|| FerroError::InvalidTargetUrl("URL has no host or port".to_string()))?;
+    let session_values = state
+        .sessions
+        .resolve(&agent.id, &used.sessions, &origin, Utc::now())?;
+
     let values = fetch_credentials(&plan, &*state.vault).await?;
 
     // URL: substitute, then require the scheme/host/port to be unchanged.
-    let subst_url = substitute_str(&req.url, &values);
+    let subst_url = substitute_str(&req.url, &values, &session_values);
     let subst_target = Url::parse(subst_url.as_str()).map_err(|_| {
         FerroError::InvalidTargetUrl("URL is invalid after credential substitution".to_string())
     })?;
@@ -198,7 +277,7 @@ async fn run_forward(
 
     let mut subst_headers: ZeroizingHeaders = HashMap::new();
     for (k, v) in &req.headers {
-        subst_headers.insert(k.clone(), substitute_str(v, &values));
+        subst_headers.insert(k.clone(), substitute_str(v, &values, &session_values));
     }
 
     // Body: a JSON string is sent as raw text; anything else is sent as JSON
@@ -206,9 +285,9 @@ async fn run_forward(
     // serialized text, so values are escaped correctly).
     let subst_body: Option<Zeroizing<String>> = match &req.body {
         None | Some(Value::Null) => None,
-        Some(Value::String(s)) => Some(substitute_str(s, &values)),
+        Some(Value::String(s)) => Some(substitute_str(s, &values, &session_values)),
         Some(other) => {
-            let mut v = substitute_json(other, &values);
+            let mut v = substitute_json(other, &values, &session_values);
             let text = Zeroizing::new(
                 serde_json::to_string(&v).map_err(|e| FerroError::Internal(e.to_string()))?,
             );
@@ -226,27 +305,78 @@ async fn run_forward(
         }
     };
 
-    // Exact-value scrubbing covers secrets only: usernames, TOTP codes and
-    // boolean fields are excluded (see `Resolved::scrub`).
-    let secrets: Vec<&str> = values
-        .values()
-        .filter(|r| r.scrub)
-        .map(|r| r.value.as_str())
-        .collect();
     let limits = ForwardLimits {
         timeout: Duration::from_secs(state.config.forward_timeout_secs),
         max_response_bytes: state.config.max_response_bytes,
     };
 
-    forward_request(
+    let up = send_request(
         &req.method,
         &subst_target,
         subst_headers,
         subst_body,
-        &secrets,
         &state.target_policy,
         &limits,
     )
-    .await
-    // `values`, `subst_url`, headers and body are Zeroizing and wiped on drop.
+    .await?;
+
+    // Captures read the raw answer, before anything is scrubbed, whatever the
+    // status. A failed capture does not fail the request: the login already
+    // happened at the target, so the agent still gets the (scrubbed) answer.
+    let owner = Owner {
+        key_id: &agent.id,
+        key_name: &agent.name,
+        origin: &origin,
+    };
+    let now = Utc::now();
+    let mut results = Vec::with_capacity(captures.len());
+    let mut unstored: Vec<Zeroizing<String>> = Vec::new();
+    for c in captures {
+        let outcome = sessions::capture(
+            &state.sessions,
+            &owner,
+            c,
+            &up,
+            now,
+            state.config.sessions.max_per_key,
+        );
+        results.push(outcome.result);
+        unstored.extend(outcome.unstored);
+    }
+
+    // The scrub set. First every session value of this key (the ones just
+    // captured included), whether or not this request used them: they come
+    // back as `[CAPTURED:name]`. Then the vault values substituted into this
+    // request, and finally values that were found at a capture source but
+    // could not be stored. Exact-value scrubbing covers secrets only:
+    // usernames, TOTP codes and boolean fields are excluded (see
+    // `Resolved::scrub`).
+    let session_secrets = state.sessions.values_for_key(&agent.id);
+    let session_labels: Vec<String> = session_secrets
+        .iter()
+        .map(|(name, _)| format!("[CAPTURED:{name}]"))
+        .collect();
+    let mut secrets: Vec<Secret<'_>> = session_secrets
+        .iter()
+        .zip(&session_labels)
+        .map(|((_, value), label)| Secret {
+            value: value.as_str(),
+            replacement: label,
+        })
+        .collect();
+    secrets.extend(
+        values
+            .values()
+            .filter(|r| r.scrub)
+            .map(|r| Secret::redacted(r.value.as_str())),
+    );
+    secrets.extend(unstored.iter().map(|v| Secret::redacted(v.as_str())));
+
+    let mut response = render_response(&up, &secrets);
+    if !captures.is_empty() {
+        response.captures = Some(results);
+    }
+    Ok(response)
+    // `values`, `subst_url`, headers, body and the session values are
+    // Zeroizing and wiped on drop.
 }

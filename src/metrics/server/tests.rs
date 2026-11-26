@@ -42,6 +42,7 @@ fn config(token: Option<&str>) -> Config {
             token: MetricsToken(token.map(|t| Zeroizing::new(t.to_string()))),
             ..Default::default()
         },
+        sessions: Default::default(),
     }
 }
 

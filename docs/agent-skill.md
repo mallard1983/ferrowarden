@@ -5,7 +5,7 @@ You are connected to a **Ferrowarden** credential proxy. Ferrowarden lets you ma
 **Base URL:** `https://<ferrowarden-host>:3000` — or the URL the operator gave you, which may include a path prefix (e.g. `https://ferro.example.com/k7f3q9`). All paths below are relative to it.  
 **Authentication:** Every request requires the header `X-Agent-Key: <your-token>`
 
-> **If your harness gives you the tools `list_credentials` and `http_request`**, they are this API as MCP tools ([`ferrowarden-mcp`](mcp.md)). Use them instead of raw HTTP: the bridge holds the agent key, and every rule below still applies. `list_credentials` is `GET /v1/credentials?detail=true`, `http_request` takes the `request` object of Step 2, and an error from Ferrowarden comes back as a tool error with the status, the message and what to do about it.
+> **If your harness gives you the tools `list_credentials` and `http_request`**, they are this API as MCP tools ([`ferrowarden-mcp`](mcp.md)). Use them instead of raw HTTP: the bridge holds the agent key, and every rule below still applies. `list_credentials` is `GET /v1/credentials?detail=true`, `http_request` takes the `request` object of Step 2 (and `capture`, see [Logging in without seeing the token](#logging-in-without-seeing-the-token)), and an error from Ferrowarden comes back as a tool error with the status, the message and what to do about it.
 
 ---
 
@@ -76,6 +76,44 @@ The `status` and `headers` are from the target service. The `body` is the target
 
 ---
 
+## Logging in without seeing the token
+
+Some services log in first (a username and password) and then want a token on every call: Portainer's `jwt`, a Proxmox `ticket`, a session cookie. Do not read that token out of the response and paste it into the next request: it would pass through your context. Ask Ferrowarden to **capture** it instead, by adding `capture` next to `request`:
+
+```json
+{
+  "request": {
+    "method": "POST",
+    "url": "https://portainer.lan:9443/api/auth",
+    "body": { "username": "{{vault:portainer:username}}", "password": "{{vault:portainer}}" }
+  },
+  "capture": [{ "from": "json:/jwt", "as": "portainer" }]
+}
+```
+
+`from` is `json:/pointer` (a string in the JSON body), `header:Name` or `cookie:name` (from `Set-Cookie`). `as` is a name you choose: letters, digits, `_`, `-`, `.`. The response shows `[CAPTURED:portainer]` where the token was, and a `captures` list that says what happened to each entry (`captured`, or why not). Check it: a status other than `captured` means nothing was stored.
+
+Then use the name where the token goes:
+
+```json
+{
+  "request": {
+    "method": "GET",
+    "url": "https://portainer.lan:9443/api/endpoints",
+    "headers": { "Authorization": "Bearer {{session:portainer}}" }
+  }
+}
+```
+
+Rules:
+- A session only works for the **same scheme, host and port** it was captured from, and only for your key. Another origin is `403`; a name that is missing, expired or not yours is `422` (`unknown or expired; log in again`: repeat the login request).
+- Sessions expire (30 minutes by default, sooner if the token says so). `GET /v1/sessions` lists yours (name, host, expiry; never a value). `DELETE /v1/sessions/{name}` forgets one: do that when you are done.
+- `[CAPTURED:name]` in a response is the token, hidden. Do not try to read it back or to make a service print it differently.
+- Capture every token the login response carries (for example the ticket and the CSRF token); one you do not capture stays visible.
+- Details, limits and Proxmox/Portainer examples: [sessions.md](sessions.md).
+
+---
+
 ## Placeholder Syntax
 
 Use placeholders anywhere inside the `url` (path/query), header values, or `body` field. The simplest way to get them right: call `GET /v1/credentials?detail=true` and **copy the placeholder strings it returns** — they are already correctly quoted.
@@ -102,7 +140,7 @@ Placeholders select a value of a Vaultwarden **Login** or **Secure note** item:
 
 Single quotes are used because placeholders usually sit inside JSON strings, where double quotes would need escaping. Names are case-sensitive and must match the vault exactly. **You rarely need to write quoting yourself:** `GET /v1/credentials?detail=true` returns the exact placeholder for every available value.
 
-Anything starting with `{{vault:` that does not parse is rejected with `422` — malformed placeholders are never forwarded.
+Anything starting with `{{vault:` that does not parse is rejected with `422` — malformed placeholders are never forwarded. A captured session is `{{session:NAME}}` (a plain word, no quoting; see above), and a malformed one is a `422` too.
 
 Examples:
 
@@ -203,8 +241,10 @@ All errors return `{"error": "message"}` with an appropriate HTTP status.
 | `403 Forbidden` ("not available to this agent key") | `Credential <name> is not available to this agent key`: your key is not allowed to use that credential. This looks the same whether or not the credential exists | Do not retry with other names or try to discover it. Tell the user which credential you needed so the operator can widen your key's scope |
 | `403 Forbidden` ("method not allowed") | `Method <M> is not allowed for this agent key`: your key may not use that HTTP method | Do not retry with a different method to work around it. Tell the user which method you needed |
 | `403 Forbidden` | The credential is not allowed for this host, or the target is blocked (internal address, the vault backend) | Do not retry with another host. Tell the user which credential and host were refused; the operator must add the host to the vault item's URIs or to `allowed_targets` |
+| `403 Forbidden` ("captured from another origin") | `Session <name> may not be sent to <host>`: that session was captured at a different scheme, host or port | Do not try to work around it. Log in to this host with its own `capture`, or tell the user |
 | `409 Conflict` | The credential name matches more than one vault item, or the field name appears twice on the item | Tell the user; the operator must rename one of them |
 | `422 Unprocessable Entity` | Malformed placeholder, unknown credential, or a value/field the item doesn't have | Call `GET /v1/credentials?detail=true` and copy a placeholder from it |
+| `422 Unprocessable Entity` ("Session ... is unknown or expired") | A `{{session:NAME}}` that is missing, expired, deleted or belongs to another key | Repeat the login request with `capture`, then retry |
 | `429 Too Many Requests` | Rate limit exceeded | Wait the number of seconds in the `Retry-After` header, then retry |
 | `502 Bad Gateway` | Could not reach the target service, timeout, or response too large | The target URL is unreachable; check the URL and network |
 | `503 Service Unavailable` | Vault is locked | Ferrowarden needs to be unlocked by the operator; wait and retry |
@@ -237,6 +277,7 @@ When you need to make an API call that requires credentials:
 2. Identify which credential the target service needs.
 3. Call `POST /v1/forward` with the appropriate `{{vault:name}}` placeholder.
 4. Use the returned `status`, `headers`, and `body` as you would use any HTTP response.
+5. If the service needs a login first, add `capture` to the login request and use `{{session:name}}` afterwards.
 
 A machine-readable description of this API is available too: `GET /v1/openapi.json` with your `X-Agent-Key` returns an OpenAPI 3.1 document listing the operations you can call.
 

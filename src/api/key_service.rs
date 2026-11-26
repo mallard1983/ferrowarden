@@ -359,6 +359,8 @@ async fn revoke_key_inner(state: &Arc<AppState>, id: &str) -> FerroResult<String
 
     // Revoke in memory — takes effect for the very next request.
     state.agent_keys.write().await.retain(|_, k| k.id != id);
+    // The key's captured sessions go with it.
+    crate::sessions::clear_key(state, id, crate::sessions::DeleteCause::KeyRevoke);
 
     tracing::info!(agent_id = %id, "Agent key revoked");
 
@@ -455,6 +457,9 @@ async fn patch_key_inner(
         summary.get_or_insert_with(|| KeySummary::new(key));
     }
     drop(keys);
+    // A policy change ends the key's captured sessions: what was captured
+    // under the old policy is not carried into the new one.
+    crate::sessions::clear_key(state, id, crate::sessions::DeleteCause::KeyPolicyChange);
 
     tracing::info!(agent_id = %id, "Agent key policy changed");
 

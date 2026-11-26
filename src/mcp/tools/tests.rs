@@ -34,7 +34,12 @@ fn http_request_schema_matches_openapi_proxy_request() {
     assert_eq!(ours["type"], proxy["type"]);
     assert_eq!(ours["additionalProperties"], json!(false));
     assert_eq!(proxy["additionalProperties"], json!(false));
-    assert_eq!(keys(&ours["properties"]), keys(&proxy["properties"]));
+    // The tool takes the request members at the top level, and `capture`
+    // (a sibling of `request` in `ForwardPayload`) beside them.
+    let mut proxy_keys = keys(&proxy["properties"]);
+    proxy_keys.push("capture".to_string());
+    proxy_keys.sort();
+    assert_eq!(keys(&ours["properties"]), proxy_keys);
     assert_eq!(
         string_set(&ours["required"]),
         string_set(&proxy["required"])
@@ -73,7 +78,7 @@ fn http_request_maps_to_forward_request_operation() {
     assert_eq!(op["operationId"], "forwardRequest");
     let payload = &spec["components"]["schemas"]["ForwardPayload"];
     assert_eq!(string_set(&payload["required"]), vec!["request"]);
-    assert_eq!(keys(&payload["properties"]), vec!["request"]);
+    assert_eq!(keys(&payload["properties"]), vec!["capture", "request"]);
 
     let args: HttpRequestArgs = serde_json::from_value(json!({
         "method": "POST", "url": "https://api.example.com/x",
@@ -86,6 +91,59 @@ fn http_request_maps_to_forward_request_operation() {
         keys(&sent["request"]),
         vec!["body", "headers", "method", "url"]
     );
+}
+
+/// `capture` has the shape of `CaptureSpec` in the OpenAPI document, and the
+/// tool passes it on as `ForwardPayload.capture`.
+#[test]
+fn http_request_capture_matches_openapi_capture_spec() {
+    let spec = openapi();
+    let capture = &spec["components"]["schemas"]["CaptureSpec"];
+    let ours = Value::Object(http_request_schema());
+    let ours = &ours["properties"]["capture"];
+    let theirs = &spec["components"]["schemas"]["ForwardPayload"]["properties"]["capture"];
+    for key in ["type", "minItems", "maxItems"] {
+        assert_eq!(ours[key], theirs[key], "{key}");
+    }
+    let item = &ours["items"];
+    assert_eq!(item["additionalProperties"], json!(false));
+    assert_eq!(capture["additionalProperties"], json!(false));
+    assert_eq!(keys(&item["properties"]), keys(&capture["properties"]));
+    assert_eq!(
+        string_set(&item["required"]),
+        string_set(&capture["required"])
+    );
+    for p in ["from", "as", "ttl_secs"] {
+        assert_eq!(
+            item["properties"][p]["type"], capture["properties"][p]["type"],
+            "{p}"
+        );
+    }
+    assert_eq!(
+        item["properties"]["as"]["pattern"],
+        capture["properties"]["as"]["pattern"]
+    );
+    assert_eq!(
+        item["properties"]["ttl_secs"]["minimum"],
+        capture["properties"]["ttl_secs"]["minimum"]
+    );
+
+    let args: HttpRequestArgs = serde_json::from_value(json!({
+        "method": "POST", "url": "https://portainer.example.com/api/auth",
+        "capture": [{"from": "json:/jwt", "as": "portainer", "ttl_secs": 60}]
+    }))
+    .unwrap();
+    let sent = args.payload();
+    assert_eq!(keys(&sent), vec!["capture", "request"]);
+    assert_eq!(
+        sent["capture"],
+        json!([{"from": "json:/jwt", "as": "portainer", "ttl_secs": 60}])
+    );
+    assert!(serde_json::from_value::<HttpRequestArgs>(json!({
+        "method": "GET", "url": "https://a.example",
+        "capture": [{"from": "json:/jwt", "as": "x", "extra": 1}]
+    }))
+    .is_err());
 }
 
 /// `list_credentials` takes no arguments and calls `listCredentials` with

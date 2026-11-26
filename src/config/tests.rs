@@ -31,6 +31,7 @@ fn base_config(mode: UnlockMode) -> Config {
             ..Default::default()
         },
         metrics: Default::default(),
+        sessions: Default::default(),
     }
 }
 
@@ -1227,4 +1228,147 @@ fn the_metrics_token_is_redacted_in_debug_output() {
     assert_eq!(cfg.auth(), MetricsAuth::Token);
     assert_eq!(cfg.auth().as_str(), "token");
     assert_eq!(MetricsAuth::None.as_str(), "none");
+}
+
+// ── Captured sessions ─────────────────────────────────────────────────────────
+
+#[test]
+fn sessions_defaults_match_the_documentation() {
+    let s = SessionsConfig::default();
+    assert!(s.enabled);
+    assert_eq!(s.default_ttl_secs, 1800);
+    assert_eq!(s.max_ttl_secs, 86_400);
+    assert_eq!(s.max_per_key, 32);
+    assert!(base_config(UnlockMode::Manual).validate().is_ok());
+}
+
+#[test]
+fn sessions_settings_come_from_the_file_and_the_environment() {
+    let from_file: Config = config::Config::builder()
+        .add_source(config::File::from_str(
+            "unlock_mode = \"manual\"\n[sessions]\nenabled = false\ndefault_ttl_secs = 60\nmax_ttl_secs = 120\nmax_per_key = 4\n",
+            config::FileFormat::Toml,
+        ))
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+    assert_eq!(
+        from_file.sessions,
+        SessionsConfig {
+            enabled: false,
+            default_ttl_secs: 60,
+            max_ttl_secs: 120,
+            max_per_key: 4
+        }
+    );
+    let mut env = std::collections::HashMap::new();
+    env.insert("FERROWARDEN_UNLOCK_MODE".to_string(), "manual".to_string());
+    env.insert(
+        "FERROWARDEN_SESSIONS__MAX_PER_KEY".to_string(),
+        "8".to_string(),
+    );
+    env.insert(
+        "FERROWARDEN_SESSIONS__ENABLED".to_string(),
+        "false".to_string(),
+    );
+    let from_env: Config = config::Config::builder()
+        .add_source(
+            config::Environment::with_prefix("FERROWARDEN")
+                .prefix_separator("_")
+                .separator("__")
+                .ignore_empty(true)
+                .source(Some(env)),
+        )
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+    assert!(!from_env.sessions.enabled);
+    assert_eq!(from_env.sessions.max_per_key, 8);
+    assert_eq!(
+        from_env.sessions.default_ttl_secs, 1800,
+        "the rest keeps its default"
+    );
+}
+
+#[test]
+fn invalid_sessions_settings_fail_validation() {
+    let check = |s: SessionsConfig| {
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.sessions = s;
+        cfg.validate()
+    };
+    let ok = SessionsConfig::default();
+    assert!(check(ok.clone()).is_ok());
+    // Edges that are allowed.
+    assert!(check(SessionsConfig {
+        default_ttl_secs: 1,
+        max_ttl_secs: 1,
+        ..ok.clone()
+    })
+    .is_ok());
+    assert!(check(SessionsConfig {
+        max_ttl_secs: 7 * 24 * 3600,
+        ..ok.clone()
+    })
+    .is_ok());
+    assert!(check(SessionsConfig {
+        max_per_key: 1,
+        ..ok.clone()
+    })
+    .is_ok());
+    assert!(check(SessionsConfig {
+        max_per_key: 256,
+        ..ok.clone()
+    })
+    .is_ok());
+    for (what, bad) in [
+        (
+            "default_ttl_secs",
+            SessionsConfig {
+                default_ttl_secs: 0,
+                ..ok.clone()
+            },
+        ),
+        (
+            "max_ttl_secs",
+            SessionsConfig {
+                default_ttl_secs: 100,
+                max_ttl_secs: 99,
+                ..ok.clone()
+            },
+        ),
+        (
+            "max_ttl_secs",
+            SessionsConfig {
+                max_ttl_secs: 7 * 24 * 3600 + 1,
+                ..ok.clone()
+            },
+        ),
+        (
+            "max_per_key",
+            SessionsConfig {
+                max_per_key: 0,
+                ..ok.clone()
+            },
+        ),
+        (
+            "max_per_key",
+            SessionsConfig {
+                max_per_key: 257,
+                ..ok.clone()
+            },
+        ),
+    ] {
+        let e = check(bad).unwrap_err().to_string();
+        assert!(e.contains(&format!("sessions.{what}")), "{what}: {e}");
+    }
+    // Switched off, the numbers still have to make sense (a typo is not hidden).
+    assert!(check(SessionsConfig {
+        enabled: false,
+        max_per_key: 0,
+        ..ok
+    })
+    .is_err());
 }

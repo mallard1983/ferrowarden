@@ -92,7 +92,7 @@ The scrape is OpenMetrics text (`Content-Type: application/openmetrics-text; ver
 ## How the numbers are made
 
 - **Counters and histograms** are fed by the [security event stream](events.md): the metrics consumer is one more reader of it, like the [push notifier](notifications.md). `EventLog::emit` hands each event to a bounded queue (4096) with `try_send`, and one task turns events into counter and histogram updates. Emitting an event therefore never waits for metrics: a full queue drops the event from the *metrics only* and counts it in `ferrowarden_metrics_events_dropped_total`. Nothing the consumer does can delay a request, a sink or a notification.
-- **Gauges** are read from the live state when you scrape: vault lock state, credential count, last sync, keys, UI sessions, the counters other parts of Ferrowarden keep (dropped events, notifications).
+- **Gauges** are read from the live state when you scrape: vault lock state, credential count, last sync, keys, UI sessions, captured sessions, the counters other parts of Ferrowarden keep (dropped events, notifications).
 - Scrapes are served one at a time. A scrape reads in-memory state only; it makes no call to Vaultwarden or any other service.
 - Series are never removed. A revoked agent key **keeps its series** (a counter that vanishes and returns looks like a reset), so the number of `key` values only grows with the number of keys you have ever used. A restart resets all counters, as Prometheus expects.
 
@@ -118,6 +118,9 @@ Every name starts with `ferrowarden_`. Types are as exposed (the counter `events
 | `ferrowarden_metrics_events_dropped_total` | counter | none | Events not counted in these metrics because the metrics queue was full (see [How the numbers are made](#how-the-numbers-are-made)) |
 | `ferrowarden_notifications_total` | counter | `sender`, `result` | Push notifications: `sender` is `gotify`, `ntfy` or `webhook` with `result` `sent` or `failed`; `sender="all"` carries `suppressed` and `dropped`, which the notifier keeps for all senders together |
 | `ferrowarden_ui_sessions` | gauge | none | Admin UI sessions signed in now (0 when the UI is off) |
+| `ferrowarden_session_captures_total` | counter | `outcome` | `capture` entries of forward requests, by the capture status: `captured`, `not_found`, `not_a_string`, `ambiguous`, `too_short`, `too_long`, `expired`, `limit_reached` ([captured sessions](sessions.md)). All eight series exist from the start |
+| `ferrowarden_session_uses_total` | counter | `outcome` | Forward requests that used a `{{session:NAME}}`: `success`, `unknown_session` or `session_host_not_allowed` |
+| `ferrowarden_sessions_active` | gauge | none | Captured sessions that are live now, all agent keys together. Read from memory when you scrape. A session's name, key and host are never exported |
 | `ferrowarden_forward_credential_uses_total` | counter | `credential` | Only with [`metrics.credential_labels`](#credential-names-as-labels-opt-in) |
 
 Not exported: process metrics (CPU, memory, file descriptors). `prometheus-client` does not provide them for Linux without extra dependencies, and the container runtime or node exporter already does.
@@ -126,7 +129,7 @@ Not exported: process metrics (CPU, memory, file descriptors). `prometheus-clien
 
 Label values come from two places only:
 
-1. **Fixed sets in the code:** `action`, `outcome`, `reason`, `limiter`, `kind`, `policy_set`, notification `sender` and `result`, the version and the vault backend. A value from a request that is not in the set (for example an unknown limiter name) becomes `other`.
+1. **Fixed sets in the code:** `action`, `outcome`, `reason` (and the capture and session-use outcomes), `limiter`, `kind`, `policy_set`, notification `sender` and `result`, the version and the vault backend. A value from a request that is not in the set (for example an unknown limiter name) becomes `other`.
 2. **Names an administrator chose:** the agent key name in `key` (set when the key was created) and, if you opt in, vault item names.
 
 Never a label, and never anywhere in the output: URLs, paths, query strings, hosts, IP addresses, header names or values, placeholders (`{{vault:...}}`), request or response bodies, credential values, tokens, the `api_prefix`. The code has no field to hold them: the label types are built from `&'static str` enums plus the two names above, and the consumer ignores the free-form parts of an event. Tests feed it hostile events with every one of those and check that none reaches a scrape; the integration suite makes real requests with recognisable paths, queries, headers and secrets and checks a scrape of both instances, and the [secret gate](cicd.md) scans a scrape after every CI run.

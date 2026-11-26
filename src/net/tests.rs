@@ -34,6 +34,7 @@ fn cfg(allowed: &str, allow_private: bool) -> Config {
         notify: Default::default(),
         vault,
         metrics: Default::default(),
+        sessions: Default::default(),
     }
 }
 

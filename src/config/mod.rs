@@ -171,6 +171,71 @@ pub struct Config {
     /// in the environment (docs/native-vault.md).
     #[serde(default)]
     pub vault: VaultConfig,
+
+    /// Captured login sessions kept server-side for `{{session:NAME}}`.
+    /// `[sessions]` in the TOML file, `FERROWARDEN_SESSIONS__*` in the
+    /// environment (docs/sessions.md).
+    #[serde(default)]
+    pub sessions: SessionsConfig,
+}
+
+/// Settings of captured sessions (see docs/sessions.md).
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct SessionsConfig {
+    /// Accept `capture` and `{{session:NAME}}`. When false both are refused
+    /// with a 400. Default true.
+    pub enabled: bool,
+    /// Lifetime of a captured value when the request gives no `ttl_secs`, in
+    /// seconds. Default 1800 (30 minutes).
+    pub default_ttl_secs: u64,
+    /// The longest `ttl_secs` a request may ask for, in seconds. At least
+    /// `default_ttl_secs`, at most 7 days. Default 86400 (24 hours).
+    pub max_ttl_secs: u64,
+    /// Live sessions one agent key may hold. 1 to 256. Default 32.
+    pub max_per_key: usize,
+}
+
+/// The longest `sessions.max_ttl_secs` that is accepted: 7 days.
+pub const MAX_SESSION_TTL_CEILING_SECS: u64 = 7 * 24 * 60 * 60;
+/// The most live sessions `sessions.max_per_key` may allow.
+pub const MAX_SESSIONS_PER_KEY_CEILING: usize = 256;
+
+impl Default for SessionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_ttl_secs: 1800,
+            max_ttl_secs: 86_400,
+            max_per_key: 32,
+        }
+    }
+}
+
+impl SessionsConfig {
+    fn validate(&self) -> FerroResult<()> {
+        if self.default_ttl_secs == 0 {
+            return Err(FerroError::Config(
+                "sessions.default_ttl_secs must be greater than 0".to_string(),
+            ));
+        }
+        if self.max_ttl_secs < self.default_ttl_secs {
+            return Err(FerroError::Config(
+                "sessions.max_ttl_secs must be at least sessions.default_ttl_secs".to_string(),
+            ));
+        }
+        if self.max_ttl_secs > MAX_SESSION_TTL_CEILING_SECS {
+            return Err(FerroError::Config(format!(
+                "sessions.max_ttl_secs may be at most {MAX_SESSION_TTL_CEILING_SECS} (7 days)"
+            )));
+        }
+        if self.max_per_key == 0 || self.max_per_key > MAX_SESSIONS_PER_KEY_CEILING {
+            return Err(FerroError::Config(format!(
+                "sessions.max_per_key must be between 1 and {MAX_SESSIONS_PER_KEY_CEILING}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Settings of the admin web UI.
@@ -1176,6 +1241,7 @@ impl Config {
         self.ui.validate()?;
         self.notify.validate()?;
         self.metrics.validate(&self.bind_addr, &self.ui.bind)?;
+        self.sessions.validate()?;
         for warning in self.vault.validate(self.bw_serve_url.is_some())? {
             tracing::warn!("{warning}");
         }
