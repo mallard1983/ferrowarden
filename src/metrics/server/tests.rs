@@ -43,6 +43,7 @@ fn config(token: Option<&str>) -> Config {
             ..Default::default()
         },
         sessions: Default::default(),
+        approval: Default::default(),
     }
 }
 

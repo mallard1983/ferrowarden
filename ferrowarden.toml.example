@@ -170,7 +170,7 @@ max_response_bytes = 10485760
 # gotify_url = "https://gotify.example.com"               # POST {gotify_url}/message
 # ntfy_url = "https://ntfy.example.com/ferrowarden"       # the full topic URL
 # webhook_url = "https://hooks.example.com/ferrowarden"   # JSON POST (Matrix, Slack, ... via their bridges)
-# events = ["blocked", "auth_failure", "vault", "system"]   # add "admin" for key changes and UI sign-ins
+# events = ["blocked", "auth_failure", "vault", "system", "approval"]   # add "admin" for key changes and UI sign-ins; "approval" is the prompt for a request waiting for a human (docs/approvals.md)
 # min_interval_secs = 60          # per category and subject; the rest are summarised
 # max_per_hour = 60               # all notifications together, then one "paused" notice
 # auth_failure_threshold = 5      # failed authentications from one IP ...
@@ -219,6 +219,25 @@ max_response_bytes = 10485760
 # max_per_key = 32          # live sessions per agent key, 1 to 256
 
 
+# ── Human approval ──────────────────────────────────────────────────────────
+#
+# A credential can need a human's approval before an agent uses it: its vault
+# item has a `ferrowarden_approval` field, or the agent key's `approval`
+# patterns match its name. The request is held, a notification asks you, and
+# you decide in the admin UI (Approvals page) or with the admin API. Grants,
+# open approvals and denials live in memory only. See docs/approvals.md.
+# Environment: FERROWARDEN_APPROVAL__<KEY>.
+#
+# [approval]
+# wait_secs = 60                  # how long a request is held for a decision, 1 to 300.
+#                                 # A reverse proxy in front of the API needs a read timeout above it.
+# pending_ttl_secs = 600          # how long an approval stays open (and a denial stands); >= wait_secs, <= 3600
+# max_grant_minutes = 480         # the longest grant an approver may give, 1 to 10080
+# max_pending_per_key = 3         # distinct open approvals per agent key, 1 to 50
+# max_requests_per_key_per_hour = 20   # new prompts one agent key may cause per rolling hour, 1 to 1000
+# max_waiters_per_key = 8         # held requests per agent key; beyond that answers approval_pending at once, 1 to 100
+
+
 # ── Admin web UI ────────────────────────────────────────────────────────────
 #
 # Optional operator UI on its own port (separate from the API): sign in with the
@@ -235,6 +254,7 @@ max_response_bytes = 10485760
 # insecure_http = false                          # true = plain-HTTP sign-in form (local testing only)
 # session_idle_minutes = 15
 # session_max_hours = 8
+# public_url = "https://ferrowarden-admin.example.com"   # the address you reach the UI at: approval prompts link to <public_url>/approvals/<id>
 
 
 # ── API path prefix ─────────────────────────────────────────────────────────

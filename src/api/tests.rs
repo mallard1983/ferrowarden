@@ -62,6 +62,7 @@ fn build_configured(
         vault: crate::config::VaultConfig::default(),
         metrics: Default::default(),
         sessions: Default::default(),
+        approval: Default::default(),
     };
     tweak(&mut cfg);
     let state = Arc::new(AppState::new(cfg, Arc::new(EventLog::buffer_only(100))));
@@ -960,11 +961,11 @@ async fn patch_emits_key_policy_change_with_before_and_after() {
     assert_eq!(d["key_name"], "audited");
     assert_eq!(
         d["before"],
-        json!({"credentials": ["a"], "methods": ["GET"]})
+        json!({"credentials": ["a"], "methods": ["GET"], "approval": []})
     );
     assert_eq!(
         d["after"],
-        json!({"credentials": ["a"], "methods": ["POST"]})
+        json!({"credentials": ["a"], "methods": ["POST"], "approval": []})
     );
     assert_eq!(events[1]["event"]["reason"], "invalid_request");
     assert_eq!(events[0]["event"]["reason"], "key_not_found");
@@ -998,11 +999,11 @@ async fn preview_diffs_draft_against_saved_and_saves_nothing() {
     assert_eq!(j["key"]["name"], "pv");
     assert_eq!(
         j["saved_policy"],
-        json!({"credentials": ["lab_*"], "methods": ["*"]})
+        json!({"credentials": ["lab_*"], "methods": ["*"], "approval": []})
     );
     assert_eq!(
         j["draft_policy"],
-        json!({"credentials": ["lab_nas", "prod_*"], "methods": ["GET"]})
+        json!({"credentials": ["lab_nas", "prod_*"], "methods": ["GET"], "approval": []})
     );
     assert_eq!(j["gained"], json!(["prod_db"]));
     assert_eq!(j["lost"], json!(["lab_router"]));
@@ -2652,3 +2653,5 @@ async fn the_policy_preview_checks_session_syntax_but_not_the_store() {
     assert_eq!(j["request_check"]["reason"], "sessions_disabled");
     assert_eq!(j["request_check"]["status"], 400);
 }
+
+mod approvals;

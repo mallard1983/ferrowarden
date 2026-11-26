@@ -197,7 +197,7 @@ Binding applies to every value of an item — username, TOTP, notes and custom f
 - A reserved custom field **`ferrowarden_uris`** (comma- or newline-separated URIs), if present. It gives **secure notes** a binding and overrides a login's URIs, so autofill URIs and agent bindings can differ.
 - Otherwise the login's URIs, **excluding** those whose Bitwarden match type is *regex* or *never*.
 
-Items with **master password re-prompt** enabled are refused (`403`) — Vaultwarden's API does not enforce re-prompt itself, so Ferrowarden treats it as "never hand this to an agent" until human approval (#14) is available.
+Items with **master password re-prompt** enabled are refused (`403`) — Vaultwarden's API does not enforce re-prompt itself, so Ferrowarden treats it as "never hand this to an agent". Human approval (property 21) is a different feature: it is how an item that may be used with a person's consent is marked.
 
 **What is scrubbed:** passwords, notes and text/hidden custom fields. Usernames, TOTP codes and boolean fields are **not** treated as secret and are not scrubbed from responses — redacting values such as `admin`, `true` or six-digit numbers would corrupt ordinary output.
 
@@ -318,6 +318,30 @@ Some APIs log in first and return a session token (a JWT, a cookie, a ticket). W
 - A process memory dump contains the sessions, as it contains the vault's keys (property 18).
 - There is no key-policy field for sessions in this release. A key that may call a login endpoint may capture; `sessions.enabled = false` turns the feature off. The decision, and why every policy change clears the key's sessions, are in [sessions.md](sessions.md#policy).
 
+### 21. Human Approval
+
+A credential can be marked as needing a person's decision before an agent uses it: by a reserved `ferrowarden_approval` field on its vault item, or by a pattern in the agent key's `approval` list ([approvals.md](approvals.md)). Either is enough and neither can switch off the other. The new property: **a value for such an item is never fetched from the vault, and nothing is sent to the target, without a human decision for that key, that item and that target origin.**
+
+| Risk | Control |
+|---|---|
+| The request being sent, or the value fetched, before anyone decided | The gate is the last check of `/v1/forward`, **before** `fetch_credentials` and before any connection. The request is held (`approval.wait_secs`) and then answered `approval_pending`: it does not proceed on a timeout. Tests assert that the vault was not read and the target saw nothing for pending and denied requests |
+| The agent approving its own request | No agent route decides. The decisions are the admin API (the admin key; an agent key is refused with `401`, in any header) and the admin UI, which needs a signed-in session, a sign-in within the last 10 minutes, the CSRF token and a same-origin request. The approval id in a link is unguessable (at least 128 bits) and is **not a capability**: it opens nothing without a session |
+| A key policy or a typo switching approval off | The vault field wins: a key's `approval` list can only add. Any value of the field other than `required`, an empty one included, still means required, and is counted as a warning in `vault_sync`. Removing or narrowing a key's `approval` patterns is a **widening**, which the UI asks you to confirm |
+| An agent flooding the operator with prompts | Per key: at most `approval.max_pending_per_key` open approvals (3), `approval.max_requests_per_key_per_hour` new prompts in a sliding hour (20) and `approval.max_waiters_per_key` held requests (8); beyond them `429 approval_limit_reached` or an immediate `approval_pending`. These are in addition to the agent rate limiter. A request that waits on an approval that is already open sends no second prompt |
+| Re-asking after a denial | A denial stands for `approval.pending_ttl_secs`: the key gets `approval_denied` at once, with no new prompt |
+| An approval outliving its authority | Grants and open approvals are in memory only. Revoking the key, changing its policy or locking the vault clears them; a person can revoke a grant; a restart empties them. Each has a time limit chosen by the approver, at most `approval.max_grant_minutes` |
+| Values in the prompt, in events or in the page | The prompt and the approval page show what the agent **sent**, with placeholders: nothing has been read from the vault yet, so there is no value to show. Events carry names, host, path (no query), ids and the approver, never a value; the CI secret gate scans them |
+
+**The prompt carries more than other notifications.** Other notifications show the target **host** only. The approval prompt also carries the method, the host's port and the **path** (without the query string, cut to 200 characters), because you cannot decide without them. It never carries the query string, headers, body or a value. The path is chosen by the agent, so treat it as text from the agent. Keep the notifier on a channel you trust ([notifications.md](notifications.md#the-approval-prompt)).
+
+**What this does not protect against.**
+
+- A grant covers the key, the item and the origin for its minutes, **not only the request shown**. A prompt-injected agent can use the window. Use short grants for sensitive items and revoke early.
+- The approver decides from what the agent sent. An agent that dresses a destructive request as an innocent one is not stopped by Ferrowarden.
+- Approval does not replace host binding, the target policy or scrubbing; after a yes they apply as before.
+- The approver identity in events is the vault account signed in to the UI, or `admin_api`. There is one account: the events do not tell two people apart.
+- A held request occupies a connection for up to `approval.wait_secs`; a reverse proxy in front of the API needs a read timeout above it ([approvals.md](approvals.md#reverse-proxies-and-timeouts)).
+
 ### 19. The Metrics Listener
 
 The optional [Prometheus endpoint](metrics.md) (`metrics.bind`) is a third listener, off by default. It exposes counts and state, not secrets, but it is still an information source about your vault and your agents, so it is built to leak as little as possible and to be hard to misconfigure.
@@ -371,7 +395,8 @@ Before going to production:
 - [ ] The `internal-pki` volume (internal CA key) is backed up or treated as regenerable, and not copied elsewhere
 - [ ] Every vault item agents use has URIs for exactly the hosts it belongs to, and `enforce_credential_hosts` is `true`
 - [ ] `allowed_targets` lists only the internal hosts/ranges agents need; `allow_private_targets` is `false`
-- [ ] If a reverse proxy fronts Ferrowarden, `trusted_proxies` is set to its address (and nothing else)
+- [ ] If a reverse proxy fronts Ferrowarden, `trusted_proxies` is set to its address (and nothing else), and its read timeout for the API is above `approval.wait_secs` (60 seconds by default, 300 at most) if you use [human approval](approvals.md)
+- [ ] Credentials that should not be used without a person (root tokens, firewalls) carry a `ferrowarden_approval` field or are listed in the agent key's `approval` patterns, and a notifier delivers the prompt
 - [ ] The admin UI is disabled (`ui.bind` empty) unless you use it; if enabled, it is served over HTTPS (never `ui.insecure_http`), its port is not reachable from agent networks, and the Vaultwarden account has two-step login. `ferrowarden` mounts `internal-ca-public`, never `internal-pki` (see [admin-ui.md](admin-ui.md))
 - [ ] TLS is configured — either Ferrowarden's built-in TLS or a TLS-terminating proxy (Pangolin, Caddy, Nginx). See [docs/tls.md](tls.md) for both options. If TLS is disabled, Ferrowarden and the agent must run on the same host with no network hop.
 - [ ] `tls_cert_file` and `tls_key_file` point to valid, non-expired certificates

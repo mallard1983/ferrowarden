@@ -38,6 +38,7 @@ async fn api_key(h: &Harness, name: &str, creds: &[&str], methods: &[&str]) -> S
         name,
         creds.iter().map(|s| s.to_string()).collect(),
         methods.iter().map(|s| s.to_string()).collect(),
+        Vec::new(),
     )
     .await
     .unwrap()

@@ -32,6 +32,7 @@ fn base_config(mode: UnlockMode) -> Config {
         },
         metrics: Default::default(),
         sessions: Default::default(),
+        approval: Default::default(),
     }
 }
 
@@ -470,7 +471,10 @@ fn tokens_from(env: &[(&str, &str)], files: &[(&str, &[u8])]) -> FerroResult<Not
 fn notify_defaults_match_the_documentation() {
     let n = NotifyConfig::default();
     assert!(!n.enabled());
-    assert_eq!(n.events, ["blocked", "auth_failure", "vault", "system"]);
+    assert_eq!(
+        n.events,
+        ["blocked", "auth_failure", "vault", "system", "approval"]
+    );
     assert_eq!(n.min_interval_secs, 60);
     assert_eq!(n.max_per_hour, 60);
     assert_eq!(n.auth_failure_threshold, 5);
@@ -1371,4 +1375,186 @@ fn invalid_sessions_settings_fail_validation() {
         ..ok
     })
     .is_err());
+}
+
+// ── [approval] and ui.public_url ──────────────────────────────────────────
+
+#[test]
+fn approval_defaults_match_the_documentation() {
+    let a = ApprovalConfig::default();
+    assert_eq!(a.wait_secs, 60);
+    assert_eq!(a.pending_ttl_secs, 600);
+    assert_eq!(a.max_grant_minutes, 480);
+    assert_eq!(a.max_pending_per_key, 3);
+    assert_eq!(a.max_requests_per_key_per_hour, 20);
+    assert_eq!(a.max_waiters_per_key, 8);
+    assert!(base_config(UnlockMode::Manual).validate().is_ok());
+    assert_eq!(UiConfig::default().public_url, "");
+}
+
+#[test]
+fn the_approval_section_comes_from_the_file_and_the_environment() {
+    let from_file = from_toml(
+        r#"
+        unlock_mode = "manual"
+        [approval]
+        wait_secs = 90
+        max_waiters_per_key = 2
+        [ui]
+        public_url = "https://fw.example.com/"
+        "#,
+    )
+    .unwrap();
+    assert_eq!(from_file.approval.wait_secs, 90);
+    assert_eq!(from_file.approval.max_waiters_per_key, 2);
+    assert_eq!(
+        from_file.approval.pending_ttl_secs, 600,
+        "the rest keeps its default"
+    );
+    assert_eq!(from_file.ui.public_url, "https://fw.example.com/");
+    let from_env = from_env(&[
+        ("FERROWARDEN_UNLOCK_MODE", "manual"),
+        ("FERROWARDEN_APPROVAL__WAIT_SECS", "5"),
+        ("FERROWARDEN_APPROVAL__PENDING_TTL_SECS", "50"),
+        ("FERROWARDEN_APPROVAL__MAX_GRANT_MINUTES", "30"),
+        ("FERROWARDEN_APPROVAL__MAX_PENDING_PER_KEY", "4"),
+        ("FERROWARDEN_APPROVAL__MAX_REQUESTS_PER_KEY_PER_HOUR", "7"),
+        ("FERROWARDEN_UI__PUBLIC_URL", "https://fw.example.com"),
+    ])
+    .unwrap();
+    assert_eq!(from_env.approval.wait_secs, 5);
+    assert_eq!(from_env.approval.pending_ttl_secs, 50);
+    assert_eq!(from_env.approval.max_grant_minutes, 30);
+    assert_eq!(from_env.approval.max_pending_per_key, 4);
+    assert_eq!(from_env.approval.max_requests_per_key_per_hour, 7);
+    assert_eq!(from_env.ui.public_url, "https://fw.example.com");
+    // An unknown key is not silently accepted as a value.
+    let bad = from_toml(
+        r#"
+        unlock_mode = "manual"
+        [approval]
+        wait_secs = "soon"
+        "#,
+    );
+    assert!(bad.is_err());
+}
+
+#[test]
+fn invalid_approval_settings_fail_validation() {
+    let check = |f: &dyn Fn(&mut ApprovalConfig)| {
+        let mut cfg = base_config(UnlockMode::Manual);
+        f(&mut cfg.approval);
+        cfg.validate()
+    };
+    // Every edge that is allowed.
+    assert!(check(&|a| {
+        a.wait_secs = 1;
+        a.pending_ttl_secs = 1;
+    })
+    .is_ok());
+    assert!(check(&|a| {
+        a.wait_secs = 300;
+        a.pending_ttl_secs = 3600;
+    })
+    .is_ok());
+    assert!(check(&|a| a.pending_ttl_secs = a.wait_secs).is_ok());
+    assert!(check(&|a| a.max_grant_minutes = 1).is_ok());
+    assert!(check(&|a| a.max_grant_minutes = 10_080).is_ok());
+    assert!(check(&|a| a.max_pending_per_key = 50).is_ok());
+    assert!(check(&|a| a.max_requests_per_key_per_hour = 1000).is_ok());
+    assert!(check(&|a| a.max_waiters_per_key = 100).is_ok());
+    // And one step beyond each.
+    let msg = |f: &dyn Fn(&mut ApprovalConfig)| check(f).unwrap_err().to_string();
+    assert!(msg(&|a| a.wait_secs = 0).contains("approval.wait_secs"));
+    assert!(msg(&|a| a.wait_secs = 301).contains("approval.wait_secs"));
+    assert!(msg(&|a| a.pending_ttl_secs = a.wait_secs - 1).contains("at least approval.wait_secs"));
+    assert!(msg(&|a| a.pending_ttl_secs = 3601).contains("approval.pending_ttl_secs"));
+    assert!(msg(&|a| a.max_grant_minutes = 0).contains("approval.max_grant_minutes"));
+    assert!(msg(&|a| a.max_grant_minutes = 10_081).contains("approval.max_grant_minutes"));
+    assert!(msg(&|a| a.max_pending_per_key = 0).contains("approval.max_pending_per_key"));
+    assert!(msg(&|a| a.max_pending_per_key = 51).contains("approval.max_pending_per_key"));
+    assert!(msg(&|a| a.max_requests_per_key_per_hour = 0).contains("max_requests_per_key_per_hour"));
+    assert!(
+        msg(&|a| a.max_requests_per_key_per_hour = 1001).contains("max_requests_per_key_per_hour")
+    );
+    assert!(msg(&|a| a.max_waiters_per_key = 0).contains("approval.max_waiters_per_key"));
+    assert!(msg(&|a| a.max_waiters_per_key = 101).contains("approval.max_waiters_per_key"));
+    // The wait must fit under the open time: raising it past the default open
+    // time alone is fine (300 < 600), past it is an error.
+    assert!(check(&|a| a.wait_secs = 300).is_ok());
+    assert!(msg(&|a| {
+        a.wait_secs = 200;
+        a.pending_ttl_secs = 199;
+    })
+    .contains("at least approval.wait_secs"));
+}
+
+#[test]
+fn the_public_url_is_validated_and_makes_the_approval_link() {
+    let check = |url: &str, insecure: bool| {
+        let mut cfg = base_config(UnlockMode::Manual);
+        cfg.ui.public_url = url.to_string();
+        cfg.ui.insecure_http = insecure;
+        cfg.validate()
+    };
+    for ok in [
+        "",
+        "https://fw.example.com",
+        "https://fw.example.com/",
+        "https://fw.example.com:8443/base",
+        "https://[2001:db8::1]:3001",
+    ] {
+        assert!(check(ok, false).is_ok(), "{ok}");
+    }
+    // `http://` only with `ui.insecure_http`.
+    assert!(check("http://fw.lan:3001", false).is_err());
+    assert!(check("http://fw.lan:3001", true).is_ok());
+    for bad in [
+        "fw.example.com",
+        "/approvals",
+        "ftp://fw.example.com",
+        "https://",
+        "https://u:p@fw.example.com",
+        "https://fw.example.com/?x=1",
+        "https://fw.example.com/#f",
+        "not a url",
+    ] {
+        assert!(check(bad, true).is_err(), "{bad}");
+    }
+    // Validated even when the UI is off (the setting is still wrong).
+    assert!(check("nope", false).is_err());
+    let err = check("http://fw.lan", false).unwrap_err().to_string();
+    assert!(
+        err.contains("ui.public_url") && err.contains("insecure_http"),
+        "{err}"
+    );
+
+    let mut ui = UiConfig::default();
+    assert_eq!(ui.approval_link("abc"), None);
+    ui.public_url = "https://fw.example.com/".into();
+    assert_eq!(
+        ui.approval_link("abc").as_deref(),
+        Some("https://fw.example.com/approvals/abc")
+    );
+    ui.public_url = "https://fw.example.com/base".into();
+    assert_eq!(
+        ui.approval_link("abc").as_deref(),
+        Some("https://fw.example.com/base/approvals/abc")
+    );
+}
+
+#[test]
+fn the_approval_category_is_valid_and_on_by_default() {
+    let mut cfg = base_config(UnlockMode::Manual);
+    cfg.notify.events = vec!["approval".into()];
+    assert!(cfg.validate().is_ok());
+    assert!(cfg
+        .notify
+        .categories()
+        .contains(crate::notify::Category::Approval));
+    cfg.notify.events = vec!["nope".into()];
+    assert!(cfg.validate().unwrap_err().to_string().contains("approval"));
+    assert!(NotifyConfig::default()
+        .categories()
+        .contains(crate::notify::Category::Approval));
 }

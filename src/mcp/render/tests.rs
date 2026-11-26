@@ -179,3 +179,64 @@ fn error_text_includes_status_message_id_and_guidance() {
     assert!(no_msg.contains("HTTP 500."));
     assert!(no_msg.contains("Message: (none)"));
 }
+
+#[test]
+fn approval_codes_are_read_from_the_error_body_and_only_the_known_ones() {
+    assert_eq!(
+        approval_code(br#"{"error":"x","code":"approval_pending"}"#),
+        Some("approval_pending")
+    );
+    assert_eq!(
+        approval_code(br#"{"error":"x","code":"approval_denied"}"#),
+        Some("approval_denied")
+    );
+    assert_eq!(
+        approval_code(br#"{"error":"x","code":"approval_limit_reached"}"#),
+        Some("approval_limit_reached")
+    );
+    for body in [
+        br#"{"error":"x"}"#.as_slice(),
+        br#"{"error":"x","code":"other"}"#,
+        br#"{"error":"x","code":5}"#,
+        b"<html>",
+    ] {
+        assert_eq!(approval_code(body), None);
+    }
+    assert_eq!(
+        approval_id(br#"{"approval_id":"2m3x8Qk0Zr-_"}"#).as_deref(),
+        Some("2m3x8Qk0Zr-_")
+    );
+    for bad in [
+        br#"{"approval_id":""}"#.as_slice(),
+        br#"{"approval_id":"a b"}"#,
+        br#"{"approval_id":"a\nb"}"#,
+        br#"{"approval_id":7}"#,
+    ] {
+        assert_eq!(approval_id(bad), None);
+    }
+    let long = format!(r#"{{"approval_id":"{}"}}"#, "a".repeat(65));
+    assert_eq!(approval_id(long.as_bytes()), None);
+}
+
+#[test]
+fn approval_text_says_what_to_do_in_each_case() {
+    let pending = approval_error_text(
+        403,
+        "approval_pending",
+        Some("Approval required"),
+        Some("req-1"),
+        Some("abc123"),
+    );
+    assert!(pending.contains("HTTP 403 Forbidden, approval_pending"));
+    assert!(pending.contains("Approval ID: abc123") && pending.contains("approval id abc123"));
+    assert!(pending.contains("Request ID: req-1"));
+    assert!(pending.contains("Ask your human to approve it in the Ferrowarden admin UI"));
+    assert!(pending.contains("retry the same request unchanged"));
+    let denied = approval_error_text(403, "approval_denied", None, None, None);
+    assert!(denied.contains("Message: (none)"));
+    assert!(denied.contains("Stop: do not retry it"));
+    assert!(!denied.contains("Approval ID"));
+    let limit = approval_error_text(429, "approval_limit_reached", None, None, None);
+    assert!(limit.contains("HTTP 429 Too Many Requests"));
+    assert!(limit.contains("Do not retry now"));
+}

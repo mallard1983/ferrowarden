@@ -5,7 +5,11 @@
 //! these things: the category and action, the outcome and reason code, the key
 //! name and short id, the credential names (placeholder labels), the target
 //! **host** (`url.domain`, never `url.original`), the source IP, the request id
-//! and the timestamp, plus one count. Every title and message is rendered from
+//! and the timestamp, plus one count. The one exception is the approval prompt
+//! (`approval_requested`), which also carries the method, the target host with
+//! its port, the path **without the query string** (cut to 200 characters),
+//! the approval id, its expiry and a link: the operator needs them to decide.
+//! Every title and message is rendered from
 //! an `EventFields` and nothing else, and the webhook's `event` object is that
 //! same struct serialized, so there is no field for a URL path or query, a
 //! header name or value, a body, a credential value, a token, the API prefix or
@@ -18,7 +22,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::Category;
-use crate::events::{Outcome, SecurityEvent};
+use crate::events::{Action, Outcome, SecurityEvent};
 
 /// Longest name (key or credential) in a notification.
 const MAX_NAME: usize = 48;
@@ -28,6 +32,10 @@ const MAX_CREDENTIALS: usize = 10;
 const NAMES_IN_MESSAGE: usize = 3;
 /// Longest host name (RFC 1035).
 const MAX_HOST: usize = 253;
+/// Longest path in an approval prompt.
+const MAX_PATH: usize = 200;
+/// Longest link in an approval prompt.
+const MAX_LINK: usize = 512;
 
 /// How urgent a notification is. Maps to Gotify priority 8/4 and ntfy
 /// `high`/`default`.
@@ -89,6 +97,54 @@ pub struct EventFields {
     pub timestamp: String,
     /// How many occurrences this notification stands for.
     pub count: u64,
+    /// What an approval prompt shows (`approval_requested` only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalFields>,
+}
+
+/// The fields of an approval prompt beyond the common ones. Never a value: the
+/// path has no query string, and the credentials are names.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ApprovalFields {
+    pub id: String,
+    pub method: String,
+    /// The target host, with `:port` when the port is not the default.
+    pub target: String,
+    /// The path as the agent sent it, without query or fragment, cut to 200
+    /// characters.
+    pub path: String,
+    /// RFC 3339, UTC.
+    pub expires_at: String,
+    /// `<ui.public_url>/approvals/<id>`, when `ui.public_url` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+}
+
+impl ApprovalFields {
+    fn from_event(event: &SecurityEvent) -> Option<Self> {
+        if event.event.action != Action::ApprovalRequested {
+            return None;
+        }
+        let details = event.ferrowarden.details.as_ref()?;
+        let text = |key: &str| details.get(key).and_then(Value::as_str);
+        Some(Self {
+            id: clean_token(text("approval_id")?, 64),
+            method: clean_id(
+                &event
+                    .http
+                    .as_ref()?
+                    .request
+                    .as_ref()?
+                    .method
+                    .to_ascii_uppercase(),
+                16,
+            ),
+            target: clean_host(text("host")?)?,
+            path: clean_path(text("path").unwrap_or("/")),
+            expires_at: clean_time(text("expires_at")?),
+            link: text("link").and_then(clean_link),
+        })
+    }
 }
 
 impl EventFields {
@@ -132,6 +188,7 @@ impl EventFields {
                 .filter(|r| !r.is_empty()),
             timestamp: rfc3339(event.timestamp),
             count,
+            approval: ApprovalFields::from_event(event),
         }
     }
 
@@ -157,6 +214,7 @@ impl EventFields {
             request_id: None,
             timestamp: rfc3339(at),
             count,
+            approval: None,
         }
     }
 }
@@ -187,6 +245,40 @@ fn clean_name(s: &str, max: usize) -> String {
 fn clean_id(s: &str, max: usize) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(max)
+        .collect()
+}
+
+/// A path for display: printable ASCII only (anything else becomes `?`), cut
+/// to [`MAX_PATH`] characters. The query string is gone before it gets here.
+fn clean_path(s: &str) -> String {
+    let path = s.split(['?', '#']).next().unwrap_or("");
+    path.chars()
+        .take(MAX_PATH)
+        .map(|c| if c.is_ascii_graphic() { c } else { '?' })
+        .collect()
+}
+
+/// An RFC 3339 time: digits and `-:.TZ+` only.
+fn clean_time(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_digit() || matches!(c, '-' | ':' | '.' | 'T' | 'Z' | '+'))
+        .take(40)
+        .collect()
+}
+
+/// A link for display: an absolute `http(s)` URL of printable ASCII.
+fn clean_link(s: &str) -> Option<String> {
+    let ok = s.len() <= MAX_LINK
+        && (s.starts_with("https://") || s.starts_with("http://"))
+        && s.chars().all(|c| c.is_ascii_graphic());
+    ok.then(|| s.to_string())
+}
+
+/// A URL-safe token (an approval id): letters, digits, `-` and `_`.
+fn clean_token(s: &str, max: usize) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
         .take(max)
         .collect()
 }
@@ -229,6 +321,8 @@ pub enum Kind {
         limit: u32,
     },
     Test,
+    /// A request is waiting for a human to approve or deny it.
+    ApprovalRequest,
 }
 
 impl Kind {
@@ -242,7 +336,8 @@ impl Kind {
             | Kind::VaultSyncFailed
             | Kind::EventsDropped
             | Kind::NotificationsDropped
-            | Kind::Paused { .. } => Severity::High,
+            | Kind::Paused { .. }
+            | Kind::ApprovalRequest => Severity::High,
             Kind::VaultRecovered
             | Kind::KeyCreated
             | Kind::KeyRevoked
@@ -263,6 +358,7 @@ impl Kind {
             Kind::VaultLocked | Kind::VaultUnlockFailed | Kind::VaultSyncFailed => "lock",
             Kind::VaultRecovered | Kind::Test => "white_check_mark",
             Kind::KeyCreated | Kind::KeyRevoked | Kind::KeyPolicyChanged | Kind::UiSignIn => "key",
+            Kind::ApprovalRequest => "key,hourglass_flowing_sand",
         }
     }
 
@@ -283,6 +379,7 @@ impl Kind {
             Kind::NotificationsDropped => "Ferrowarden: notifications dropped",
             Kind::Paused { .. } => "Ferrowarden: notifications paused",
             Kind::Test => "Ferrowarden: test notification",
+            Kind::ApprovalRequest => "Ferrowarden: approval needed",
         }
     }
 }
@@ -508,7 +605,35 @@ fn message(kind: &Kind, f: &EventFields) -> String {
             f.count
         ),
         Kind::Test => "This is a test notification from Ferrowarden. If you can read it, this notifier is set up correctly.".to_string(),
+        Kind::ApprovalRequest => approval_message(f),
     }
+}
+
+/// The approval prompt: who, which credentials, what request, how to decide.
+/// Nothing a request carried beyond its method, host and path.
+fn approval_message(f: &EventFields) -> String {
+    let who = key_phrase(f, "An agent key");
+    let what = if f.credentials.is_empty() {
+        "a credential".to_string()
+    } else {
+        list(&f.credentials)
+    };
+    let Some(a) = &f.approval else {
+        return format!("{who} is waiting for approval to use {what}.");
+    };
+    let expires = DateTime::parse_from_rfc3339(&a.expires_at)
+        .map(|t| t.with_timezone(&Utc).format("%H:%M UTC").to_string())
+        .unwrap_or_else(|_| a.expires_at.clone());
+    let decide = match &a.link {
+        Some(link) => format!("Approve or deny: {link}"),
+        None => {
+            "Open the Approvals page of the Ferrowarden admin UI to approve or deny.".to_string()
+        }
+    };
+    format!(
+        "{who} wants to use {what} for {} {}{}. {decide} Approval {}, open until {expires}.",
+        a.method, a.target, a.path, a.id
+    )
 }
 
 /// ` Request 0193abcd….` when only a request id is worth showing.

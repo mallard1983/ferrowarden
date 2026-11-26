@@ -30,6 +30,7 @@ fn policy(allowed: &str) -> Arc<TargetPolicy> {
         vault: crate::config::VaultConfig::default(),
         metrics: Default::default(),
         sessions: Default::default(),
+        approval: Default::default(),
     }))
 }
 

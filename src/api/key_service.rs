@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::api::credentials::{visible_details, CredentialDetail};
 use crate::api::forward::check_only;
+use crate::approvals::{self, ApprovalNeed, ClearCause, Reasons};
 use crate::error::{FerroError, FerroResult};
 use crate::events::{Action, Outcome, Reason, SecurityEvent};
 use crate::keys::{hash_token, load, save, StoredKey};
@@ -56,7 +57,7 @@ pub struct Caller<'a> {
 
 impl Caller<'_> {
     /// A new event of `action` with the request context and `via` attached.
-    fn event(&self, action: Action) -> SecurityEvent {
+    pub(crate) fn event(&self, action: Action) -> SecurityEvent {
         SecurityEvent::new(action)
             .request(self.ctx)
             .detail("via", self.via.as_str())
@@ -74,6 +75,8 @@ pub struct CreateKeyResponse {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub credentials: Vec<String>,
     pub methods: Vec<String>,
+    /// Credential patterns that need a human's approval for this key.
+    pub approval: Vec<String>,
     pub policy_set: bool,
 }
 
@@ -86,6 +89,9 @@ pub struct KeySummary {
     pub credentials: Vec<String>,
     /// Methods the key may use (`["*"]` = all, `[]` = none).
     pub methods: Vec<String>,
+    /// Credential patterns that need a human's approval for this key
+    /// (`["*"]` = every credential, `[]` = no extra requirement).
+    pub approval: Vec<String>,
     /// False for a key created with 0.1.0 that has no policy yet: it is
     /// deny-all until one is set with PATCH.
     pub policy_set: bool,
@@ -99,6 +105,7 @@ impl KeySummary {
             created_at: k.created_at,
             credentials: k.policy.credentials.clone(),
             methods: k.policy.methods.clone(),
+            approval: k.policy.approval.clone(),
             policy_set: k.policy_set,
         }
     }
@@ -121,6 +128,10 @@ pub struct Preview {
     pub credentials: Vec<CredentialDetail>,
     pub gained: Vec<String>,
     pub lost: Vec<String>,
+    /// The credentials the draft reaches that would need a human's approval,
+    /// and why (the vault item's field, the draft's `approval` patterns, or
+    /// both).
+    pub approval_required: Vec<ApprovalNeed>,
     /// Present only if a request was supplied.
     pub request_check: Option<RequestCheck>,
 }
@@ -131,6 +142,9 @@ pub struct RequestCheck {
     pub status: Option<u16>,
     pub reason: Option<Reason>,
     pub message: Option<String>,
+    /// When allowed: the request's credentials that would need approval. A
+    /// preview never asks for one.
+    pub approval: Vec<ApprovalNeed>,
 }
 
 /// The one check a preview cannot run: it never resolves or connects.
@@ -146,10 +160,19 @@ impl Preview {
             "credentials": self.credentials,
             "gained": self.gained,
             "lost": self.lost,
+            "approval_required": self
+                .approval_required
+                .iter()
+                .map(ApprovalNeed::to_json)
+                .collect::<Vec<_>>(),
         });
         if let Some(check) = &self.request_check {
             body["request_check"] = if check.allowed {
-                json!({ "allowed": true, "note": DNS_NOTE })
+                json!({
+                    "allowed": true,
+                    "approval": check.approval.iter().map(ApprovalNeed::to_json).collect::<Vec<_>>(),
+                    "note": DNS_NOTE,
+                })
             } else {
                 json!({
                     "allowed": false,
@@ -181,8 +204,9 @@ pub async fn create_key(
     name: &str,
     credentials: Vec<String>,
     methods: Vec<String>,
+    approval: Vec<String>,
 ) -> FerroResult<CreateKeyResponse> {
-    match create_key_inner(state, name, credentials, methods).await {
+    match create_key_inner(state, name, credentials, methods, approval).await {
         Ok(created) => {
             // The token itself never leaves the response: only id + name.
             state.events.emit(
@@ -192,7 +216,8 @@ pub async fn create_key(
                     .detail("key_id", created.id.as_str())
                     .detail_str("key_name", &created.name)
                     .detail("credentials", created.credentials.clone())
-                    .detail("methods", created.methods.clone()),
+                    .detail("methods", created.methods.clone())
+                    .detail("approval", created.approval.clone()),
             );
             Ok(created)
         }
@@ -213,6 +238,7 @@ async fn create_key_inner(
     name: &str,
     credentials: Vec<String>,
     methods: Vec<String>,
+    approval: Vec<String>,
 ) -> FerroResult<CreateKeyResponse> {
     let id = Uuid::new_v4().to_string();
     let token = generate_token();
@@ -226,7 +252,7 @@ async fn create_key_inner(
         ));
     }
 
-    let policy = KeyPolicy::from_raw(credentials, methods)?;
+    let policy = KeyPolicy::from_raw(credentials, methods, approval)?;
 
     // Serialize key-file updates: without this, two concurrent creates (or a
     // create and a revoke) can each read the old file and drop the other's change.
@@ -270,6 +296,7 @@ async fn create_key_inner(
         created_at: now,
         credentials: policy.credentials,
         methods: policy.methods,
+        approval: policy.approval,
         policy_set: true,
     })
 }
@@ -359,8 +386,10 @@ async fn revoke_key_inner(state: &Arc<AppState>, id: &str) -> FerroResult<String
 
     // Revoke in memory — takes effect for the very next request.
     state.agent_keys.write().await.retain(|_, k| k.id != id);
-    // The key's captured sessions go with it.
+    // The key's captured sessions go with it, and so do its open approvals
+    // and grants.
     crate::sessions::clear_key(state, id, crate::sessions::DeleteCause::KeyRevoke);
+    approvals::clear_key(state, id, ClearCause::KeyRevoke);
 
     tracing::info!(agent_id = %id, "Agent key revoked");
 
@@ -377,8 +406,9 @@ pub async fn patch_key(
     id: &str,
     credentials: Patch<Vec<String>>,
     methods: Patch<Vec<String>>,
+    approval: Patch<Vec<String>>,
 ) -> FerroResult<PolicyChange> {
-    match patch_key_inner(state, id, credentials, methods).await {
+    match patch_key_inner(state, id, credentials, methods, approval).await {
         Ok(change) => {
             state.events.emit(
                 caller
@@ -409,10 +439,11 @@ async fn patch_key_inner(
     id: &str,
     credentials: Patch<Vec<String>>,
     methods: Patch<Vec<String>>,
+    approval: Patch<Vec<String>>,
 ) -> FerroResult<PolicyChange> {
-    if credentials.is_absent() && methods.is_absent() {
+    if credentials.is_absent() && methods.is_absent() && approval.is_absent() {
         return Err(FerroError::InvalidRequest(
-            "nothing to change: send `credentials` and/or `methods`".to_string(),
+            "nothing to change: send `credentials`, `methods` and/or `approval`".to_string(),
         ));
     }
 
@@ -427,7 +458,7 @@ async fn patch_key_inner(
         .map(|k| (k.name.clone(), k.policy.clone()))
         .ok_or(FerroError::AgentKeyNotFound)?;
     // Absent fields keep the current value; on a legacy key that is deny-all.
-    let after = before.patched(credentials, methods)?;
+    let after = before.patched(credentials, methods, approval)?;
 
     // Persist first, so a failed write leaves memory and disk consistent. The
     // entry is saved with both fields explicit, which also marks a legacy key
@@ -460,6 +491,9 @@ async fn patch_key_inner(
     // A policy change ends the key's captured sessions: what was captured
     // under the old policy is not carried into the new one.
     crate::sessions::clear_key(state, id, crate::sessions::DeleteCause::KeyPolicyChange);
+    // So do the key's open approvals and grants: what a human allowed under
+    // the old policy is asked again under the new one.
+    approvals::clear_key(state, id, ClearCause::KeyPolicyChange);
 
     tracing::info!(agent_id = %id, "Agent key policy changed");
 
@@ -481,9 +515,10 @@ pub async fn preview_key(
     id: &str,
     credentials: Patch<Vec<String>>,
     methods: Patch<Vec<String>>,
+    approval: Patch<Vec<String>>,
     request: Option<&ProxyRequest>,
 ) -> FerroResult<Preview> {
-    match compute_preview(state, id, credentials, methods, request).await {
+    match compute_preview(state, id, credentials, methods, approval, request).await {
         Ok(preview) => {
             state.events.emit(
                 caller
@@ -515,6 +550,7 @@ pub async fn compute_preview(
     id: &str,
     credentials: Patch<Vec<String>>,
     methods: Patch<Vec<String>>,
+    approval: Patch<Vec<String>>,
     request: Option<&ProxyRequest>,
 ) -> FerroResult<Preview> {
     let key = state
@@ -527,7 +563,7 @@ pub async fn compute_preview(
         .ok_or(FerroError::AgentKeyNotFound)?;
     let saved = key.policy.clone();
     // Absent fields fall back to the saved value.
-    let draft = saved.patched(credentials, methods)?;
+    let draft = saved.patched(credentials, methods, approval)?;
 
     // Like GET /v1/credentials, but a locked vault is fine while a credential
     // cache exists: only names and metadata are used, never values.
@@ -550,20 +586,39 @@ pub async fn compute_preview(
         }
     }
 
+    // The credentials the draft reaches that would need approval: the vault
+    // item's field, the draft's patterns, or both.
+    let approval_required: Vec<ApprovalNeed> = credentials
+        .iter()
+        .filter(|(name, _)| draft.allows_credential(name))
+        .filter_map(|(name, entries)| {
+            let reasons = Reasons {
+                vault_field: entries.iter().any(|e| e.approval_required),
+                key_policy: draft.requires_approval(name),
+            };
+            reasons.any().then(|| ApprovalNeed {
+                item: name.clone(),
+                reasons,
+            })
+        })
+        .collect();
+
     let request_check = match request {
         None => None,
         Some(request) => Some(match check_only(state, &draft, request).await {
-            Ok(()) => RequestCheck {
+            Ok(approval) => RequestCheck {
                 allowed: true,
                 status: None,
                 reason: None,
                 message: None,
+                approval,
             },
             Err(e) => RequestCheck {
                 allowed: false,
                 status: Some(e.status_code().as_u16()),
                 reason: Some(Reason::from(&e)),
                 message: Some(e.to_string()),
+                approval: Vec::new(),
             },
         }),
     };
@@ -575,6 +630,7 @@ pub async fn compute_preview(
         credentials: details,
         gained,
         lost,
+        approval_required,
         request_check,
     })
 }

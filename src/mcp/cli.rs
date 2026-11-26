@@ -35,7 +35,7 @@ Environment:
   FERROWARDEN_AGENT_KEY          Agent key (required, or use FERROWARDEN_AGENT_KEY_FILE)
   FERROWARDEN_AGENT_KEY_FILE     File holding the agent key (not together with the above)
   FERROWARDEN_CA_FILE            Extra root certificates, PEM bundle (optional)
-  FERROWARDEN_MCP_TIMEOUT_SECS   Per-request timeout, 1 to 600 (default 60)
+  FERROWARDEN_MCP_TIMEOUT_SECS   Per-request timeout, 1 to 600 (default 400)
   FERROWARDEN_MCP_ALLOW_HTTP     1 to allow http:// to a non-loopback host (trusted networks only)
   FERROWARDEN_MCP_LOG            Log level: error, warn, info, debug, trace or off; to stderr (default warn)
 

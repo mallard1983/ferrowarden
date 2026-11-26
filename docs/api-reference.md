@@ -160,6 +160,7 @@ In a JSON body, values are substituted into the parsed structure, so a credentia
 - Each credential is bound to the target: the target's host (and scheme/port, if the item's URI states them) matches one of the URIs on the vault item (`403`). See [Security Model §13](security.md#13-credential-host-binding).
 - The target is allowed by the outbound policy: never the vault endpoint (Vaultwarden); private/internal addresses only if listed in `allowed_targets` (`403`). See [Security Model §14](security.md#14-outbound-target-policy-ssrf-protection).
 - Every `{{session:NAME}}` is a live session of this key (`422`, reason `unknown_session`, the same answer when it is absent, expired or another key's) captured from the target's origin: scheme, host and port (`403`, reason `session_host_not_allowed`). Session names are not credential names and are not matched against the key's credential patterns.
+- **Human approval**, the last check, before any value is fetched or any connection is opened: a credential that needs approval (its vault item has a `ferrowarden_approval` field, or the key's `approval` patterns match it) holds the request until a person decides. See [Approvals](#approvals).
 
 **Response `200 OK`**
 ```json
@@ -190,10 +191,25 @@ When the request had a `capture`, the response also has a `captures` list, in re
 | `403 Forbidden` (scope) | `Credential <name> is not available to this agent key` (no `credentials` pattern matches it; same response whether or not it exists) |
 | `403 Forbidden` (re-prompt) | The item has master password re-prompt enabled |
 | `403 Forbidden` (session) | `Session <name> may not be sent to <host>: it was captured from another origin` (`session_host_not_allowed`) |
+| `403 Forbidden` (approval) | `code` `approval_pending` (with `approval_id`): nobody has decided yet, ask your human to approve it in the admin UI and **retry the same request**. `code` `approval_denied`: a human said no, stop. See [Approvals](#approvals) |
+| `429 Too Many Requests` (approval) | `code` `approval_limit_reached`: this key has too many open or recent approval requests. A JSON body, unlike the rate limiter's plain text |
 | `409 Conflict` | Placeholder name matches more than one vault item, or a field name appears more than once on the item |
 | `422 Unprocessable Entity` | Malformed placeholder, unknown credential, or a value/field the item does not have; a `{{session:NAME}}` that is unknown, expired or another key's (`unknown_session`) |
 | `502 Bad Gateway` | Forward to target failed (connection error, timeout) or response exceeded `max_response_bytes`. The message never includes the target URL. |
 | `503 Service Unavailable` | Vault is locked |
+
+### Approvals
+
+A credential can need a human's approval, from its vault item (a `ferrowarden_approval` custom field) or from the agent key's `approval` patterns; either is enough. The request is **held** for up to `approval.wait_secs` (60 by default) while a person decides in the admin UI or with the admin API. Nothing is fetched or sent until they do.
+
+The answers the agent can get, besides the target's own response:
+
+```json
+{ "error": "Approval required: a human has to approve this request. Ask your human to approve approval 2m3x8Qk0Zr1YtV5pUa9bLw in the Ferrowarden admin UI, then retry the same request.",
+  "code": "approval_pending", "approval_id": "2m3x8Qk0Zr1YtV5pUa9bLw" }
+```
+
+`403 approval_pending` means nobody decided in time: the approval stays open, so after a person approves it **retrying the same request** passes. `403 approval_denied` means stop. `429 approval_limit_reached` means do not retry now. A client needs a read timeout above `approval.wait_secs` (up to 300 seconds) plus the forward time. See [approvals.md](approvals.md).
 
 ### Captured sessions
 
@@ -275,7 +291,9 @@ Every agent key carries a policy, set when the key is created and changed with `
 | `credentials` | List of patterns matched against the credential (item) name: the name in the placeholder after unquoting, e.g. `Proxmox (prod)` for `{{vault:'Proxmox (prod)'}}`. |
 | `methods` | List of allowed HTTP methods: `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`. Case-insensitive on input, returned upper case. |
 
-**Both fields are required when creating a key. There is no default access.**
+| `approval` | Optional list of patterns, matched like `credentials`: a credential whose name matches needs a human's approval before this key can use it ([approvals.md](approvals.md)). `[]` (the default when left out) adds no requirement. A vault item that carries a `ferrowarden_approval` field needs approval whatever this list says. |
+
+**`credentials` and `methods` are required when creating a key. There is no default access.** `approval` is the one optional list: it only adds a requirement, and a key without it (including every key from 0.2.0) has none.
 
 | Value | Meaning |
 |---|---|
@@ -359,7 +377,7 @@ List all active agent keys with their policies. Token values are never included.
 
 Change a key's policy. The new policy applies to the very next request made with that key's token. The token stays the same.
 
-**Request Body**: any of `credentials` and `methods`.
+**Request Body**: any of `credentials`, `methods` and `approval`.
 ```json
 { "credentials": ["uptime_kuma_*", "lab_*"] }
 ```
@@ -378,7 +396,7 @@ Change a key's policy. The new policy applies to the very next request made with
 | `400 Bad Request` | Malformed JSON, duplicate or unknown fields, `null`, `{}`, an invalid pattern or method |
 | `404 Not Found` | No key with that ID exists |
 
-The change is written to the key file (when persistence is configured) before it takes effect, and recorded as a `key_policy_change` event with the policy before and after.
+The change is written to the key file (when persistence is configured) before it takes effect, and recorded as a `key_policy_change` event with the policy before and after. It ends the key's captured sessions, open approvals and grants.
 
 ---
 
@@ -400,17 +418,18 @@ Show what a draft policy would allow for an existing key, **without saving anyth
 }
 ```
 
-`credentials` and `methods` are the draft policy; a field left out means the key's saved value, and `null` is rejected. `request` has exactly the shape of `/v1/forward`'s `request` (same strictness) and asks "would this request be allowed under the draft?".
+`credentials`, `methods` and `approval` are the draft policy; a field left out means the key's saved value, and `null` is rejected. `request` has exactly the shape of `/v1/forward`'s `request` (same strictness) and asks "would this request be allowed under the draft?".
 
 **Response `200 OK`**
 ```json
 {
   "key": { "id": "550e8400-...", "name": "homelab-agent", "policy_set": true },
-  "saved_policy": { "credentials": ["*"], "methods": ["*"] },
-  "draft_policy": { "credentials": ["uptime_kuma_*"], "methods": ["GET"] },
+  "saved_policy": { "credentials": ["*"], "methods": ["*"], "approval": [] },
+  "draft_policy": { "credentials": ["uptime_kuma_*"], "methods": ["GET"], "approval": [] },
   "credentials": [ { "name": "uptime_kuma_api", "type": "login", "placeholder": "{{vault:uptime_kuma_api}}", "bound_to": ["https://uptime.lan"] } ],
   "gained": [],
   "lost": ["grafana_token", "proxmox_api_token"],
+  "approval_required": [],
   "request_check": {
     "allowed": false,
     "status": 403,
@@ -423,6 +442,7 @@ Show what a draft policy would allow for an existing key, **without saving anyth
 
 - `credentials`: what the key would reach under the draft, in the same format as `GET /v1/credentials?detail=true`. Names, ready-made placeholders and bound hosts only; never values.
 - `gained` / `lost`: credential names reachable under the draft but not the saved policy, and the reverse.
+- `approval_required`: the credentials the draft reaches that would need a human's approval, each with its `reasons` (`vault_field`, `key_policy`). With a `request`, `request_check.approval` lists the request's credentials that would need one. A preview never creates an approval request.
 - `request_check` (only when `request` is given): runs every check `/v1/forward` would run, in the same order and with the same status codes, reasons and messages: request validation, placeholder parsing, method policy, credential scope, the outbound target policy, then unknown / ambiguous / re-prompt / missing value or field / host binding. It never fetches a value or connects. `allowed: true` carries no reason. **The target check is by name and IP literal only**: the private-address check on a resolved DNS name happens only when a request is really forwarded. `{{session:name}}` placeholders are checked for syntax (and for sessions being switched on), but **not** against the session store: sessions are runtime state of an agent key, so the preview answers the same for a name nobody has captured. The preview takes a `request` only, so it does not check `capture` entries ([sessions.md](sessions.md#policy)).
 - With the vault locked, the answer comes from the cached credential list; with no cache it is `503`.
 

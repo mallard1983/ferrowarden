@@ -1,6 +1,7 @@
 use super::super::api::{RawLogin, RawUri};
 use super::super::enc::test_support::{encrypt2, key};
 use super::*;
+use crate::vault::model::APPROVAL_FIELD;
 
 // A synthetic vault: the user key, one organisation key, and items
 // encrypted the way a client does (with and without per-item keys).
@@ -394,4 +395,154 @@ fn only_an_explicit_false_hides_the_password() {
     assert!(!is_password_hidden(&c));
     c.view_password = Some(false);
     assert!(is_password_hidden(&c));
+}
+
+// ── The reserved approval field ───────────────────────────────────────────
+
+fn with_approval_field(v: &Vault, value: Option<&str>) -> RawCipher {
+    with_named_approval_field(v, APPROVAL_FIELD, value)
+}
+
+fn with_named_approval_field(v: &Vault, name: &str, value: Option<&str>) -> RawCipher {
+    let mut c = login(&v.user);
+    c.fields.as_mut().unwrap().push(RawField {
+        name: e(&v.user, name),
+        value: value.and_then(|v2| e(&v.user, v2)),
+        field_type: 0,
+        linked_id: None,
+    });
+    c
+}
+
+#[test]
+fn an_item_without_the_approval_field_does_not_need_approval() {
+    let v = vault();
+    let (_, entry) = build_metadata(&v.ring.view(), &login(&v.user)).unwrap();
+    assert!(!entry.approval_required && !entry.approval_field_invalid);
+}
+
+#[test]
+fn the_value_required_in_any_spelling_needs_approval_and_is_not_a_warning() {
+    let v = vault();
+    for value in [
+        "required",
+        "REQUIRED",
+        "Required",
+        "  required\n",
+        "\trequired ",
+    ] {
+        let (_, entry) =
+            build_metadata(&v.ring.view(), &with_approval_field(&v, Some(value))).unwrap();
+        assert!(entry.approval_required, "{value:?}");
+        assert!(!entry.approval_field_invalid, "{value:?}");
+    }
+}
+
+#[test]
+fn the_field_name_matches_in_any_letter_case_and_with_spaces() {
+    let v = vault();
+    for name in [
+        "Ferrowarden_Approval",
+        "FERROWARDEN_APPROVAL",
+        " ferrowarden_approval ",
+    ] {
+        let c = with_named_approval_field(&v, name, Some("required"));
+        let (_, entry) = build_metadata(&v.ring.view(), &c).unwrap();
+        assert!(entry.approval_required, "{name:?}");
+        assert!(
+            entry
+                .fields
+                .iter()
+                .all(|f| !f.name.eq_ignore_ascii_case(name.trim())),
+            "{name:?} must not be offered as a field"
+        );
+    }
+}
+
+#[test]
+fn any_other_value_including_none_still_needs_approval_and_is_flagged() {
+    let v = vault();
+    // Fail closed: a typo, a no, an empty value or no value all mean required.
+    for value in [
+        Some("requird"),
+        Some("optional"),
+        Some("false"),
+        Some("no"),
+        Some("0"),
+        Some("requiredx"),
+        Some("not required"),
+        Some(""),
+        Some("   "),
+        None,
+    ] {
+        let (_, entry) = build_metadata(&v.ring.view(), &with_approval_field(&v, value)).unwrap();
+        assert!(entry.approval_required, "{value:?}");
+        assert!(entry.approval_field_invalid, "{value:?}");
+    }
+}
+
+#[test]
+fn the_approval_field_is_not_a_field_and_its_value_is_not_kept() {
+    let v = vault();
+    let c = with_approval_field(&v, Some("required"));
+    let (_, entry) = build_metadata(&v.ring.view(), &c).unwrap();
+    // Excluded from the custom fields, like the bindings field.
+    assert!(entry.fields.iter().all(|f| f.name != APPROVAL_FIELD));
+    assert!(matches!(
+        entry.field(APPROVAL_FIELD),
+        crate::vault::model::FieldLookup::Missing
+    ));
+    assert_eq!(entry.fields.len(), 5, "the same fields as without it");
+    // The other fields and the bindings are unchanged.
+    assert_eq!(entry.uris, vec!["https://a.example", "b.example"]);
+    let dbg = format!("{entry:?}");
+    assert!(!dbg.contains("required\""), "{dbg}");
+    // It is not available as a value either: a request for it is "no such field".
+    let err = field_value(&v.ring.view(), &c, "nope", "x").unwrap_err();
+    assert!(matches!(err, FerroError::CredentialNotFound(_)));
+}
+
+#[test]
+fn the_approval_field_works_on_secure_notes_and_next_to_the_bindings_field() {
+    let v = vault();
+    let c = RawCipher {
+        item_type: 2,
+        login: None,
+        notes: e(&v.user, "body"),
+        fields: Some(vec![
+            RawField {
+                name: e(&v.user, BINDINGS_FIELD),
+                value: e(&v.user, "https://api.example"),
+                field_type: 0,
+                linked_id: None,
+            },
+            RawField {
+                name: e(&v.user, APPROVAL_FIELD),
+                value: e(&v.user, "required"),
+                field_type: 0,
+                linked_id: None,
+            },
+        ]),
+        ..login(&v.user)
+    };
+    let (_, entry) = build_metadata(&v.ring.view(), &c).unwrap();
+    assert!(entry.approval_required && !entry.approval_field_invalid);
+    assert_eq!(entry.uris, vec!["https://api.example"]);
+    assert!(entry.fields.is_empty());
+}
+
+#[test]
+fn an_unreadable_approval_field_leaves_the_item_out_rather_than_unguarded() {
+    let v = vault();
+    let mut c = with_approval_field(&v, Some("required"));
+    // Corrupt the ciphertext of the field's value: the item cannot be read
+    // safely, so it is excluded (never offered without its approval rule).
+    let last = c.fields.as_mut().unwrap().last_mut().unwrap();
+    last.value = Some("2.AAAA|BBBB|CCCC".to_string());
+    assert!(build_metadata(&v.ring.view(), &c).is_err());
+    // Likewise a name that cannot be decrypted.
+    let mut c = with_approval_field(&v, Some("required"));
+    let last = c.fields.as_mut().unwrap().last_mut().unwrap();
+    last.name = Some("2.AAAA|BBBB|CCCC".to_string());
+    assert!(build_metadata(&v.ring.view(), &c).is_err());
 }

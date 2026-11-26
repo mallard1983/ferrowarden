@@ -18,6 +18,7 @@
 //!   headers.
 
 mod admin_pages;
+mod approval_pages;
 pub mod crypto;
 mod drafts;
 mod handlers;
@@ -274,6 +275,20 @@ pub fn router(ui: Arc<UiState>) -> Router {
             "/ui/keys/{id}/revoke",
             get(admin_pages::revoke_get).post(admin_pages::revoke_post),
         )
+        .route("/ui/approvals", get(approval_pages::approvals_list))
+        .route("/ui/approvals/{id}", get(approval_pages::approval_get))
+        .route(
+            "/ui/approvals/{id}/approve",
+            post(approval_pages::approve_post),
+        )
+        .route("/ui/approvals/{id}/deny", post(approval_pages::deny_post))
+        .route(
+            "/ui/grants/{id}/revoke",
+            post(approval_pages::grant_revoke_post),
+        )
+        // The link in an approval prompt is `<ui.public_url>/approvals/<id>`.
+        .route("/approvals", get(approval_pages::alias_list))
+        .route("/approvals/{id}", get(approval_pages::alias_detail))
         .route("/ui/audit", get(admin_pages::audit_get))
         .route("/ui/notify/test", post(admin_pages::notify_test_post))
         .route("/ui/static/{file}", get(handlers::static_file))

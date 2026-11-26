@@ -49,10 +49,19 @@ Starting 0.3.0 with `vault.backend = "bw-serve"` set fails with an error that po
 1. **Login.** `POST /identity/connect/token` with `grant_type=client_credentials`, `scope=api`, a fixed per-key `device_identifier` (UUID v5 of a constant and `ferrowarden-vault:<client_id>`, so Vaultwarden keeps one device row), and `Bitwarden-Client-Name` / `Bitwarden-Client-Version` headers. The version, `2024.12.0`, is the **protocol version Ferrowarden implements**, not a claim to be that client: Vaultwarden includes SSH-key items in the sync only from that version on, which keeps the item list the same as the CLI's. API-key login returns no refresh token, so Ferrowarden logs in again shortly before `expires_in` and when a request gets a 401.
 2. **Sync.** `GET /api/sync?excludeDomains=true` returns the account's keys and every item as ciphertext. Ferrowarden keeps the items exactly as received.
 3. **Unlock.** The master password goes through the account's KDF (PBKDF2 or Argon2id, with the same bounds as the admin UI: a hostile server cannot make Ferrowarden burn minutes of CPU or gigabytes of memory), on a blocking thread. HKDF-Expand stretches the master key into an `enc` and a `mac` key, which decrypt the **user key** (`profile.key`). The user key decrypts the **RSA private key**, which unwraps each **organisation key**. The master password and master key are wiped as soon as the user key exists; they are not kept.
-4. **Metadata.** For each login or secure note, Ferrowarden decrypts only what the credential map needs: the name, the URIs (and their match types), custom field names and kinds, and the value of the reserved `ferrowarden_uris` field. Which secrets exist (password, username, TOTP, notes) is read from the presence of the ciphertext, not from decrypting it.
+4. **Metadata.** For each login or secure note, Ferrowarden decrypts only what the credential map needs: the name, the URIs (and their match types), custom field names and kinds, and the values of the two reserved fields, `ferrowarden_uris` and `ferrowarden_approval`. Which secrets exist (password, username, TOTP, notes) is read from the presence of the ciphertext, not from decrypting it.
 5. **Values on demand.** When a request needs a secret, Ferrowarden decrypts that one value into a `Zeroizing<String>`, substitutes it, and drops (wipes) it. TOTP codes are computed from the stored secret at that moment. There is no "fetch the whole item and wipe the rest" step.
 6. **Refresh.** On every refresh tick: log in again if the token is about to expire, ask `GET /api/accounts/revision-date`, and fetch the full vault only when the revision changed (plus a periodic safety sync every ten ticks, at least every five minutes). If Vaultwarden is unreachable, Ferrowarden keeps serving the copy in memory and emits the usual `vault_sync` failure event.
 7. **Lock.** A changed user key (`profile.key`) or `securityStamp` means the password was changed or the keys rotated: the keys in memory no longer match the account, so the vault locks (cause `vault_key_changed` or `security_stamp_changed`), dropping every key and the credential map; in file mode Ferrowarden then unlocks again from the password file.
+
+## Reserved custom fields
+
+Two custom fields are read as settings, not offered as fields (a placeholder cannot name them, and they are not in the credential listing):
+
+| Field | Value | Effect |
+|---|---|---|
+| `ferrowarden_uris` | URIs, comma- or newline-separated | The item's host bindings; overrides a login's URIs and gives secure notes a binding |
+| `ferrowarden_approval` | `required` | A person has to approve use of the item ([approvals.md](approvals.md)). **Any other value, empty included, also means required**: a typo can only make the item stricter. Items whose value is not `required` are counted in the `vault_sync` event (`warnings.approval_field_invalid`) |
 
 ## Fail closed, per item
 

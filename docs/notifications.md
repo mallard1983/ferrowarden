@@ -21,7 +21,7 @@ handler -> EventLog::emit -> ring buffer, event writer -> stdout / file / syslog
 
 ## What is notified
 
-`events` selects the categories. The default is `["blocked", "auth_failure", "vault", "system"]`; `admin` is opt-in.
+`events` selects the categories. The default is `["blocked", "auth_failure", "vault", "system", "approval"]`; `admin` is opt-in.
 
 | Category | Notifies about | Priority |
 |---|---|---|
@@ -30,6 +30,7 @@ handler -> EventLog::emit -> ring buffer, event writer -> stdout / file / syslog
 | `vault` | The vault locked; an unlock or a sync failed; and a recovery notice when the vault unlocks again after a lock was notified | high, recovery normal |
 | `admin` | A key was created, revoked or had its policy changed; a successful admin UI sign-in | normal |
 | `system` | Security events were dropped (`events_dropped`); notifications were dropped; notifications paused by the hourly cap | high |
+| `approval` | A request is waiting for a person to approve or deny it: **one** prompt per new approval ([approvals.md](approvals.md)). Decisions and expiry are events, not prompts | high |
 
 A single failed key or password is not an alert; five from one address in five minutes is. Failures from the agent API, the admin API and the admin UI count together. Events that are not in this table (reads, rate limiting, startup, UI sign-outs, and a forward that failed for another reason such as an unreachable target) are never notified.
 
@@ -72,7 +73,7 @@ gotify_url = "https://gotify.example.com"                # base URL; needs a tok
 ntfy_url = "https://ntfy.example.com/ferrowarden"        # full topic URL; token optional
 webhook_url = "https://hooks.example.com/ferrowarden"    # generic JSON POST; token optional
 
-events = ["blocked", "auth_failure", "vault", "system"]  # add "admin" to be told about key changes
+events = ["blocked", "auth_failure", "vault", "system", "approval"]  # add "admin" to be told about key changes
 min_interval_secs = 60          # per category and subject
 max_per_hour = 60               # all notifications together
 auth_failure_threshold = 5      # failures from one IP ...
@@ -86,7 +87,7 @@ ca_file = ""                    # extra CA certificate (PEM) for the notifier UR
 | `gotify_url` | `FERROWARDEN_NOTIFY__GOTIFY_URL` | off |
 | `ntfy_url` | `FERROWARDEN_NOTIFY__NTFY_URL` | off |
 | `webhook_url` | `FERROWARDEN_NOTIFY__WEBHOOK_URL` | off |
-| `events` | `FERROWARDEN_NOTIFY__EVENTS` (comma-separated) | `blocked,auth_failure,vault,system` |
+| `events` | `FERROWARDEN_NOTIFY__EVENTS` (comma-separated) | `blocked,auth_failure,vault,system,approval` |
 | `min_interval_secs` | `FERROWARDEN_NOTIFY__MIN_INTERVAL_SECS` | 60 |
 | `max_per_hour` | `FERROWARDEN_NOTIFY__MAX_PER_HOUR` | 60 |
 | `auth_failure_threshold` | `FERROWARDEN_NOTIFY__AUTH_FAILURE_THRESHOLD` | 5 |
@@ -184,6 +185,28 @@ Ferrowarden sends `POST` to the topic URL with the message as the body and the h
 | `suppressed` | Occurrences for the same subject held back by the rate limit since the previous notification (also written into `message`) |
 
 Matrix, Slack, Discord and similar services can be reached through their webhook bridges or an automation tool (n8n, a small relay): point `webhook_url` at the bridge and map `title` and `message` in its template. Ferrowarden does not speak those protocols natively.
+
+## The approval prompt
+
+The `approval` category is on by default, because an approval nobody hears about is useless: the agent's request waits, then fails with `approval_pending`. It goes out once per new approval. Requests that wait on an approval that is already open send nothing more, and the per-subject limit and the hourly cap do not hold a prompt back (approvals are limited per agent key instead: `approval.max_requests_per_key_per_hour`, see [approvals.md](approvals.md#limits)).
+
+**This prompt deliberately carries more than the others**, because you cannot decide without it:
+
+| Field | Notes |
+|---|---|
+| key name and short id, credential **names** | As for the other categories |
+| method | `GET`, `DELETE`, ... |
+| target host **and port** | Shown with `:port` when the port is not the default |
+| **path** | As the agent sent it, **without the query string or fragment**, cut to 200 characters, printable ASCII only. It may contain placeholders such as `{{vault:name:username}}`, which are names, never values |
+| approval id, when it closes | |
+| link | `<ui.public_url>/approvals/<id>` when `ui.public_url` is set; otherwise the text says to open the Approvals page of the admin UI |
+
+Still never in it: credential values (none has been read yet), the query string, headers, the body, tokens or anything Vaultwarden said. The path is chosen by the agent: treat it as text from the agent. If a notifier crossing a network you do not control is a concern, use an `https://` notifier, or leave `approval` out of `events` and watch the Approvals page of the admin UI instead.
+
+> **Ferrowarden: approval needed**
+> Key "homelab-agent" (id 3f2b8c1e) wants to use proxmox_root for GET pve.example.com:8006/api2/json/nodes. Approve or deny: https://ferrowarden-admin.example.com/approvals/2m3x8Qk0Zr1YtV5pUa9bLw Approval 2m3x8Qk0Zr1YtV5pUa9bLw, open until 12:10 UTC.
+
+In the webhook body the event object has an `approval` member with `id`, `method`, `target`, `path`, `expires_at` and `link` (when set). If an approval is opened and no notifier is configured, Ferrowarden logs a warning once; the admin UI and the admin API still work.
 
 ## Notifier hosts are off-limits to agents
 

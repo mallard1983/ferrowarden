@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::approvals::ApprovalStore;
 use crate::config::Config;
 use crate::error::FerroResult;
 use crate::events::{Action, EventLog, SecurityEvent};
@@ -87,6 +88,11 @@ pub struct AppState {
     /// only: never written to disk, a restart empties it, and the vault
     /// locking clears it.
     pub sessions: Arc<SessionStore>,
+
+    /// Pending approvals, grants and denials (docs/approvals.md). In memory
+    /// only, like captured sessions: a restart empties it, and the vault
+    /// locking clears it.
+    pub approvals: Arc<ApprovalStore>,
 }
 
 impl AppState {
@@ -126,6 +132,7 @@ impl AppState {
             notify,
             sync_stats: Arc::new(SyncStats::default()),
             sessions: Arc::new(SessionStore::default()),
+            approvals: Arc::new(ApprovalStore::default()),
         }
     }
 
@@ -183,6 +190,9 @@ impl AppState {
         // A captured session is a credential too: it does not outlive the
         // unlocked vault.
         crate::sessions::clear_all(self, DeleteCause::VaultLock);
+        // Grants and open approvals end with it: what a human allowed while
+        // the vault was unlocked is not carried into the next unlock.
+        crate::approvals::clear_all(self, crate::approvals::ClearCause::VaultLock);
         let was_unlocked = {
             let mut state = self.lock_state.write().await;
             let was_unlocked = *state == LockState::Unlocked;

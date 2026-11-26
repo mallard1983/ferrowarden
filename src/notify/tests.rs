@@ -150,6 +150,7 @@ fn expected_class(action: Action, outcome: Outcome, reason: Option<Reason>) -> O
         KeyRevoke if ok => Some(Class::KeyRevoke),
         KeyPolicyChange if ok => Some(Class::KeyPolicyChange),
         EventsDropped => Some(Class::EventsDropped),
+        ApprovalRequested if ok => Some(Class::ApprovalRequested),
         _ => None,
     }
 }
@@ -789,6 +790,24 @@ fn hostile(e: SecurityEvent) -> SecurityEvent {
     .credentials(["grafana_service_account", "evil {{vault:inner}}/../x?y=z"])
 }
 
+/// An approval prompt as the gate records it: the path has no query, the
+/// credentials are names.
+fn approval_requested() -> SecurityEvent {
+    SecurityEvent::new(Action::ApprovalRequested)
+        .request(&ctx_from("172.20.0.5"))
+        .key(&monitoring_agent())
+        .method("get")
+        .credentials(["grafana_service_account"])
+        .detail("approval_id", "Zm9vYmFyMTIzNDU2Nzg5MA")
+        .detail("host", "api.example.com:8443")
+        .detail("path", "/api2/json/nodes")
+        .detail("expires_at", "2026-11-26T12:10:00Z")
+        .detail(
+            "link",
+            "https://fw.example.com/approvals/Zm9vYmFyMTIzNDU2Nzg5MA",
+        )
+}
+
 fn hostile_events() -> Vec<SecurityEvent> {
     let key = monitoring_agent();
     let ctx = ctx_from("172.20.0.5");
@@ -830,6 +849,7 @@ fn hostile_events() -> Vec<SecurityEvent> {
                 .key(&key),
         ),
         hostile(ui_login(Outcome::Success, None, "203.0.113.9")),
+        hostile(approval_requested()),
     ];
     events.push(hostile(
         SecurityEvent::new(Action::EventsDropped)
@@ -966,7 +986,7 @@ fn payloads_contain_only_allow_listed_content_for_every_category_and_sender() {
 
 #[test]
 fn the_webhook_event_carries_exactly_the_allow_listed_keys() {
-    const ALLOWED: [&str; 12] = [
+    const ALLOWED: [&str; 13] = [
         "category",
         "action",
         "outcome",
@@ -979,6 +999,7 @@ fn the_webhook_event_carries_exactly_the_allow_listed_keys() {
         "request_id",
         "timestamp",
         "count",
+        "approval",
     ];
     const TOP: [&str; 8] = [
         "source",
@@ -1037,6 +1058,7 @@ fn severity_and_priorities_follow_the_mapping() {
         ("Ferrowarden: agent key revoked", Severity::Normal),
         ("Ferrowarden: agent key policy changed", Severity::Normal),
         ("Ferrowarden: admin UI sign-in", Severity::Normal),
+        ("Ferrowarden: approval needed", Severity::High),
         ("Ferrowarden: security events dropped", Severity::High),
         ("Ferrowarden: notifications dropped", Severity::High),
         ("Ferrowarden: notifications paused", Severity::High),
@@ -1584,7 +1606,7 @@ async fn an_emitted_event_reaches_every_sender_and_is_counted() {
     assert_eq!(snap.failed(), 0);
     assert_eq!(
         snap.categories,
-        ["blocked", "auth_failure", "vault", "system"]
+        ["blocked", "auth_failure", "vault", "system", "approval"]
     );
     assert_eq!(
         snap.senders
@@ -1695,4 +1717,250 @@ fn the_default_handle_is_disabled() {
         (s.sent(), s.failed(), s.suppressed, s.dropped),
         (0, 0, 0, 0)
     );
+}
+
+// ── Approval prompts ──────────────────────────────────────────────────────────
+
+fn pending_view(url: &str) -> crate::approvals::PendingView {
+    use crate::approvals::{ApprovalNeed, PendingView, Reasons};
+    let now = chrono::DateTime::parse_from_rfc3339("2026-11-26T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    PendingView {
+        id: "Zm9vYmFyMTIzNDU2Nzg5MA".into(),
+        key_id: "11111111-1111-1111-1111-111111111111".into(),
+        key_name: "monitoring-agent".into(),
+        items: vec![
+            ApprovalNeed {
+                item: "proxmox_root".into(),
+                reasons: Reasons {
+                    vault_field: true,
+                    key_policy: false,
+                },
+            },
+            ApprovalNeed {
+                item: "nas_admin".into(),
+                reasons: Reasons {
+                    vault_field: false,
+                    key_policy: true,
+                },
+            },
+        ],
+        method: "DELETE".into(),
+        scheme: "https".into(),
+        host: "pve.example.com:8006".into(),
+        port: 8006,
+        url: url.into(),
+        request_id: "0193abcd-0000-7000-8000-000000000001".into(),
+        created: now,
+        expires: now + chrono::Duration::minutes(10),
+    }
+}
+
+fn prompt(url: &str, link: Option<&str>) -> Notification {
+    let ev = crate::approvals::requested_event(
+        &ctx_from("172.20.0.5"),
+        &pending_view(url),
+        link.map(str::to_string),
+    );
+    let (mut e, _) = engine();
+    let mut out = e.process(Instant::now(), &ev);
+    assert_eq!(out.len(), 1, "one prompt per new approval");
+    out.remove(0)
+}
+
+fn approval_path(n: &Notification) -> String {
+    n.webhook_body()["event"]["approval"]["path"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn an_approval_prompt_says_who_what_where_and_how_to_decide() {
+    let link = "https://fw.example.com/approvals/Zm9vYmFyMTIzNDU2Nzg5MA";
+    let n = prompt(
+        "https://pve.example.com:8006/api2/json/nodes?ticket=SEEDED#frag",
+        Some(link),
+    );
+    assert_eq!(n.category, Category::Approval);
+    assert_eq!(n.title, "Ferrowarden: approval needed");
+    assert_eq!(n.severity, Severity::High);
+    let m = &n.message;
+    assert!(m.contains("Key \"monitoring-agent\" (id 11111111)"), "{m}");
+    assert!(m.contains("proxmox_root and nas_admin"), "{m}");
+    assert!(
+        m.contains("DELETE pve.example.com:8006/api2/json/nodes"),
+        "{m}"
+    );
+    assert!(m.contains(&format!("Approve or deny: {link}")), "{m}");
+    assert!(m.contains("Approval Zm9vYmFyMTIzNDU2Nzg5MA"), "{m}");
+    assert!(m.contains("open until 12:10 UTC"), "{m}");
+    // The query string and the fragment are not in it, anywhere.
+    let wire = serde_json::to_string(&n.webhook_body()).unwrap();
+    for bad in ["ticket", "SEEDED", "frag", "?"] {
+        assert!(
+            !m.contains(bad) && !wire.contains(bad),
+            "{bad:?} in {m}\n{wire}"
+        );
+    }
+    // The webhook event carries the approval fields.
+    let a = &n.webhook_body()["event"]["approval"];
+    assert_eq!(a["id"], "Zm9vYmFyMTIzNDU2Nzg5MA");
+    assert_eq!(a["method"], "DELETE");
+    assert_eq!(a["target"], "pve.example.com:8006");
+    assert_eq!(a["path"], "/api2/json/nodes");
+    assert_eq!(a["expires_at"], "2026-11-26T12:10:00Z");
+    assert_eq!(a["link"], link);
+    assert_eq!(
+        n.webhook_body()["event"]["credentials"],
+        serde_json::json!(["proxmox_root", "nas_admin"])
+    );
+}
+
+#[test]
+fn without_a_public_url_the_prompt_points_at_the_approvals_page() {
+    let n = prompt("https://pve.example.com:8006/x", None);
+    assert!(
+        n.message
+            .contains("Open the Approvals page of the Ferrowarden admin UI"),
+        "{}",
+        n.message
+    );
+    assert!(!n.message.contains("http"), "{}", n.message);
+    assert!(n.webhook_body()["event"]["approval"].get("link").is_none());
+}
+
+#[test]
+fn the_path_is_cut_to_200_characters_and_made_printable() {
+    let n = prompt(
+        &format!("https://pve.example.com:8006/{}", "a".repeat(500)),
+        None,
+    );
+    assert_eq!(approval_path(&n).chars().count(), 200);
+    // Control characters, non-ASCII text and an embedded query never get through.
+    let n = prompt("https://pve.example.com:8006/a\nb/\u{202e}c/d e?x=y", None);
+    // Each unprintable character is shown as `?`; the real query is gone.
+    assert_eq!(approval_path(&n), "/a?b/?c/d?e");
+    // Placeholders are shown as written: names, never values.
+    let n = prompt(
+        "https://pve.example.com:8006/api/{{vault:nas_admin:username}}/x?k={{vault:y}}",
+        None,
+    );
+    assert_eq!(approval_path(&n), "/api/{{vault:nas_admin:username}}/x");
+}
+
+#[test]
+fn a_forged_link_in_an_event_is_not_shown() {
+    let with_link = |link: &str| {
+        let ev = crate::approvals::requested_event(
+            &ctx_from("172.20.0.5"),
+            &pending_view("https://pve.example.com:8006/x"),
+            Some(link.to_string()),
+        );
+        EventFields::from_event(Category::Approval, &ev, 1)
+            .approval
+            .unwrap()
+            .link
+    };
+    assert_eq!(with_link("javascript:alert(1)"), None);
+    assert_eq!(with_link("https://fw.example.com/approvals/x y\nz"), None);
+    assert_eq!(
+        with_link("https://fw.example.com/approvals/x").as_deref(),
+        Some("https://fw.example.com/approvals/x")
+    );
+    // Only an approval request has the approval fields.
+    let ev = blocked(Reason::TargetBlocked)
+        .detail("approval_id", "x")
+        .detail("path", "/p");
+    assert!(EventFields::from_event(Category::Blocked, &ev, 1)
+        .approval
+        .is_none());
+}
+
+#[test]
+fn every_new_approval_is_notified_once_and_is_not_held_back_by_the_limits() {
+    let ev = |id: &str| {
+        let mut v = pending_view("https://pve.example.com:8006/x");
+        v.id = id.to_string();
+        crate::approvals::requested_event(&ctx_from("172.20.0.5"), &v, None)
+    };
+    // Same key, an interval of 60 s: two approvals, two prompts.
+    let (mut e, stats) = engine();
+    let t0 = Instant::now();
+    assert_eq!(e.process(t0, &ev("A1111111111111111111111")).len(), 1);
+    assert_eq!(
+        e.process(at(t0, 1), &ev("B2222222222222222222222")).len(),
+        1
+    );
+    assert_eq!(
+        stats.suppressed.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+
+    // Even when the hourly cap is used up by other notifications.
+    let (mut capped, _) = engine_with(Settings {
+        max_per_hour: 1,
+        ..settings(&Category::DEFAULT)
+    });
+    assert_eq!(
+        capped
+            .process(t0, &hostile(blocked(Reason::TargetBlocked)))
+            .len(),
+        1
+    );
+    // The cap pauses the others (one notice)...
+    let paused = capped.process(at(t0, 100), &hostile(blocked(Reason::MethodNotAllowed)));
+    assert!(paused.iter().all(|n| n.category == Category::System));
+    // ...but not an approval prompt.
+    let out = capped.process(at(t0, 101), &ev("C3333333333333333333333"));
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].category, Category::Approval);
+
+    // With the category off, nothing is sent.
+    let (mut off, _) = engine_with(settings(&[Category::Blocked]));
+    assert!(off.process(t0, &ev("D4444444444444444444444")).is_empty());
+}
+
+#[test]
+fn only_a_successful_approval_request_event_is_a_prompt() {
+    let base = SecurityEvent::new(Action::ApprovalRequested);
+    assert_eq!(classify(&base), Some(Class::ApprovalRequested));
+    assert_eq!(Class::ApprovalRequested.category(), Category::Approval);
+    // Decisions and expiries are events, not prompts.
+    for action in [
+        Action::ApprovalGranted,
+        Action::ApprovalDenied,
+        Action::ApprovalExpired,
+        Action::GrantRevoked,
+        Action::GrantExpired,
+    ] {
+        assert_eq!(classify(&SecurityEvent::new(action)), None, "{action:?}");
+    }
+    // The refusals of the gate are not "blocked" notifications either.
+    for reason in [
+        Reason::ApprovalPending,
+        Reason::ApprovalDenied,
+        Reason::ApprovalLimitReached,
+    ] {
+        assert_eq!(classify(&blocked(reason)), None, "{reason:?}");
+    }
+}
+
+#[test]
+fn the_approval_category_is_part_of_the_category_set() {
+    assert_eq!(Category::parse("approval"), Some(Category::Approval));
+    assert!(CategorySet::of(&Category::DEFAULT).contains(Category::Approval));
+    assert!(!CategorySet::of(&[Category::Blocked]).contains(Category::Approval));
+    let set = CategorySet::from_names(&["approval".into(), "vault".into()]).unwrap();
+    assert_eq!(set.names(), ["vault", "approval"]);
+}
+
+#[test]
+fn an_approval_id_keeps_its_url_safe_characters() {
+    let mut v = pending_view("https://pve.example.com:8006/x");
+    v.id = "Ab-_9zZ-_Q0123456789abcd".into();
+    let ev = crate::approvals::requested_event(&ctx_from("172.20.0.5"), &v, None);
+    let f = EventFields::from_event(Category::Approval, &ev, 1);
+    assert_eq!(f.approval.unwrap().id, "Ab-_9zZ-_Q0123456789abcd");
 }

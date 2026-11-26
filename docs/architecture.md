@@ -90,7 +90,9 @@ Agent                    Ferrowarden                Vaultwarden        Target Se
   │                           │ 3. Extract placeholder  │                    │
   │                           │    names from request   │                    │
   │                           │ 4. Validate names       │                    │
-  │                           │    against cache        │                    │
+  │                           │    against cache; hold  │                    │
+  │                           │    for a human if one   │                    │
+  │                           │    needs approval       │                    │
   │                           │ 5. Decrypt that one     │                    │
   │                           │    field from the       │                    │
   │                           │    ciphertext it holds  │                    │
@@ -112,6 +114,8 @@ Agent                    Ferrowarden                Vaultwarden        Target Se
 ```
 
 A request can also carry `{{session:name}}` placeholders. They are resolved in step 4 against the session store (the agent key's own sessions, captured from the same origin as the target) instead of the vault, and substituted in step 6. A request with `capture` stores the token it asks for in step 8, from the raw response, before scrubbing; the session store is not part of the vault and holds nothing after a restart.
+
+A credential that needs a person's approval ([approvals.md](approvals.md)) is held at the end of step 4: after every other check, before step 5 reads anything and before any connection is made. The request waits on an in-memory approval (a `watch` channel, no polling, no lock held) for up to `approval.wait_secs`; the decision comes from the admin UI or the admin API, never from the agent's key. Grants, open approvals and denials are in memory only, like sessions.
 
 Vaultwarden is not in the request path. Ferrowarden contacted it earlier (login and sync, then a cheap revision check on every refresh tick), and the only thing it received was ciphertext. Between steps 5 and 8 the credential value exists in Ferrowarden's memory, as a `Zeroizing<String>` that overwrites the memory location when it is dropped at the end of step 7.
 

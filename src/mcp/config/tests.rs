@@ -23,7 +23,7 @@ fn msg(r: Result<Config, ConfigError>) -> String {
 #[test]
 fn minimal_https_config_defaults() {
     let c = load(&[(ENV_URL, "https://ferro.example.com"), (ENV_KEY, FAKE_KEY)]).unwrap();
-    assert_eq!(c.timeout, Duration::from_secs(60));
+    assert_eq!(c.timeout, Duration::from_secs(400));
     assert_eq!(c.agent_key.as_str(), FAKE_KEY);
     assert!(!c.insecure_http_allowed);
     assert!(!c.uses_insecure_http());

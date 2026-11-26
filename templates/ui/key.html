@@ -14,7 +14,8 @@
 <dt>Saved policy</dt>
 <dd>{% if key.policy_set %}
 Credentials: {% if key.credentials.is_empty() %}none{% else %}{% for p in key.credentials %}<code>{{ p }}</code> {% endfor %}{% endif %}<br>
-Methods: {{ key.methods }}
+Methods: {{ key.methods }}<br>
+Needs approval: {% if key.approval.is_empty() %}<span class="muted">no patterns (vault items can still ask)</span>{% else %}{% for p in key.approval %}<code>{{ p }}</code> {% endfor %}{% endif %}
 {% else %}<span class="badge bad">No policy &mdash; deny-all</span>{% endif %}</dd>
 </dl>
 {% if !key.policy_set %}
@@ -34,6 +35,7 @@ Methods: {{ key.methods }}
 <input type="hidden" name="op" value="save">
 <input type="hidden" name="confirm" value="1">
 <input type="hidden" name="credentials" value="{{ form.patterns }}">
+<input type="hidden" name="approval" value="{{ form.approval }}">
 {% for m in form.methods %}{% if m.checked %}<input type="hidden" name="{{ m.field }}" value="1">{% endif %}{% endfor %}
 {% if form.all_methods %}<input type="hidden" name="m_all" value="1">{% endif %}
 <p class="actions"><button type="submit">Confirm save</button>
@@ -51,16 +53,26 @@ Methods: {{ key.methods }}
 <h3>Saved</h3>
 <p>Credentials: {% if pv.saved.credentials.is_empty() %}none{% else %}{% for p in pv.saved.credentials %}<code>{{ p }}</code> {% endfor %}{% endif %}</p>
 <p>Methods: {{ pv.saved.methods }}</p>
+<p>Needs approval: {% if pv.saved.approval.is_empty() %}none{% else %}{% for p in pv.saved.approval %}<code>{{ p }}</code> {% endfor %}{% endif %}</p>
 </div>
 <div>
 <h3>Draft</h3>
 <p>Credentials: {% if pv.draft.credentials.is_empty() %}none{% else %}{% for p in pv.draft.credentials %}<code>{{ p }}</code> {% endfor %}{% endif %}</p>
 <p>Methods: {{ pv.draft.methods }}</p>
+<p>Needs approval: {% if pv.draft.approval.is_empty() %}none{% else %}{% for p in pv.draft.approval %}<code>{{ p }}</code> {% endfor %}{% endif %}</p>
 </div>
 </div>
 {% if pv.widens %}<p class="alert warn" role="note">Saving this draft would give the key more access than it has now.</p>{% endif %}
 <p>Gained: {% if pv.gained.is_empty() %}<span class="muted">no credentials</span>{% else %}{% for n in pv.gained %}<code class="gain">{{ n }}</code> {% endfor %}{% endif %}</p>
 <p>Lost: {% if pv.lost.is_empty() %}<span class="muted">no credentials</span>{% else %}{% for n in pv.lost %}<code class="loss">{{ n }}</code> {% endfor %}{% endif %}</p>
+<h3>Credentials that would need approval ({{ pv.approval_required.len() }})</h3>
+{% if pv.approval_required.is_empty() %}
+<p class="muted">None of the credentials the draft reaches needs approval.</p>
+{% else %}
+<ul>
+{% for a in pv.approval_required %}<li><code>{{ a.name }}</code> <span class="muted">({{ a.why }})</span></li>
+{% endfor %}</ul>
+{% endif %}
 <h3>Credentials the draft reaches ({{ pv.creds.len() }})</h3>
 {% if pv.creds.is_empty() %}
 <p class="muted">The draft reaches no credential in the vault.</p>
@@ -94,6 +106,14 @@ Methods: {{ key.methods }}
 {% else %}
 <p class="alert error" role="status"><span class="badge bad">Denied</span> Status {{ c.status }}, reason <code>{{ c.reason }}</code>: {{ c.message }}</p>
 {% endif %}
+{% if c.allowed %}
+{% if c.approval.is_empty() %}
+<p>No credential of this request needs approval.</p>
+{% else %}
+<p>This request would be held for approval. A check never asks for one. Needs approval:
+{% for a in c.approval %}<code>{{ a.name }}</code> <span class="muted">({{ a.why }})</span> {% endfor %}</p>
+{% endif %}
+{% endif %}
 <p class="muted">{{ c.note }}</p>
 </section>
 {% endif %}
@@ -107,6 +127,12 @@ Methods: {{ key.methods }}
 <p class="muted hint">One pattern per line. <code>*</code> matches any run of characters; a line with just <code>*</code> allows every credential. Leave empty to allow none.</p>
 <textarea id="credentials" name="credentials" rows="6" spellcheck="false" autocomplete="off">
 {{ form.patterns }}</textarea>
+</div>
+<div class="field">
+<label for="approval">Credentials that need approval</label>
+<p class="muted hint">One pattern per line, matched like the credential patterns. A credential whose name matches needs a human's approval before this key can use it, whatever its vault item says; a vault item can also ask for approval itself (a <code>ferrowarden_approval</code> field), and the key cannot switch that off. Removing or narrowing a pattern needs confirmation.</p>
+<textarea id="approval" name="approval" rows="3" spellcheck="false" autocomplete="off">
+{{ form.approval }}</textarea>
 </div>
 <fieldset>
 <legend>Methods</legend>

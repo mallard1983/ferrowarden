@@ -115,6 +115,23 @@ docker compose up -d
 
 Replace `<ferrowarden-host>` in the examples below with the hostname or IP of the machine running Ferrowarden. If the agent is on the same host, use `localhost`. TLS is on by default; use `--cacert certs/server.crt` with a self-signed cert, or `-k` to skip verification (dev only).
 
+### Approving sensitive credentials
+
+A credential that should not be used without a person is marked in the vault (a `ferrowarden_approval` custom field with the value `required`) or per key (the key's `approval` patterns). An agent that uses it is held, you get a notification, and you decide in the admin UI (Approvals) or with the admin API. See [approvals.md](approvals.md). The day-to-day:
+
+```sh
+# What is waiting, and which grants are live
+curl -s https://<ferrowarden-host>:3000/v1/admin/approvals -H "X-Admin-Key: $ADMIN_KEY"
+# Approve for 15 minutes, or deny
+curl -s -X POST https://<ferrowarden-host>:3000/v1/admin/approvals/<id>/approve \
+  -H "X-Admin-Key: $ADMIN_KEY" -H "Content-Type: application/json" -d '{"minutes": 15}'
+curl -s -X POST https://<ferrowarden-host>:3000/v1/admin/approvals/<id>/deny -H "X-Admin-Key: $ADMIN_KEY"
+# End a grant early
+curl -s -X DELETE https://<ferrowarden-host>:3000/v1/admin/grants/<grant-id> -H "X-Admin-Key: $ADMIN_KEY"
+```
+
+Check that a notifier delivers the prompt (`POST /v1/admin/notify/test`) and that `ui.public_url` is set, or the prompt has no link. A reverse proxy in front of the API needs a read timeout above `approval.wait_secs`. Grants and open approvals are in memory: a restart or a vault lock clears them.
+
 ### Creating Keys
 
 ```sh
@@ -505,6 +522,10 @@ The placeholder name does not match any login item in the vault. Options:
 1. Check the credential name spelling — names are case-sensitive.
 2. The credential was added recently: Ferrowarden syncs with Vaultwarden and refreshes its list every `refresh_interval_secs` (default 5 minutes). Wait, or restart / re-unlock to refresh immediately.
 3. The item is not a **Login** item (secure notes, cards and identities have no password and are not listed).
+
+### `403 Forbidden` with `approval_pending` or `approval_denied`
+
+A credential needs a person's approval ([approvals.md](approvals.md)). `approval_pending` means nobody decided in `approval.wait_secs`: open the Approvals page (or `GET /v1/admin/approvals`), decide, and have the agent retry the same request. No prompt arrived? Check that `approval` is in `notify.events` and that a notifier is configured (Ferrowarden logs a warning once when it is not). `approval_denied` repeats for `approval.pending_ttl_secs` after a denial. `429 approval_limit_reached`: the key has too many open or recent approval requests; decide or wait for them to expire. A gateway timeout instead of these answers: the reverse proxy's read timeout is shorter than `approval.wait_secs`.
 
 ### `403 Forbidden` — credential not allowed for this host
 

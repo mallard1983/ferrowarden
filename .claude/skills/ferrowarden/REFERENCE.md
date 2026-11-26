@@ -78,6 +78,9 @@ Returns `200 OK` with no body. No authentication required. Used by health checks
 | 403 | Forbidden | Credential not bound to this host, or target blocked (internal address / vault backend) | Do not try other hosts. Tell the user which credential/host was refused |
 | 403 | Forbidden | "Credential X is not available to this agent key" (your key's scope excludes it; same answer whether or not it exists) | Do not retry with other names. Tell the user which credential you needed |
 | 403 | Forbidden | "Method M is not allowed for this agent key" | Do not switch methods to work around it. Tell the user which method you needed |
+| 403 | Forbidden | `code` `approval_pending` (with `approval_id`): a human has to approve this credential and has not yet | Tell the user to approve it in the Ferrowarden admin UI, quoting the id; when they have, **retry the same request**. Do not use other credentials, hosts or methods |
+| 403 | Forbidden | `code` `approval_denied`: a human refused it | Stop; do not retry or look for another way. Tell the user |
+| 429 | Too Many Requests | `code` `approval_limit_reached`: too many open or recent approval requests for your key | Do not retry now; tell the user |
 | 403 | Forbidden | "Session X may not be sent to H: it was captured from another origin" | Do not work around it. Log in to that host with its own `capture`, or tell the user |
 | 409 | Conflict | Credential name matches several vault items | Tell the user; the operator must rename one |
 | 422 | Unprocessable Entity | Malformed placeholder, unknown name, or value/field the item lacks | Copy a placeholder from `GET /v1/credentials?detail=true` |

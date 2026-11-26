@@ -30,6 +30,7 @@ fn test_config() -> Config {
         vault: crate::config::VaultConfig::default(),
         metrics: Default::default(),
         sessions: Default::default(),
+        approval: Default::default(),
     }
 }
 

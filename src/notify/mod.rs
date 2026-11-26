@@ -52,22 +52,27 @@ pub enum Category {
     Admin,
     /// Dropped events or notifications.
     System,
+    /// A request is waiting for a human to approve or deny it. Sent once per
+    /// new pending approval; on whenever a notifier is configured.
+    Approval,
 }
 
 impl Category {
-    pub const ALL: [Category; 5] = [
+    pub const ALL: [Category; 6] = [
         Category::Blocked,
         Category::AuthFailure,
         Category::Vault,
         Category::Admin,
         Category::System,
+        Category::Approval,
     ];
     /// Enabled when `notify.events` is not set.
-    pub const DEFAULT: [Category; 4] = [
+    pub const DEFAULT: [Category; 5] = [
         Category::Blocked,
         Category::AuthFailure,
         Category::Vault,
         Category::System,
+        Category::Approval,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -77,6 +82,7 @@ impl Category {
             Category::Vault => "vault",
             Category::Admin => "admin",
             Category::System => "system",
+            Category::Approval => "approval",
         }
     }
 

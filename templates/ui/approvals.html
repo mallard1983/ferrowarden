@@ -1,0 +1,63 @@
+{% extends "ui/base.html" %}
+{% block title %}Approvals{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<h1>Approvals</h1>
+{% if let Some(message) = notice %}<p class="alert ok" role="status">{{ message }}</p>{% endif %}
+<p class="muted">An agent that uses a credential marked as needing approval waits here for a decision. Deciding needs a sign-in within the last 10 minutes.</p>
+<h2>Waiting for a decision ({{ pending.len() }})</h2>
+{% if pending.is_empty() %}
+<p class="muted">Nothing is waiting.</p>
+{% else %}
+<div class="scroll">
+<table class="stack">
+<thead>
+<tr><th scope="col">Agent key</th><th scope="col">Credentials</th><th scope="col">Request</th><th scope="col">Asked</th><th scope="col">Open until</th><th scope="col">Actions</th></tr>
+</thead>
+<tbody>
+{% for p in pending %}
+<tr class="card-row">
+<th scope="row">{{ p.key_name }}</th>
+<td data-label="Credentials">{% for c in p.credentials %}<code>{{ c.name }}</code> {% endfor %}</td>
+<td data-label="Request"><code>{{ p.method }}</code> {{ p.target }}<code>{{ p.path }}</code></td>
+<td data-label="Asked">{{ p.created }}</td>
+<td data-label="Open until">{{ p.expires }}</td>
+<td data-label="Actions"><span class="links"><a href="/ui/approvals/{{ p.id }}">Review</a></span></td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
+
+<h2>Live grants ({{ grants.len() }})</h2>
+{% include "ui/_sudo.html" %}
+{% if grants.is_empty() %}
+<p class="muted">No grant is live. A grant lets one agent key use credentials at one target without asking again, until it ends.</p>
+{% else %}
+<div class="scroll">
+<table class="stack">
+<thead>
+<tr><th scope="col">Agent key</th><th scope="col">Credentials</th><th scope="col">Target</th><th scope="col">Approved by</th><th scope="col">Ends</th><th scope="col">Actions</th></tr>
+</thead>
+<tbody>
+{% for g in grants %}
+<tr class="card-row">
+<th scope="row">{{ g.key_name }}</th>
+<td data-label="Credentials">{% for c in g.credentials %}<code>{{ c }}</code> {% endfor %}</td>
+<td data-label="Target">{{ g.target }}</td>
+<td data-label="Approved by">{{ g.approver }}</td>
+<td data-label="Ends">{{ g.expires }}</td>
+<td data-label="Actions">
+<form method="post" action="/ui/grants/{{ g.id }}/revoke" class="inline">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="secondary">Revoke</button>
+</form>
+</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

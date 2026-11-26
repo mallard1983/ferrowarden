@@ -18,6 +18,12 @@
 <textarea id="credentials" name="credentials" rows="6" spellcheck="false" autocomplete="off">
 {{ patterns }}</textarea>
 </div>
+<div class="field">
+<label for="approval">Credentials that need approval</label>
+<p class="muted hint">Optional. One pattern per line, matched like the credential patterns. A credential whose name matches needs a human's approval before this key can use it. A vault item can also ask for approval itself, with a <code>ferrowarden_approval</code> field. Leave empty for no extra requirement.</p>
+<textarea id="approval" name="approval" rows="3" spellcheck="false" autocomplete="off">
+{{ approval }}</textarea>
+</div>
 <fieldset>
 <legend>Methods</legend>
 <div class="checks">

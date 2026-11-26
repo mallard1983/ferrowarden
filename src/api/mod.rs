@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod approval_service;
 pub mod captured_sessions;
 pub mod credentials;
 pub mod forward;
@@ -52,6 +53,10 @@ enum Op {
     ListAuditEvents,
     GetStatus,
     SendTestNotification,
+    ListApprovals,
+    ApproveApproval,
+    DenyApproval,
+    RevokeGrant,
 }
 
 /// One route of the HTTP API.
@@ -70,7 +75,7 @@ pub struct Route {
 /// router from this table, and a unit test compares it with `docs/openapi.yaml`,
 /// so a route cannot be added without being described there.
 #[rustfmt::skip]
-pub const ROUTES: [Route; 15] = [
+pub const ROUTES: [Route; 19] = [
     Route { method: "GET", path: "/health", group: Group::Public, op: Op::Health },
     Route { method: "GET", path: "/v1/openapi.json", group: Group::Agent, op: Op::OpenApi },
     Route { method: "GET", path: "/v1/credentials", group: Group::Agent, op: Op::ListCredentials },
@@ -86,6 +91,10 @@ pub const ROUTES: [Route; 15] = [
     Route { method: "GET", path: "/v1/admin/audit", group: Group::Admin, op: Op::ListAuditEvents },
     Route { method: "GET", path: "/v1/admin/status", group: Group::Admin, op: Op::GetStatus },
     Route { method: "POST", path: "/v1/admin/notify/test", group: Group::Admin, op: Op::SendTestNotification },
+    Route { method: "GET", path: "/v1/admin/approvals", group: Group::Admin, op: Op::ListApprovals },
+    Route { method: "POST", path: "/v1/admin/approvals/{id}/approve", group: Group::Admin, op: Op::ApproveApproval },
+    Route { method: "POST", path: "/v1/admin/approvals/{id}/deny", group: Group::Admin, op: Op::DenyApproval },
+    Route { method: "DELETE", path: "/v1/admin/grants/{id}", group: Group::Admin, op: Op::RevokeGrant },
 ];
 
 /// The axum method filter for a table entry's method.
@@ -118,6 +127,10 @@ fn handler(route: &Route) -> MethodRouter<Arc<AppState>> {
         Op::ListAuditEvents => on(f, admin::get_audit),
         Op::GetStatus => on(f, admin::get_status),
         Op::SendTestNotification => on(f, admin::send_test_notification),
+        Op::ListApprovals => on(f, approval_service::list_approvals),
+        Op::ApproveApproval => on(f, approval_service::approve_approval),
+        Op::DenyApproval => on(f, approval_service::deny_approval),
+        Op::RevokeGrant => on(f, approval_service::revoke_grant_route),
     }
 }
 

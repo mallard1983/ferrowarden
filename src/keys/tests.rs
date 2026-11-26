@@ -53,6 +53,7 @@ fn save_and_load_roundtrip() {
             created_at: Utc::now(),
             credentials: None,
             methods: None,
+            approval: None,
         },
         StoredKey {
             id: "id-2".to_string(),
@@ -61,6 +62,7 @@ fn save_and_load_roundtrip() {
             created_at: Utc::now(),
             credentials: None,
             methods: None,
+            approval: None,
         },
     ];
 
@@ -97,6 +99,7 @@ fn save_overwrites_existing_file() {
         created_at: Utc::now(),
         credentials: None,
         methods: None,
+        approval: None,
     }];
     save(&path, &v1).unwrap();
 
@@ -228,7 +231,7 @@ b"]"#,
 fn policy_roundtrips_and_is_always_written_explicitly() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("keys.json");
-    let policy = KeyPolicy::from_raw(vec!["lab_*".into()], vec!["*".into()]).unwrap();
+    let policy = KeyPolicy::from_raw(vec!["lab_*".into()], vec!["*".into()], vec![]).unwrap();
     let keys = vec![StoredKey::new(
         "i".into(),
         "n".into(),
@@ -245,4 +248,70 @@ fn policy_roundtrips_and_is_always_written_explicitly() {
     let loaded = load(&path).unwrap();
     assert!(loaded[0].policy_set());
     assert_eq!(loaded[0].policy(), policy);
+}
+
+// ── approval patterns in the key file ─────────────────────────────────────
+
+#[test]
+fn an_entry_without_approval_loads_with_none_and_still_has_a_policy() {
+    // The 0.2.0 shape: credentials and methods, no `approval`.
+    let (_d, p) = write_raw(&format!(
+        "[{}]",
+        ONE.replace('}', r#","credentials":["a_*"],"methods":["GET"]}"#)
+    ));
+    let keys = load(&p).unwrap();
+    assert!(
+        keys[0].policy_set(),
+        "absence of approval is not a legacy key"
+    );
+    assert_eq!(keys[0].approval, None);
+    assert!(keys[0].policy().approval.is_empty());
+    // A 0.1.0 entry has none either.
+    let (_d, p) = write_raw(&format!("[{ONE}]"));
+    assert!(load(&p).unwrap()[0].policy().approval.is_empty());
+}
+
+#[test]
+fn approval_is_read_validated_and_never_null() {
+    let (_d, p) = write_raw(&format!(
+        "[{}]",
+        ONE.replace(
+            '}',
+            r#","credentials":["*"],"methods":["GET"],"approval":["p_*","p_*","q"]}"#
+        )
+    ));
+    assert_eq!(load(&p).unwrap()[0].policy().approval, ["p_*", "q"]);
+
+    let (_d, p) = write_raw(&format!("[{}]", ONE.replace('}', r#","approval":null}"#)));
+    let e = load(&p).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+    assert!(e.to_string().contains("`approval`"), "{e}");
+    for extra in [
+        r#","approval":[""]"#,
+        r#","approval":"*""#,
+        r#","approval":[1]"#,
+    ] {
+        let (_d, p) = write_raw(&format!("[{}]", ONE.replace('}', &format!("{extra}}}"))));
+        assert!(load(&p).is_err(), "{extra}");
+    }
+}
+
+#[test]
+fn approval_roundtrips_and_a_changed_policy_writes_it() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("keys.json");
+    let policy =
+        KeyPolicy::from_raw(vec!["*".into()], vec!["GET".into()], vec!["nas_*".into()]).unwrap();
+    let mut key = StoredKey::new("i".into(), "n".into(), "h".into(), Utc::now(), &policy);
+    save(&path, std::slice::from_ref(&key)).unwrap();
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("\"approval\""));
+    assert_eq!(load(&path).unwrap()[0].policy(), policy);
+
+    // Setting a policy on an entry that had no approval list writes one.
+    key.approval = None;
+    let wider = KeyPolicy::from_raw(vec!["*".into()], vec!["GET".into()], vec![]).unwrap();
+    key.set_policy(&wider);
+    assert_eq!(key.approval, Some(vec![]));
 }

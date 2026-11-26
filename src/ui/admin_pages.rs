@@ -31,6 +31,7 @@ use axum::{
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::api::key_service::{self, AuditFilter, Caller, KeySummary, Preview, Via};
+use crate::approvals::ApprovalNeed;
 use crate::error::FerroError;
 use crate::events::{Action, Outcome};
 use crate::middleware::request_context::RequestContext;
@@ -39,9 +40,9 @@ use crate::proxy::forward::ProxyRequest;
 use crate::ui::drafts::{DraftTarget, RequestDraft, SavedDraft};
 use crate::ui::handlers::{page, status_page, Reply};
 use crate::ui::pages::{
-    AuditPage, AuditRow, CredRow, DraftForm, KeyFacts, KeyFormUsedPage, KeyNewPage, KeyPage,
-    KeyRevokePage, KeyRow, KeyTokenPage, KeysPage, LimitOpt, MethodBox, Nav, NotifyTestRow,
-    NotifyTestView, Opt, PolicyView, PreviewView, RequestCheckView,
+    ApprovalRow, AuditPage, AuditRow, CredRow, DraftForm, KeyFacts, KeyFormUsedPage, KeyNewPage,
+    KeyPage, KeyRevokePage, KeyRow, KeyTokenPage, KeysPage, LimitOpt, MethodBox, Nav,
+    NotifyTestRow, NotifyTestView, Opt, PolicyView, PreviewView, RequestCheckView,
 };
 use crate::ui::session::{secrets_equal, SessionView};
 use crate::ui::web::{
@@ -73,11 +74,12 @@ const NOTICE_DRAFT_EXPIRED: &str =
 const NOTICE_DRAFT_EXPIRED_NEW: &str = "The unsaved form could not be restored: it expired, was \
 already restored, or was made from another address. Fill in the form again.";
 
-const NEW_FIELDS: [&str; 12] = [
+const NEW_FIELDS: [&str; 13] = [
     "csrf",
     "form_id",
     "name",
     "credentials",
+    "approval",
     "m_GET",
     "m_HEAD",
     "m_POST",
@@ -88,11 +90,12 @@ const NEW_FIELDS: [&str; 12] = [
     "m_all",
 ];
 
-const EDIT_FIELDS: [&str; 16] = [
+const EDIT_FIELDS: [&str; 17] = [
     "csrf",
     "op",
     "confirm",
     "credentials",
+    "approval",
     "m_GET",
     "m_HEAD",
     "m_POST",
@@ -109,9 +112,15 @@ const EDIT_FIELDS: [&str; 16] = [
 
 // -- Shared plumbing ------------------------------------------------------------
 
-fn nav<'a>(current: &'a str, email: &'a str, view: &'a SessionView) -> Option<Nav<'a>> {
+pub(super) fn nav<'a>(
+    ui: &UiState,
+    current: &'a str,
+    email: &'a str,
+    view: &'a SessionView,
+) -> Option<Nav<'a>> {
     Some(Nav {
         current,
+        pending_approvals: ui.pending_approvals(),
         account_email: email,
         csrf: &view.csrf,
     })
@@ -119,7 +128,7 @@ fn nav<'a>(current: &'a str, email: &'a str, view: &'a SessionView) -> Option<Na
 
 /// Steps of every POST here: same-origin proof, a session, the strictly
 /// parsed form, the CSRF token. `allowed` must contain `csrf`.
-async fn begin_post(
+pub(super) async fn begin_post(
     ui: &UiState,
     ctx: &RequestContext,
     transport: &Transport,
@@ -224,11 +233,11 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-fn caller(ctx: &RequestContext) -> Caller<'_> {
+pub(super) fn caller(ctx: &RequestContext) -> Caller<'_> {
     Caller { ctx, via: Via::Ui }
 }
 
-fn fmt_time(t: chrono::DateTime<chrono::Utc>) -> String {
+pub(super) fn fmt_time(t: chrono::DateTime<chrono::Utc>) -> String {
     t.format("%Y-%m-%d %H:%M UTC").to_string()
 }
 
@@ -280,6 +289,8 @@ fn split_patterns(text: &str) -> Vec<String> {
 /// A policy draft as the form carries it.
 struct Draft {
     patterns: Vec<String>,
+    /// Credential patterns that need approval for the key.
+    approval: Vec<String>,
     /// Upper-case method names, plus `*` when "all methods" is ticked.
     methods: Vec<String>,
     checked: Vec<bool>,
@@ -295,6 +306,12 @@ impl Draft {
             .map(|v| v.to_string())
             .unwrap_or_default();
         let patterns = split_patterns(&text);
+        let approval = split_patterns(
+            &form
+                .take("approval")
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
         let mut methods = Vec::new();
         let mut checked = Vec::new();
         for m in METHODS {
@@ -310,6 +327,7 @@ impl Draft {
         }
         Ok(Self {
             patterns,
+            approval,
             methods,
             checked,
             all,
@@ -318,10 +336,14 @@ impl Draft {
 
     /// The draft for a key's saved policy (empty for a key without one).
     fn from_key(key: &KeySummary) -> Self {
-        let (patterns, methods) = if key.policy_set {
-            (key.credentials.clone(), key.methods.clone())
+        let (patterns, methods, approval) = if key.policy_set {
+            (
+                key.credentials.clone(),
+                key.methods.clone(),
+                key.approval.clone(),
+            )
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         };
         let all = methods.iter().any(|m| m == "*");
         let checked = METHODS
@@ -330,6 +352,7 @@ impl Draft {
             .collect();
         Self {
             patterns,
+            approval,
             methods,
             checked,
             all,
@@ -340,6 +363,7 @@ impl Draft {
     fn blank() -> Self {
         Self {
             patterns: Vec::new(),
+            approval: Vec::new(),
             methods: Vec::new(),
             checked: vec![false; METHODS.len()],
             all: false,
@@ -361,6 +385,7 @@ impl Draft {
         }
         Self {
             patterns: saved.patterns.clone(),
+            approval: saved.approval.clone(),
             methods,
             checked,
             all: saved.all_methods,
@@ -378,6 +403,7 @@ impl Draft {
             target,
             name: name.to_string(),
             patterns: self.patterns.clone(),
+            approval: self.approval.clone(),
             checked: self.checked.clone(),
             all_methods: self.all,
             request: request.map(|r| RequestDraft {
@@ -403,6 +429,10 @@ impl Draft {
 
     fn patterns_text(&self) -> String {
         self.patterns.join("\n")
+    }
+
+    fn approval_text(&self) -> String {
+        self.approval.join("\n")
     }
 }
 
@@ -554,7 +584,7 @@ pub async fn keys_list(
         StatusCode::OK,
         KeysPage {
             css_path: &ui.css_path,
-            nav: nav("keys", &email, &view),
+            nav: nav(&ui, "keys", &email, &view),
             sudo: ui.sudo_info(&view),
             notice: notice_from_query(&uri),
             rows,
@@ -581,7 +611,7 @@ fn new_form_page(ui: &UiState, view: &SessionView, email: &str, form: NewForm<'_
         form.status,
         KeyNewPage {
             css_path: &ui.css_path,
-            nav: nav("keys", email, view),
+            nav: nav(ui, "keys", email, view),
             sudo: ui.sudo_info(view),
             csrf: &view.csrf,
             form_id: form.form_id,
@@ -589,6 +619,7 @@ fn new_form_page(ui: &UiState, view: &SessionView, email: &str, form: NewForm<'_
             error: form.error,
             name: form.name,
             patterns: &form.draft.patterns_text(),
+            approval: &form.draft.approval_text(),
             methods: form.draft.method_boxes(),
             all_methods: form.draft.all,
         }
@@ -610,7 +641,7 @@ async fn form_used(ui: &UiState, view: &SessionView) -> Reply {
         StatusCode::CONFLICT,
         KeyFormUsedPage {
             css_path: &ui.css_path,
-            nav: nav("keys", &email, view),
+            nav: nav(ui, "keys", &email, view),
         }
         .render(),
     )
@@ -769,6 +800,7 @@ pub async fn key_new_post(
         &name,
         draft.patterns.clone(),
         draft.methods.clone(),
+        draft.approval.clone(),
     )
     .await;
     let email = ui.account_email().await.unwrap_or_default();
@@ -781,12 +813,13 @@ pub async fn key_new_post(
                 StatusCode::OK,
                 KeyTokenPage {
                     css_path: &ui.css_path,
-                    nav: nav("keys", &email, &view),
+                    nav: nav(&ui, "keys", &email, &view),
                     id: &created.id,
                     name: &created.name,
                     token: &created.token,
                     credentials: &created.credentials,
                     methods: &methods_label(&created.methods),
+                    approval: &created.approval,
                 }
                 .render(),
             );
@@ -842,7 +875,7 @@ fn key_page(
         extras.status,
         KeyPage {
             css_path: &ui.css_path,
-            nav: nav("keys", email, view),
+            nav: nav(ui, "keys", email, view),
             sudo: ui.sudo_info(view),
             csrf: &view.csrf,
             key: KeyFacts {
@@ -852,11 +885,13 @@ fn key_page(
                 policy_set: key.policy_set,
                 credentials: key.credentials.clone(),
                 methods: methods_label(&key.methods),
+                approval: key.approval.clone(),
             },
             notice: extras.notice,
             error: extras.error.as_deref(),
             form: DraftForm {
                 patterns: draft.patterns_text(),
+                approval: draft.approval_text(),
                 methods: draft.method_boxes(),
                 all_methods: draft.all,
                 req_methods: request.method_options(),
@@ -876,6 +911,22 @@ fn policy_view(p: &KeyPolicy) -> PolicyView {
     PolicyView {
         credentials: p.credentials.clone(),
         methods: methods_label(&p.methods),
+        approval: p.approval.clone(),
+    }
+}
+
+/// `vault field`, `key policy` or both, for one credential that needs approval.
+fn approval_row(need: &ApprovalNeed) -> ApprovalRow {
+    let mut why = Vec::new();
+    if need.reasons.vault_field {
+        why.push("vault field");
+    }
+    if need.reasons.key_policy {
+        why.push("key policy");
+    }
+    ApprovalRow {
+        name: need.item.clone(),
+        why: why.join(" and "),
     }
 }
 
@@ -888,6 +939,7 @@ fn views(p: Preview) -> (PreviewView, Option<RequestCheckView>) {
         credentials,
         gained,
         lost,
+        approval_required,
         request_check,
         ..
     } = p;
@@ -907,6 +959,7 @@ fn views(p: Preview) -> (PreviewView, Option<RequestCheckView>) {
             .unwrap_or_default(),
         message: c.message.unwrap_or_default(),
         note: key_service::DNS_NOTE,
+        approval: c.approval.iter().map(approval_row).collect(),
     });
     (
         PreviewView {
@@ -915,6 +968,7 @@ fn views(p: Preview) -> (PreviewView, Option<RequestCheckView>) {
             gained,
             lost,
             creds,
+            approval_required: approval_required.iter().map(approval_row).collect(),
             widens,
         },
         check,
@@ -1089,6 +1143,7 @@ pub async fn key_post(
                 &id,
                 Patch::Value(draft.patterns.clone()),
                 Patch::Value(draft.methods.clone()),
+                Patch::Value(draft.approval.clone()),
                 proxy_request.as_ref(),
             )
             .await;
@@ -1125,10 +1180,12 @@ pub async fn key_post(
             let saved = KeyPolicy {
                 credentials: key.credentials.clone(),
                 methods: key.methods.clone(),
+                approval: key.approval.clone(),
             };
             let new_policy = match saved.patched(
                 Patch::Value(draft.patterns.clone()),
                 Patch::Value(draft.methods.clone()),
+                Patch::Value(draft.approval.clone()),
             ) {
                 Ok(p) => p,
                 Err(e) => {
@@ -1149,6 +1206,7 @@ pub async fn key_post(
                     &id,
                     Patch::Value(draft.patterns.clone()),
                     Patch::Value(draft.methods.clone()),
+                    Patch::Value(draft.approval.clone()),
                     None,
                 )
                 .await
@@ -1169,6 +1227,7 @@ pub async fn key_post(
                 &id,
                 Patch::Value(draft.patterns.clone()),
                 Patch::Value(draft.methods.clone()),
+                Patch::Value(draft.approval.clone()),
             )
             .await
             {
@@ -1208,7 +1267,7 @@ pub async fn revoke_get(
         StatusCode::OK,
         KeyRevokePage {
             css_path: &ui.css_path,
-            nav: nav("keys", &email, &view),
+            nav: nav(&ui, "keys", &email, &view),
             sudo: ui.sudo_info(&view),
             csrf: &view.csrf,
             id: &key.id,
@@ -1418,7 +1477,7 @@ pub async fn audit_get(
         StatusCode::OK,
         AuditPage {
             css_path: &ui.css_path,
-            nav: nav("audit", &email, &view),
+            nav: nav(&ui, "audit", &email, &view),
             rows,
             actions: Action::ALL
                 .iter()

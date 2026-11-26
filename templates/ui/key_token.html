@@ -14,6 +14,8 @@
 <dd>{% if credentials.is_empty() %}None{% else %}{% for p in credentials %}<code>{{ p }}</code> {% endfor %}{% endif %}</dd>
 <dt>Methods</dt>
 <dd>{{ methods }}</dd>
+<dt>Needs approval</dt>
+<dd>{% if approval.is_empty() %}None (beyond what vault items ask for){% else %}{% for p in approval %}<code>{{ p }}</code> {% endfor %}{% endif %}</dd>
 </dl>
 <p>Select the token text and copy it. This page is not stored by the browser cache and the token is in no URL; reloading or going back will not show it again.</p>
 <p class="actions"><a class="button secondary" href="/ui/keys">Back to keys</a></p>

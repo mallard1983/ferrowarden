@@ -48,10 +48,21 @@ pub async fn refresh_credentials(state: &AppState) -> FerroResult<()> {
             }
             let map = listing.map;
             let count = map.len();
+            // Items whose `ferrowarden_approval` value is not `required`
+            // still need approval (fail closed). A warning, reported when the
+            // number changes, so the operator can fix the spelling.
+            let approval_invalid = map
+                .values()
+                .flatten()
+                .filter(|e| e.approval_field_invalid)
+                .count();
+            let warn_approval = state.sync_stats.swap_approval_invalid(approval_invalid)
+                != approval_invalid as u64
+                && approval_invalid > 0;
             let previous = std::mem::replace(&mut *state.credentials.write().await, map).len();
             tracing::debug!(credential_count = count, "Credential cache refreshed");
             let excluded = listing.excluded.filter(|r| !r.is_empty());
-            if count != previous || excluded.is_some() {
+            if count != previous || excluded.is_some() || warn_approval {
                 let mut event = SecurityEvent::new(Action::VaultSync)
                     .detail("credential_count", count)
                     .detail("previous", previous);
@@ -66,6 +77,16 @@ pub async fn refresh_credentials(state: &AppState) -> FerroResult<()> {
                         .detail("excluded", report.total())
                         .detail("excluded_reasons", serde_json::json!(report.counts))
                         .detail("excluded_ids", serde_json::json!(report.ids));
+                }
+                if warn_approval {
+                    tracing::warn!(
+                        items = approval_invalid,
+                        "Vault items have a ferrowarden_approval field whose value is not \"required\"; they still need approval"
+                    );
+                    event = event.detail(
+                        "warnings",
+                        serde_json::json!({ "approval_field_invalid": approval_invalid }),
+                    );
                 }
                 state.events.emit(event);
             }

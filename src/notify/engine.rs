@@ -59,6 +59,8 @@ pub enum Class {
     KeyPolicyChange,
     UiLoginOk,
     EventsDropped,
+    /// A request is waiting for a human to approve it.
+    ApprovalRequested,
 }
 
 impl Class {
@@ -74,6 +76,7 @@ impl Class {
                 Category::Admin
             }
             Class::EventsDropped => Category::System,
+            Class::ApprovalRequested => Category::Approval,
         }
     }
 }
@@ -113,6 +116,9 @@ pub fn classify(event: &SecurityEvent) -> Option<Class> {
         Action::KeyRevoke if e.outcome == Outcome::Success => Some(Class::KeyRevoke),
         Action::KeyPolicyChange if e.outcome == Outcome::Success => Some(Class::KeyPolicyChange),
         Action::EventsDropped => Some(Class::EventsDropped),
+        Action::ApprovalRequested if e.outcome == Outcome::Success => {
+            Some(Class::ApprovalRequested)
+        }
         _ => None,
     }
 }
@@ -264,6 +270,20 @@ impl Engine {
                 dropped_count(event),
                 false,
             ),
+            // One prompt per approval: the subject is the approval itself, so
+            // the per-subject limit never holds one back.
+            Class::ApprovalRequested => (
+                event
+                    .ferrowarden
+                    .details
+                    .as_ref()
+                    .and_then(|d| d.get("approval_id"))
+                    .and_then(|v| v.as_str())
+                    .map_or_else(|| key_subject, |id| format!("approval:{id}")),
+                Kind::ApprovalRequest,
+                1,
+                false,
+            ),
         };
         // `count` is what the notification stands for; for a failure burst it
         // is the number of failures in the window, which the message states.
@@ -343,7 +363,10 @@ impl Engine {
                 paused: false,
             };
         }
-        if self.hour.sent >= self.s.max_per_hour {
+        // An approval prompt is never held back by the hourly cap: a request
+        // is waiting for it, and approvals are limited per agent key already
+        // (`approval.max_requests_per_key_per_hour`).
+        if self.hour.sent >= self.s.max_per_hour && !matches!(cand.kind, Kind::ApprovalRequest) {
             self.hour.suppressed += cand.count;
             self.stats
                 .suppressed

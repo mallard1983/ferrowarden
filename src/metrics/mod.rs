@@ -91,6 +91,11 @@ struct OutcomeLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ResultLabels {
+    result: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct LimiterLabels {
     limiter: &'static str,
 }
@@ -125,6 +130,16 @@ const AUTH_KINDS: [&str; 4] = ["agent", "admin", "ui", "metrics"];
 const ALL_SENDERS: &str = "all";
 /// The values of `ferrowarden_session_uses_total{outcome}`.
 const SESSION_USE_OUTCOMES: [&str; 3] = ["success", "unknown_session", "session_host_not_allowed"];
+/// The values of `ferrowarden_approval_requests_total{outcome}`.
+const APPROVAL_OUTCOMES: [&str; 4] = ["granted", "denied", "expired", "limit_reached"];
+/// The values of `ferrowarden_forward_approval_total{result}`: how a request
+/// that needed approval ended at the gate.
+const FORWARD_APPROVAL_RESULTS: [&str; 4] = [
+    "granted_by_grant",
+    "approved_while_waiting",
+    "pending",
+    "denied",
+];
 
 fn duration_histogram() -> Histogram {
     Histogram::new(DURATION_BUCKETS)
@@ -153,6 +168,10 @@ pub struct Metrics {
     session_captures: Family<OutcomeLabels, Counter>,
     session_uses: Family<OutcomeLabels, Counter>,
     sessions_active: Gauge,
+    approval_requests: Family<OutcomeLabels, Counter>,
+    forward_approval: Family<ResultLabels, Counter>,
+    approvals_pending: Gauge,
+    approval_grants_active: Gauge,
     /// Only with `metrics.credential_labels = true`.
     credential_uses: Option<Family<CredentialLabels, Counter>>,
 }
@@ -199,6 +218,10 @@ impl Metrics {
             session_captures: Family::default(),
             session_uses: Family::default(),
             sessions_active: Gauge::default(),
+            approval_requests: Family::default(),
+            forward_approval: Family::default(),
+            approvals_pending: Gauge::default(),
+            approval_grants_active: Gauge::default(),
             credential_uses: credential_labels.then(Family::default),
             registry: Registry::default(),
         };
@@ -296,6 +319,26 @@ impl Metrics {
             "Captured sessions that are live now, across all agent keys (names and values are never exported)",
             m.sessions_active.clone(),
         );
+        registry.register(
+            "approval_requests",
+            "Approval requests by outcome (granted, denied, expired or limit_reached: an agent key over its limits)",
+            m.approval_requests.clone(),
+        );
+        registry.register(
+            "forward_approval",
+            "Forward requests that needed approval, by how they ended at the gate (granted_by_grant, approved_while_waiting, pending or denied)",
+            m.forward_approval.clone(),
+        );
+        registry.register(
+            "approvals_pending",
+            "Approvals waiting for a human's decision now (names and ids are never exported)",
+            m.approvals_pending.clone(),
+        );
+        registry.register(
+            "approval_grants_active",
+            "Approval grants that are live now, across all agent keys",
+            m.approval_grants_active.clone(),
+        );
         if let Some(family) = &m.credential_uses {
             registry.register(
                 "forward_credential_uses",
@@ -329,6 +372,14 @@ impl Metrics {
         for outcome in SESSION_USE_OUTCOMES {
             let _ = m.session_uses.get_or_create(&OutcomeLabels { outcome });
         }
+        for outcome in APPROVAL_OUTCOMES {
+            let _ = m
+                .approval_requests
+                .get_or_create(&OutcomeLabels { outcome });
+        }
+        for result in FORWARD_APPROVAL_RESULTS {
+            let _ = m.forward_approval.get_or_create(&ResultLabels { result });
+        }
 
         Arc::new(Self { registry, ..m })
     }
@@ -361,6 +412,10 @@ impl Metrics {
             .set(i64::try_from(s.ui_sessions).unwrap_or(i64::MAX));
         self.sessions_active
             .set(i64::try_from(s.sessions_active).unwrap_or(i64::MAX));
+        self.approvals_pending
+            .set(i64::try_from(s.approvals_pending).unwrap_or(i64::MAX));
+        self.approval_grants_active
+            .set(i64::try_from(s.approval_grants).unwrap_or(i64::MAX));
         // Counters that the rest of the program keeps: copy their totals.
         self.events_dropped
             .inner()
@@ -399,6 +454,10 @@ pub struct Snapshot {
     pub ui_sessions: usize,
     /// Live captured sessions, all keys together.
     pub sessions_active: usize,
+    /// Approvals waiting for a decision.
+    pub approvals_pending: usize,
+    /// Live approval grants, all keys together.
+    pub approval_grants: usize,
 }
 
 impl Snapshot {
@@ -410,6 +469,7 @@ impl Snapshot {
             let with = keys.values().filter(|k| k.policy_set).count();
             (with, keys.len() - with)
         };
+        let (approvals_pending, approval_grants) = state.approvals.counts(chrono::Utc::now());
         Self {
             unlocked: !state.is_locked().await,
             credentials: state.credentials.read().await.len(),
@@ -421,6 +481,8 @@ impl Snapshot {
             notify: state.notify.snapshot(),
             ui_sessions: ui_sessions.unwrap_or(0),
             sessions_active: state.sessions.active(chrono::Utc::now()),
+            approvals_pending,
+            approval_grants,
         }
     }
 }
@@ -559,10 +621,22 @@ impl Consumer {
                     .get_or_create(&OutcomeLabels { outcome })
                     .inc();
             }
+            // Decisions and expiries count as approval outcomes; a failed
+            // attempt to decide (the approval was not pending) does not.
+            Action::ApprovalGranted if !failed => self.approval_outcome("granted"),
+            Action::ApprovalDenied if !failed => self.approval_outcome("denied"),
+            Action::ApprovalExpired => self.approval_outcome("expired"),
             // `metrics_auth` failures are counted where they happen
             // ([`Metrics::count_metrics_auth_failure`]), all of them.
             _ => {}
         }
+    }
+
+    fn approval_outcome(&self, outcome: &'static str) {
+        self.m
+            .approval_requests
+            .get_or_create(&OutcomeLabels { outcome })
+            .inc();
     }
 
     fn auth_failure(&self, kind: &'static str) {
@@ -573,6 +647,20 @@ impl Consumer {
     }
 
     fn forward(&mut self, e: &SecurityEvent, outcome: &'static str, reason: &'static str) {
+        // The approval gate: how the request ended there. The detail is one of
+        // a fixed set; anything else is not counted.
+        if let Some(result) = FORWARD_APPROVAL_RESULTS
+            .into_iter()
+            .find(|r| Some(*r) == detail_str(e, "approval"))
+        {
+            self.m
+                .forward_approval
+                .get_or_create(&ResultLabels { result })
+                .inc();
+        }
+        if e.event.reason == Some(Reason::ApprovalLimitReached) {
+            self.approval_outcome("limit_reached");
+        }
         let key = match &e.ferrowarden.key {
             Some(key) => self.keys.admit(&key.name),
             None => String::new(),

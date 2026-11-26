@@ -309,6 +309,7 @@ async fn harness(opts: Opts) -> Harness {
         vault: crate::config::VaultConfig::default(),
         metrics: Default::default(),
         sessions: Default::default(),
+        approval: Default::default(),
     };
     let events = Arc::new(EventLog::buffer_only(1000));
     let mut app = AppState::new(config.clone(), events.clone());
@@ -1892,5 +1893,6 @@ fn the_provider_enum_matches_the_documented_event_names() {
 }
 
 mod admin;
+mod approvals;
 mod brand;
 mod notify;

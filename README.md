@@ -31,6 +31,8 @@ The agent key is scoped to Ferrowarden's proxy endpoints. It does not give acces
 
 **What is in 0.2.0:** field placeholders (`{{vault:name:username}}`, custom fields, notes, TOTP), strict JSON input, default-deny scoped agent keys with a policy preview, a structured security event stream for SIEMs, and an optional admin web UI. See the [Changelog](CHANGELOG.md) for upgrade notes.
 
+**Next (unreleased): human approval.** A credential can be marked as needing a person's yes (a `ferrowarden_approval` field on the vault item, or the agent key's `approval` patterns). The request is held, you get a prompt through Gotify, ntfy or a webhook, and you approve (for 5 minutes, an hour, as you choose) or deny in the admin UI or the admin API. The value is not read and nothing is sent until you do, and the agent's own key cannot decide. See [Human approval](docs/approvals.md).
+
 **Next (unreleased): captured sessions.** For APIs that log in and return a token (Portainer, Proxmox), the login request can ask Ferrowarden to capture the token. It stays in Ferrowarden's memory, bound to the agent key and the host it came from, and the agent sees `[CAPTURED:name]`; later requests use `{{session:name}}`. See [Captured sessions](docs/sessions.md).
 
 Ferrowarden narrows how credentials are exposed; it does not remove every risk. Scrubbing has limits, and a credential sent to a service that is allowed to receive it is in that service's hands. [Security Model](docs/security.md) covers the threat model and the limits.
@@ -141,6 +143,7 @@ Behind a TLS reverse proxy such as Pangolin, see [docs/tls.md](docs/tls.md#pango
 | [Setup Guide](docs/setup.md) | Installation, Vaultwarden setup, first run |
 | [Deployment Profiles](docs/deployment-profiles.md) | The hardened container (scratch image, read-only, no capabilities) and the dedicated-VM profile with gVisor and outbound firewall rules, with what each does and does not protect against |
 | [API Reference](docs/api-reference.md) | All endpoints, request/response shapes, error codes |
+| [Human approval](docs/approvals.md) | Hold requests that use sensitive credentials until a person approves: vault field and key policy, grants, limits, prompts, the Approvals page |
 | [Captured sessions](docs/sessions.md) | Keep a login token (JWT, cookie, ticket) inside Ferrowarden: `capture`, `{{session:name}}`, expiry, scoping, limits, Portainer and Proxmox examples |
 | [OpenAPI spec](docs/openapi.yaml) | OpenAPI 3.1 description of the agent and admin API; served at `GET /v1/openapi.json` to holders of a key |
 | [Operations](docs/operations.md) | Unlock modes, key rotation, monitoring, troubleshooting |
@@ -152,7 +155,7 @@ Behind a TLS reverse proxy such as Pangolin, see [docs/tls.md](docs/tls.md#pango
 | [TLS](docs/tls.md) | Pangolin reverse proxy and self-signed CA setup |
 | [Agent Skill](docs/agent-skill.md) | Reference doc for agents using the proxy (non-skill format) |
 | [MCP server](docs/mcp.md) | `ferrowarden-mcp`: MCP tools for agent harnesses, with install and configuration for Claude Code and Claude Desktop |
-| [Roadmap](ROADMAP.md) | Planned work: approvals, MCP, OpenAPI, session tokens, agent SSH client |
+| [Roadmap](ROADMAP.md) | Planned work: MCP, OpenAPI, session tokens, agent SSH client |
 | [Changelog](CHANGELOG.md) | Release notes and upgrade steps |
 | [Security Policy](SECURITY.md) | How to report a vulnerability privately |
 | [Contributing](CONTRIBUTING.md) | Development setup, checks, and pull request guidelines |
@@ -185,6 +188,7 @@ What Ferrowarden is designed to do, and where it stops:
 - The admin key is enforced environment-only (minimum 32 characters); it cannot be set in a config file.
 - Every security-relevant action is recorded as a structured security event (credential names, not values; failed authentication included) and can be shipped to stdout, a rotating file or syslog ([docs/events.md](docs/events.md)).
 - Every credential value used in a request is scrubbed from the response body, headers and error messages (raw, JSON-escaped, URL-encoded and base64 forms), followed by common credential patterns.
+- A credential marked as needing approval is not read from the vault or sent anywhere without a person's decision for that key, item and target. A grant covers the key and origin for the minutes chosen, not only the request that was shown ([docs/approvals.md](docs/approvals.md)).
 - A login token captured with `capture` is kept in memory only, per agent key and per origin, and is scrubbed from every response of that key. The agent can still use it while it lives ([docs/sessions.md](docs/sessions.md)).
 
 Limits: scrubbing catches echoes and common patterns, not every transformation a target could apply. The proxy has to use the decrypted credential to make the call, so a compromised Ferrowarden host exposes credentials. Ferrowarden does not stop prompt injection, and no independent security audit has been published. [Security Model](docs/security.md) lists these and other limits.

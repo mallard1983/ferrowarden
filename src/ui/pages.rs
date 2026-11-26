@@ -6,10 +6,12 @@ use askama::Template;
 use crate::api::credentials::CredentialDetail;
 
 /// The header navigation of a signed-in page. `current` is one of `status`,
-/// `keys`, `audit` (or empty on a page that is none of them); pages without
-/// a session pass `None` instead.
+/// `keys`, `approvals`, `audit` (or empty on a page that is none of them);
+/// pages without a session pass `None` instead.
 pub struct Nav<'a> {
     pub current: &'a str,
+    /// Approvals waiting for a decision, shown next to the Approvals link.
+    pub pending_approvals: usize,
     pub account_email: &'a str,
     /// The session's CSRF token, for the sign-out button.
     pub csrf: &'a str,
@@ -176,6 +178,7 @@ pub struct KeyNewPage<'a> {
     pub error: Option<&'a str>,
     pub name: &'a str,
     pub patterns: &'a str,
+    pub approval: &'a str,
     pub methods: Vec<MethodBox>,
     pub all_methods: bool,
 }
@@ -198,12 +201,20 @@ pub struct KeyTokenPage<'a> {
     pub token: &'a str,
     pub credentials: &'a [String],
     pub methods: &'a str,
+    pub approval: &'a [String],
 }
 
 /// A policy as text: the pattern list and the method label.
 pub struct PolicyView {
     pub credentials: Vec<String>,
     pub methods: String,
+    pub approval: Vec<String>,
+}
+
+/// One credential that needs approval, and why (`vault field`, `key policy`).
+pub struct ApprovalRow {
+    pub name: String,
+    pub why: String,
 }
 
 /// One credential the draft reaches.
@@ -218,6 +229,8 @@ pub struct PreviewView {
     pub gained: Vec<String>,
     pub lost: Vec<String>,
     pub creds: Vec<CredRow>,
+    /// The credentials the draft reaches that need approval, and why.
+    pub approval_required: Vec<ApprovalRow>,
     pub widens: bool,
 }
 
@@ -227,6 +240,9 @@ pub struct RequestCheckView {
     pub reason: String,
     pub message: String,
     pub note: &'static str,
+    /// The request's credentials that would need approval (a check never
+    /// asks for one).
+    pub approval: Vec<ApprovalRow>,
 }
 
 pub struct Opt {
@@ -237,6 +253,7 @@ pub struct Opt {
 /// The values of the edit form (also what the confirmation page carries).
 pub struct DraftForm {
     pub patterns: String,
+    pub approval: String,
     pub methods: Vec<MethodBox>,
     pub all_methods: bool,
     pub req_methods: Vec<Opt>,
@@ -252,6 +269,7 @@ pub struct KeyFacts {
     pub policy_set: bool,
     pub credentials: Vec<String>,
     pub methods: String,
+    pub approval: Vec<String>,
 }
 
 #[derive(Template)]
@@ -280,6 +298,78 @@ pub struct KeyRevokePage<'a> {
     pub csrf: &'a str,
     pub id: &'a str,
     pub name: &'a str,
+}
+
+// -- Approvals ----------------------------------------------------------------
+
+/// One approval in the list.
+pub struct ApprovalListRow {
+    pub id: String,
+    pub key_name: String,
+    pub credentials: Vec<ApprovalRow>,
+    pub method: String,
+    /// `scheme://host[:port]`.
+    pub target: String,
+    pub path: String,
+    pub created: String,
+    pub expires: String,
+}
+
+/// One live grant.
+pub struct GrantRow {
+    pub id: String,
+    pub key_name: String,
+    pub credentials: Vec<String>,
+    pub target: String,
+    pub approver: String,
+    pub expires: String,
+}
+
+#[derive(Template)]
+#[template(path = "ui/approvals.html")]
+pub struct ApprovalsPage<'a> {
+    pub css_path: &'a str,
+    pub nav: Option<Nav<'a>>,
+    pub sudo: SudoInfo,
+    pub csrf: &'a str,
+    pub notice: Option<&'a str>,
+    pub pending: Vec<ApprovalListRow>,
+    pub grants: Vec<GrantRow>,
+}
+
+/// Everything the detail page shows about one approval.
+pub struct ApprovalDetail {
+    pub id: String,
+    pub key_id: String,
+    pub key_name: String,
+    pub credentials: Vec<ApprovalRow>,
+    pub method: String,
+    pub target: String,
+    pub path: String,
+    /// The URL as the agent sent it: placeholders, never values.
+    pub url: String,
+    pub request_id: String,
+    pub created: String,
+    pub expires: String,
+}
+
+/// One duration preset of the approve form.
+pub struct Preset {
+    pub minutes: u32,
+    pub checked: bool,
+}
+
+#[derive(Template)]
+#[template(path = "ui/approval.html")]
+pub struct ApprovalPage<'a> {
+    pub css_path: &'a str,
+    pub nav: Option<Nav<'a>>,
+    pub sudo: SudoInfo,
+    pub csrf: &'a str,
+    pub error: Option<&'a str>,
+    pub d: ApprovalDetail,
+    pub presets: Vec<Preset>,
+    pub max_minutes: u32,
 }
 
 // -- Audit --------------------------------------------------------------------

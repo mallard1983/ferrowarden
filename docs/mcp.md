@@ -45,7 +45,7 @@ All settings are environment variables. A bad setting stops the program before i
 | `FERROWARDEN_AGENT_KEY` | one of the two | The agent key. |
 | `FERROWARDEN_AGENT_KEY_FILE` | one of the two | Path of a file that holds the agent key (surrounding whitespace is trimmed). Setting both variables is an error. Prefer this where the harness stores its configuration in a file you share or commit. |
 | `FERROWARDEN_CA_FILE` | no | A PEM bundle of extra root certificates, added to the built-in roots. For a Ferrowarden behind a private CA (see [TLS](tls.md)). Certificate checks are never turned off. |
-| `FERROWARDEN_MCP_TIMEOUT_SECS` | no | Timeout of one call to Ferrowarden, 1 to 600, default 60. Forwarded requests can be slow, so this covers the target's time as well. |
+| `FERROWARDEN_MCP_TIMEOUT_SECS` | no | Timeout of one call to Ferrowarden, 1 to 600, default 400. Forwarded requests can be slow, and a request that needs [human approval](approvals.md) is held for up to `approval.wait_secs` (300 at most) first, so this covers the wait and the target's time as well. Keep it above `approval.wait_secs` plus `forward_timeout_secs`. |
 | `FERROWARDEN_MCP_ALLOW_HTTP` | no | `1` allows `http://` to a host that is not loopback. For trusted internal networks only: the agent key and all traffic cross the network unencrypted, and a warning is logged at startup. |
 | `FERROWARDEN_MCP_LOG` | no | Log level: `error`, `warn` (default), `info`, `debug`, `trace` or `off`. |
 
@@ -87,6 +87,9 @@ A target's own `404` or `500` is a normal result: Ferrowarden forwarded the requ
 | 404 | A credential was not found in the vault; call `list_credentials`, tell the user if it is still missing. |
 | 409 | A name matches more than one item or field; tell the user, do not guess. |
 | 422 | A placeholder is malformed or unknown; call `list_credentials` and copy one. |
+| 403 with `code` `approval_pending` | A human has to approve this credential. The text says to ask the human to approve it in the Ferrowarden admin UI (with the approval id), then **retry the same request unchanged**. `structuredContent` has `code` and `approval_id`. |
+| 403 with `code` `approval_denied` | A human denied it. Stop and tell the user; do not retry. |
+| 429 with `code` `approval_limit_reached` | The key has too many open or recent approval requests; do not retry now. |
 | 429 | Wait `Retry-After` seconds. |
 | 502 | Ferrowarden could not get an answer from the target; not a policy refusal. |
 | 503 | The vault is locked; tell the user. |

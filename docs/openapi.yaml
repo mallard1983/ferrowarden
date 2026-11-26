@@ -167,6 +167,8 @@ paths:
 
         Checks run before anything is sent, and a failure stops the request with no outbound call. In order: the body is well formed, every `capture` entry is valid and every placeholder parses (`400`, `422`); the key's method policy allows the method (`403`); the key's credential scope covers every `{{vault:...}}` placeholder (`403`, the same answer whether or not the credential exists); every vault placeholder names one usable vault item (`422`, `409`, `403` for a re-prompt item); each credential is bound to the target host (`403`); the target passes the outbound policy (`403`); every `{{session:NAME}}` names a live session of this key that was captured from the target's origin (`422` unknown or expired, `403` another origin).
 
+        **Approval.** The last check, after all of those and before any credential value is fetched, applies to a credential that needs a human's approval (its vault item says so, or the key's policy does). The request is held for up to the operator's `approval.wait_secs` (60 seconds by default) while a person decides in the operator's web UI. If they approve, the request goes on and the answer is the target's, as usual. If they deny, the answer is `403` with `code` `approval_denied`: stop, and do not look for another way to use the credential. If nobody has decided when the wait ends, the answer is `403` with `code` `approval_pending` and an `approval_id`: ask your human to approve it, then **retry the same request**. The approval stays open for a few minutes, and once approved it covers this key's later requests for the same credentials at the same host until it ends, so the retry goes through. A key with too many open or recent approval requests gets `429` with `code` `approval_limit_reached`. Nothing is sent to the target, and no value is read, until the approval is granted. A client of this operation therefore needs a read timeout above the operator's `approval.wait_secs`, up to 300 seconds, plus the target's own time.
+
         With `capture`, the login token in the response never reaches the agent. See `CaptureSpec` and `ProxyResponse.captures`, and `docs/sessions.md`.
 
         A target that times out, refuses the connection or returns more than the operator's response limit is reported as `502`. A request body larger than 2 MiB is reported as `400`.
@@ -254,7 +256,7 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           description: |
-            The request was refused on policy grounds. The message says which check: the method is not allowed for this key, the credential is not available to this key, the credential is not bound to the target host, the item has master password re-prompt enabled, the target is not allowed by the outbound policy, or a `{{session:NAME}}` was captured from another origin than the target (`session_host_not_allowed`).
+            The request was refused on policy grounds. The message says which check: the method is not allowed for this key, the credential is not available to this key, the credential is not bound to the target host, the item has master password re-prompt enabled, the target is not allowed by the outbound policy, a `{{session:NAME}}` was captured from another origin than the target (`session_host_not_allowed`), or a credential needs a human's approval (`code` `approval_pending`: not decided yet, retry the same request after your human approves; `code` `approval_denied`: a human said no, stop).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -266,6 +268,17 @@ paths:
                 outOfScope:
                   value:
                     error: Credential example_api_token is not available to this agent key
+                approvalPending:
+                  summary: Waiting for a human; retry the same request after they approve
+                  value:
+                    error: "Approval required: a human has to approve this request. Ask your human to approve approval 2m3x8Qk0Zr1YtV5pUa9bLw, then retry the same request."
+                    code: approval_pending
+                    approval_id: 2m3x8Qk0Zr1YtV5pUa9bLw
+                approvalDenied:
+                  summary: A human denied the request
+                  value:
+                    error: "Approval denied: a human denied this request. Do not retry it; tell your human what was refused."
+                    code: approval_denied
         "404":
           description: A credential that passed the earlier checks was not found in the vault when its value was fetched.
           headers:
@@ -299,7 +312,24 @@ paths:
                   value:
                     error: "Placeholder references an unknown credential or field: no_such_credential"
         "429":
-          $ref: "#/components/responses/RateLimited"
+          description: |
+            Either the per-IP rate limit was exceeded (a plain-text body, with a `Retry-After` header), or this agent key has too many open or recent approval requests (`code` `approval_limit_reached`, a JSON body, no `Retry-After`). In the second case, do not retry now: tell your human, and wait for the open approvals to be decided or to expire.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: Rate limit exceeded. See the Retry-After header.
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                approvalLimit:
+                  value:
+                    error: Too many approval requests from this agent key. Wait for the pending ones to be decided or to expire, then retry.
+                    code: approval_limit_reached
         "502":
           description: The target could not be reached, timed out, or returned a response larger than the configured limit, or the vault backend failed. The message does not include the target URL.
           headers:
@@ -814,6 +844,167 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "429":
           $ref: "#/components/responses/RateLimited"
+  /v1/admin/approvals:
+    get:
+      operationId: listApprovals
+      tags: [admin]
+      summary: List pending approvals and live grants
+      description: |
+        Lists the approvals waiting for a human's decision and the grants that are live now. Both live in memory only. The query string is ignored. See `docs/approvals.md`.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      responses:
+        "200":
+          description: The pending approvals, oldest first, and the live grants, soonest to end first.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalList"
+              examples:
+                one:
+                  value:
+                    pending:
+                      - id: 2m3x8Qk0Zr1YtV5pUa9bLw
+                        key:
+                          id: 3f2b8c1e-7a4d-4e5f-9b0a-1c2d3e4f5a6b
+                          name: homelab-agent
+                        credentials:
+                          - credential: proxmox_root
+                            reasons:
+                              - vault_field
+                        method: GET
+                        origin:
+                          scheme: https
+                          host: pve.example.com:8006
+                          port: 8006
+                        url: https://pve.example.com:8006/api2/json/nodes
+                        request_id: 0193abcd-1111-7222-8333-444455556666
+                        created_at: "2026-01-15T12:00:00Z"
+                        expires_at: "2026-01-15T12:10:00Z"
+                    grants: []
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/admin/approvals/{id}/approve:
+    parameters:
+      - $ref: "#/components/parameters/ApprovalId"
+    post:
+      operationId: approveApproval
+      tags: [admin]
+      summary: Approve a pending approval
+      description: |
+        Approves the approval for `minutes` (1 to `approval.max_grant_minutes`). The grant covers the approval's agent key, its credentials and its target origin until it ends. Requests held on the approval proceed at once, and a request retried within the grant passes. The approver is recorded as `admin_api`. An agent key cannot call this: it is refused like any request without the admin key.
+
+        An approval that is no longer pending (decided, expired or cleared) is `409` and nothing changes.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveRequest"
+            examples:
+              fifteen:
+                value:
+                  minutes: 15
+      responses:
+        "200":
+          description: Approved. The grant is in the body.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApproveResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/ApprovalNotPending"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/admin/approvals/{id}/deny:
+    parameters:
+      - $ref: "#/components/parameters/ApprovalId"
+    post:
+      operationId: denyApproval
+      tags: [admin]
+      summary: Deny a pending approval
+      description: |
+        Denies the approval. Requests held on it are answered `approval_denied`, and so is a retry, at once and without a new prompt, for `approval.pending_ttl_secs`. The request has no body. An approval that is no longer pending is `409` and nothing changes.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      responses:
+        "200":
+          description: Denied.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DecisionResponse"
+              examples:
+                denied:
+                  value:
+                    status: denied
+                    id: 2m3x8Qk0Zr1YtV5pUa9bLw
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/ApprovalNotPending"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/admin/grants/{id}:
+    parameters:
+      - $ref: "#/components/parameters/GrantId"
+    delete:
+      operationId: revokeGrant
+      tags: [admin]
+      summary: End a grant early
+      description: |
+        Ends a live grant now. The next request that needs its credentials asks again. A grant that is not live (revoked, expired or cleared) is `404`.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      responses:
+        "200":
+          description: The grant was revoked.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DecisionResponse"
+              examples:
+                revoked:
+                  value:
+                    status: revoked
+                    id: 9k2Lq7VxT0aBn4RzC1mYdE
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: There is no live grant with that id.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 components:
   securitySchemes:
     agentKey:
@@ -842,6 +1033,20 @@ components:
         type: integer
         minimum: 1
   parameters:
+    ApprovalId:
+      name: id
+      in: path
+      required: true
+      description: The id of an approval, as returned by `listApprovals` and in the `approval_id` of a prompt.
+      schema:
+        type: string
+    GrantId:
+      name: id
+      in: path
+      required: true
+      description: The id of a grant, as returned by `listApprovals` and `approveApproval`.
+      schema:
+        type: string
     KeyId:
       name: id
       in: path
@@ -877,6 +1082,19 @@ components:
             missing:
               value:
                 error: Missing or invalid agent API key
+    ApprovalNotPending:
+      description: The approval is no longer pending (it was decided, has expired or was cleared). Nothing was changed.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            gone:
+              value:
+                error: "That approval is no longer pending: it was decided, has expired or was cleared. Nothing was changed."
     KeyNotFound:
       description: No agent key has that id.
       headers:
@@ -937,6 +1155,16 @@ components:
         error:
           type: string
           description: A human-readable description.
+        code:
+          type: string
+          description: A stable code, present on the answers about a human's approval only. Match on this, not on the message.
+          enum:
+            - approval_pending
+            - approval_denied
+            - approval_limit_reached
+        approval_id:
+          type: string
+          description: With `approval_pending`, the id of the approval the human has to decide. Quote it when you ask them.
     OpenApiDocument:
       type: object
       description: An OpenAPI 3.1 document.
@@ -1166,6 +1394,16 @@ components:
         minLength: 1
         maxLength: 256
         description: A pattern, without control characters.
+    ApprovalPatterns:
+      type: array
+      maxItems: 256
+      description: |
+        Credential name patterns that need a human's approval before this key can use them, with the same syntax, limits and matching as `credentials`. `["*"]` requires approval for every credential and `[]` adds no requirement (the default, and what a key from before approvals existed has). This is an extra requirement only: a vault item that carries a `ferrowarden_approval` field needs approval whatever this list says. `null` is rejected. Removing or narrowing a pattern gives the key more access, so the admin UI asks for confirmation.
+      items:
+        type: string
+        minLength: 1
+        maxLength: 256
+        description: A pattern, without control characters.
     MethodList:
       type: array
       maxItems: 256
@@ -1178,17 +1416,19 @@ components:
       type: object
       description: |
         What an agent key may do. A policy has no default: a key must be given both lists, and a key without a policy (created with 0.1.0) is deny-all until one is set. `["*"]` means everything and `[]` means nothing in both lists. `null` is never accepted.
-      required: [credentials, methods]
+      required: [credentials, methods, approval]
       properties:
         credentials:
           $ref: "#/components/schemas/CredentialPatterns"
         methods:
           $ref: "#/components/schemas/MethodList"
+        approval:
+          $ref: "#/components/schemas/ApprovalPatterns"
     CreateKeyRequest:
       type: object
       additionalProperties: false
       required: [name, credentials, methods]
-      description: The body of `createKey`. Both policy fields are required.
+      description: The body of `createKey`. `credentials` and `methods` are required; `approval` is optional and defaults to `[]`.
       properties:
         name:
           type: string
@@ -1199,9 +1439,11 @@ components:
           $ref: "#/components/schemas/CredentialPatterns"
         methods:
           $ref: "#/components/schemas/MethodList"
+        approval:
+          $ref: "#/components/schemas/ApprovalPatterns"
     CreateKeyResponse:
       type: object
-      required: [id, name, token, created_at, credentials, methods, policy_set]
+      required: [id, name, token, created_at, credentials, methods, approval, policy_set]
       description: The new key. `token` appears here and nowhere else.
       properties:
         id:
@@ -1219,12 +1461,14 @@ components:
           $ref: "#/components/schemas/CredentialPatterns"
         methods:
           $ref: "#/components/schemas/MethodList"
+        approval:
+          $ref: "#/components/schemas/ApprovalPatterns"
         policy_set:
           type: boolean
           description: Always `true` for a key created through the API.
     KeySummary:
       type: object
-      required: [id, name, created_at, credentials, methods, policy_set]
+      required: [id, name, created_at, credentials, methods, approval, policy_set]
       description: An agent key without its token.
       properties:
         id:
@@ -1238,6 +1482,8 @@ components:
           $ref: "#/components/schemas/CredentialPatterns"
         methods:
           $ref: "#/components/schemas/MethodList"
+        approval:
+          $ref: "#/components/schemas/ApprovalPatterns"
         policy_set:
           type: boolean
           description: "`false` for a key created with 0.1.0 that has no policy yet. It is deny-all (`[]` and `[]`) until a policy is set with `updateKeyPolicy`."
@@ -1251,6 +1497,8 @@ components:
           $ref: "#/components/schemas/CredentialPatterns"
         methods:
           $ref: "#/components/schemas/MethodList"
+        approval:
+          $ref: "#/components/schemas/ApprovalPatterns"
     PreviewRequest:
       type: object
       additionalProperties: false
@@ -1260,11 +1508,26 @@ components:
           $ref: "#/components/schemas/CredentialPatterns"
         methods:
           $ref: "#/components/schemas/MethodList"
+        approval:
+          $ref: "#/components/schemas/ApprovalPatterns"
         request:
           $ref: "#/components/schemas/ProxyRequest"
+    ApprovalNeed:
+      type: object
+      required: [credential, reasons]
+      description: One credential that needs a human's approval, and why.
+      properties:
+        credential:
+          $ref: "#/components/schemas/CredentialName"
+        reasons:
+          type: array
+          description: "`vault_field`: the vault item carries a `ferrowarden_approval` field. `key_policy`: the key's `approval` patterns match the name. Either is enough, and a key's policy can never exempt an item that has the field."
+          items:
+            type: string
+            enum: [vault_field, key_policy]
     PreviewResponse:
       type: object
-      required: [key, saved_policy, draft_policy, credentials, gained, lost]
+      required: [key, saved_policy, draft_policy, credentials, gained, lost, approval_required]
       description: What a draft policy would allow. Nothing is saved, no credential value is read and nothing is sent.
       properties:
         key:
@@ -1296,6 +1559,11 @@ components:
           description: Credential names the saved policy reaches and the draft does not.
           items:
             $ref: "#/components/schemas/CredentialName"
+        approval_required:
+          type: array
+          description: The credentials the draft reaches that would need a human's approval, and why. A preview never creates an approval request.
+          items:
+            $ref: "#/components/schemas/ApprovalNeed"
         request_check:
           $ref: "#/components/schemas/RequestCheck"
     RequestCheck:
@@ -1304,10 +1572,15 @@ components:
       oneOf:
         - type: object
           title: Allowed
-          required: [allowed, note]
+          required: [allowed, approval, note]
           properties:
             allowed:
               const: true
+            approval:
+              type: array
+              description: The credentials of this request that would need a human's approval, and why. Empty when none does. A preview never asks for an approval.
+              items:
+                $ref: "#/components/schemas/ApprovalNeed"
             note:
               $ref: "#/components/schemas/RequestCheckNote"
         - type: object
@@ -1329,6 +1602,138 @@ components:
     RequestCheckNote:
       type: string
       description: A fixed reminder that the target host is checked by name and IP literal only. The private-address check on a resolved DNS name happens only when a request is really forwarded.
+    PendingApproval:
+      type: object
+      required: [id, key, credentials, method, origin, url, request_id, created_at, expires_at]
+      description: An approval waiting for a decision. It shows the request as the agent sent it (placeholders, never values).
+      properties:
+        id:
+          type: string
+          description: "An unguessable id. It is not a capability, so knowing it decides nothing: deciding needs the admin key here, or a signed-in session in the UI."
+        key:
+          type: object
+          required: [id, name]
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+        credentials:
+          type: array
+          items:
+            type: object
+            required: [credential, reasons]
+            properties:
+              credential:
+                $ref: "#/components/schemas/CredentialName"
+              reasons:
+                type: array
+                items:
+                  type: string
+                  enum: [vault_field, key_policy]
+        method:
+          type: string
+        origin:
+          $ref: "#/components/schemas/ApprovalOrigin"
+        url:
+          type: string
+          description: The URL as the agent sent it, with placeholders, truncated to 2048 characters.
+        request_id:
+          type: string
+          description: The request id of the forward request that opened the approval.
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: When the approval stops being open if nobody decides. A denial stands for the same length of time.
+    ApprovalOrigin:
+      type: object
+      required: [scheme, host, port]
+      description: The target a grant covers.
+      properties:
+        scheme:
+          type: string
+        host:
+          type: string
+          description: The host, with `:port` when the port is not the scheme's default.
+        port:
+          type: integer
+    ApprovalGrant:
+      type: object
+      required: [id, approval_id, key, credentials, origin, approver, created_at, expires_at]
+      description: A live grant. It covers one agent key, the listed credentials and one origin until it ends, whatever the request. In memory only, so a restart, a key revocation or policy change, or the vault locking ends it.
+      properties:
+        id:
+          type: string
+        approval_id:
+          type: string
+        key:
+          type: object
+          required: [id, name]
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+        credentials:
+          type: array
+          items:
+            $ref: "#/components/schemas/CredentialName"
+        origin:
+          $ref: "#/components/schemas/ApprovalOrigin"
+        approver:
+          type: string
+          description: "Who approved: `admin_api` for the admin API, the signed-in vault account for the UI."
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+    ApprovalList:
+      type: object
+      required: [pending, grants]
+      properties:
+        pending:
+          type: array
+          description: Open approvals, oldest first.
+          items:
+            $ref: "#/components/schemas/PendingApproval"
+        grants:
+          type: array
+          description: Live grants, soonest to end first.
+          items:
+            $ref: "#/components/schemas/ApprovalGrant"
+    ApproveRequest:
+      type: object
+      additionalProperties: false
+      required: [minutes]
+      description: The body of `approveApproval`. There is no default length.
+      properties:
+        minutes:
+          type: integer
+          minimum: 1
+          description: How long the grant lasts, from 1 to the operator's `approval.max_grant_minutes` (480 by default).
+    ApproveResponse:
+      type: object
+      required: [status, grant]
+      properties:
+        status:
+          type: string
+          const: approved
+        grant:
+          $ref: "#/components/schemas/ApprovalGrant"
+    DecisionResponse:
+      type: object
+      required: [status, id]
+      properties:
+        status:
+          type: string
+          enum: [denied, revoked]
+        id:
+          type: string
     UnlockRequest:
       type: object
       additionalProperties: false
@@ -1442,6 +1847,9 @@ components:
         - session_host_not_allowed
         - sessions_disabled
         - capture_failed
+        - approval_pending
+        - approval_denied
+        - approval_limit_reached
     SecurityEvent:
       type: object
       description: |
@@ -1499,6 +1907,12 @@ components:
                 - session_use
                 - session_expire
                 - session_delete
+                - approval_requested
+                - approval_granted
+                - approval_denied
+                - approval_expired
+                - grant_revoked
+                - grant_expired
             category:
               type: array
               items:
