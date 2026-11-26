@@ -234,7 +234,7 @@ services:
       # FERROWARDEN_NOTIFY_NTFY_TOKEN_FILE: "/run/secrets/ntfy_token"      # optional
       # FERROWARDEN_NOTIFY__WEBHOOK_URL: "https://hooks.example.com/ferrowarden"
       # FERROWARDEN_NOTIFY_WEBHOOK_TOKEN_FILE: "/run/secrets/webhook_token"  # optional
-      # FERROWARDEN_NOTIFY__EVENTS: "blocked,auth_failure,vault,system"      # add admin for key changes
+      # FERROWARDEN_NOTIFY__EVENTS: "blocked,auth_failure,vault,system,approval"      # add admin for key changes
       # FERROWARDEN_NOTIFY__MIN_INTERVAL_SECS: "60"
       # FERROWARDEN_NOTIFY__MAX_PER_HOUR: "60"
       # Prometheus metrics (docs/metrics.md): off unless a bind address is set.
@@ -254,6 +254,8 @@ services:
       # FERROWARDEN_UI__BIND: "0.0.0.0:3001"
       # FERROWARDEN_UI__SESSION_IDLE_MINUTES: "15"
       # FERROWARDEN_UI__SESSION_MAX_HOURS: "8"
+      # The address you open the UI at; approval prompts link to <it>/approvals/<id>.
+      # FERROWARDEN_UI__PUBLIC_URL: "https://ferrowarden-admin.example.com"
       # Local testing only (plain-HTTP sign-in form):
       # FERROWARDEN_UI__INSECURE_HTTP: "true"
     networks:

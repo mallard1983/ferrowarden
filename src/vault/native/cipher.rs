@@ -5,7 +5,7 @@
 //! - [`build_metadata`] runs at unlock and sync. It decrypts only what a
 //!   [`CredentialEntry`] holds: the name, the URIs that bind the item to
 //!   hosts, custom field names, and the value of the reserved
-//!   `ferrowarden_uris` field. Which secrets exist (password, username, TOTP,
+//!   `ferrowarden_uris` and `ferrowarden_approval` fields. Which secrets exist (password, username, TOTP,
 //!   notes) is read from the presence of the ciphertext; the secrets
 //!   themselves are not touched.
 //! - [`builtin_value`] and [`field_value`] run per request. They decrypt one
@@ -29,8 +29,8 @@ use super::keys::unwrap_sym_key;
 use super::totp;
 use crate::error::{FerroError, FerroResult};
 use crate::vault::model::{
-    match_type_is_binding, split_uris, Builtin, CredentialEntry, FieldInfo, FieldKind, ItemKind,
-    BINDINGS_FIELD,
+    approval_field_valid, is_approval_field_name, match_type_is_binding, split_uris, Builtin,
+    CredentialEntry, FieldInfo, FieldKind, ItemKind, BINDINGS_FIELD,
 };
 
 /// Every key needed to read the vault. Wiped on drop; never printed.
@@ -157,8 +157,11 @@ pub fn build_metadata(
         _ => return Err(reason::MISSING_NAME),
     };
 
-    // Custom fields: names and kinds, plus the reserved bindings field's value.
+    // Custom fields: names and kinds, plus the reserved bindings field's value
+    // and whether the reserved approval field is there and how it is spelled.
     let mut bindings_override = None;
+    let mut approval_required = false;
+    let mut approval_field_invalid = false;
     let mut fields = Vec::new();
     for f in c.fields.as_deref().unwrap_or_default() {
         let Some(enc_name) = f.name.as_deref().filter(|n| !n.is_empty()) else {
@@ -168,6 +171,22 @@ pub fn build_metadata(
         if field_name.as_str() == BINDINGS_FIELD {
             if let Some(v) = f.value.as_deref().filter(|v| !v.is_empty()) {
                 bindings_override = Some(split_uris(&dec(&key, v)?));
+            }
+            continue;
+        }
+        if is_approval_field_name(&field_name) {
+            // Present means required, whatever it says (fail closed). The
+            // name also matches in any letter case and with stray spaces, so
+            // a mistyped name cannot silently drop the requirement. An
+            // empty or unreadable-as-`required` value is flagged so the sync
+            // can warn about it.
+            approval_required = true;
+            let value = match f.value.as_deref().filter(|v| !v.is_empty()) {
+                Some(v) => dec(&key, v)?,
+                None => Zeroizing::new(String::new()),
+            };
+            if !approval_field_valid(&value) {
+                approval_field_invalid = true;
             }
             continue;
         }
@@ -213,6 +232,8 @@ pub fn build_metadata(
         has_notes: present(&c.notes),
         fields,
         reprompt: c.reprompt != 0,
+        approval_required,
+        approval_field_invalid,
     };
     Ok((name.as_str().to_string(), entry))
 }

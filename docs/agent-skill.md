@@ -232,7 +232,7 @@ Examples:
 
 ## Error Responses
 
-All errors return `{"error": "message"}` with an appropriate HTTP status.
+All errors return `{"error": "message"}` with an appropriate HTTP status. The answers about a human's approval also have a stable `code` (and `approval_id` for `approval_pending`). A request that uses a credential that needs approval can be **held** for up to a minute or more while the user decides, so do not give it a short timeout.
 
 | Status | Meaning | What to do |
 |---|---|---|
@@ -241,6 +241,9 @@ All errors return `{"error": "message"}` with an appropriate HTTP status.
 | `403 Forbidden` ("not available to this agent key") | `Credential <name> is not available to this agent key`: your key is not allowed to use that credential. This looks the same whether or not the credential exists | Do not retry with other names or try to discover it. Tell the user which credential you needed so the operator can widen your key's scope |
 | `403 Forbidden` ("method not allowed") | `Method <M> is not allowed for this agent key`: your key may not use that HTTP method | Do not retry with a different method to work around it. Tell the user which method you needed |
 | `403 Forbidden` | The credential is not allowed for this host, or the target is blocked (internal address, the vault backend) | Do not retry with another host. Tell the user which credential and host were refused; the operator must add the host to the vault item's URIs or to `allowed_targets` |
+| `403 Forbidden` (`"code": "approval_pending"`) | A human has to approve this credential and nobody has yet. The answer has an `approval_id` | Tell the user to approve it in the Ferrowarden admin UI (Approvals page), quoting the `approval_id`. When they say it is done, **retry the same request**. Do not try other credentials, hosts or methods |
+| `403 Forbidden` (`"code": "approval_denied"`) | A human refused this credential | Stop. Do not retry and do not look for another way. Tell the user what was refused |
+| `429 Too Many Requests` (`"code": "approval_limit_reached"`) | Your key has too many open or recent approval requests | Do not retry now; tell the user and wait until they have decided or the requests expired |
 | `403 Forbidden` ("captured from another origin") | `Session <name> may not be sent to <host>`: that session was captured at a different scheme, host or port | Do not try to work around it. Log in to this host with its own `capture`, or tell the user |
 | `409 Conflict` | The credential name matches more than one vault item, or the field name appears twice on the item | Tell the user; the operator must rename one of them |
 | `422 Unprocessable Entity` | Malformed placeholder, unknown credential, or a value/field the item doesn't have | Call `GET /v1/credentials?detail=true` and copy a placeholder from it |

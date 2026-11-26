@@ -668,7 +668,8 @@ fn seeded_secrets() -> Vec<String> {
         for field in item["fields"].as_array().into_iter().flatten() {
             // `ferrowarden_uris` is metadata (the item's allowed hosts), not a
             // secret: its value is a URL that legitimately appears in events.
-            if field["name"] == "ferrowarden_uris" {
+            // `ferrowarden_approval` is a switch (`required`), not a secret.
+            if field["name"] == "ferrowarden_uris" || field["name"] == "ferrowarden_approval" {
                 continue;
             }
             if let Some(s) = field["value"].as_str() {
@@ -2268,11 +2269,11 @@ async fn test_patch_changes_policy_immediately_and_is_strict() {
     assert_eq!(e["ferrowarden"]["details"]["key_id"], id.as_str());
     assert_eq!(
         e["ferrowarden"]["details"]["before"],
-        json!({"credentials": ["test_api_token"], "methods": ["GET"]})
+        json!({"credentials": ["test_api_token"], "methods": ["GET"], "approval": []})
     );
     assert_eq!(
         e["ferrowarden"]["details"]["after"],
-        json!({"credentials": ["test_*"], "methods": ["GET"]})
+        json!({"credentials": ["test_*"], "methods": ["GET"], "approval": []})
     );
 
     // Narrow, and lift with ["*"].
@@ -2414,11 +2415,11 @@ async fn test_policy_preview() {
     assert_eq!(p["key"]["name"], "preview-me");
     assert_eq!(
         p["saved_policy"],
-        json!({"credentials": ["test_api_*"], "methods": ["*"]})
+        json!({"credentials": ["test_api_*"], "methods": ["*"], "approval": []})
     );
     assert_eq!(
         p["draft_policy"],
-        json!({"credentials": ["test_bearer", "nas_*"], "methods": ["GET"]})
+        json!({"credentials": ["test_bearer", "nas_*"], "methods": ["GET"], "approval": []})
     );
     let strs = |v: &Value| -> Vec<String> {
         v.as_array()
@@ -5731,6 +5732,10 @@ struct SeedItem {
     /// Archived on the server only if the server can archive (Vaultwarden
     /// 1.36.0 cannot): the item is then either absent or listed as usual.
     archived: bool,
+    /// The item has a `ferrowarden_approval` field: a human has to approve its
+    /// use, so the delivery sweep leaves it to the approval tests (every probe
+    /// would be held for the approval wait).
+    approval: bool,
 }
 
 /// How a name is written in a placeholder: bare when it is made of letters,
@@ -5863,6 +5868,7 @@ fn seed_expectation(item: &Value) -> Option<SeedItem> {
             detail: Value::Object(detail),
             probes,
             archived: false,
+            approval: false,
         });
     }
 
@@ -5914,7 +5920,9 @@ fn seed_expectation(item: &Value) -> Option<SeedItem> {
     let mut unavailable = serde_json::Map::new();
     for f in &fields {
         let fname = f["name"].as_str().unwrap();
+        // The reserved fields are metadata, not fields an agent can use.
         if fname == "ferrowarden_uris"
+            || fname == "ferrowarden_approval"
             || offered.contains_key(fname)
             || unavailable.contains_key(fname)
         {
@@ -5966,6 +5974,7 @@ fn seed_expectation(item: &Value) -> Option<SeedItem> {
         detail: Value::Object(detail),
         probes,
         archived: item["archived"].as_bool().unwrap_or(false),
+        approval: fields.iter().any(|f| f["name"] == "ferrowarden_approval"),
     })
 }
 
@@ -6350,6 +6359,11 @@ async fn test_every_offered_placeholder_delivers_the_seeded_value() {
         if item.archived && !listed.contains(&item.name) {
             continue;
         }
+        // Items that need a human's approval are held, not delivered: the
+        // approval tests cover them (and that their field is not usable).
+        if item.approval {
+            continue;
+        }
         for probe in &item.probes {
             let kind = if probe.label.ends_with("(totp)") {
                 "totp"
@@ -6501,4 +6515,923 @@ async fn test_every_offered_placeholder_delivers_the_seeded_value() {
             "too few {kind} placeholders were checked: {counts:?}"
         );
     }
+}
+
+// ── Human approval (#14) ──────────────────────────────────────────────────────
+//
+// docs/approvals.md. `test_approval_required` and `test_approval_typo` carry a
+// `ferrowarden_approval` field (the vault source); `test_bearer` and the other
+// plain items are made sensitive by a key's `approval` patterns (the policy
+// source). The test stack holds a request for 3 seconds and keeps an undecided
+// approval, and a denial, for 15 (docker-compose.test.yml). The property under
+// test throughout: a credential that needs approval is not fetched from the
+// vault, and nothing is sent to the target, without a human's decision, and the
+// agent's own key can never decide.
+
+const APPROVAL_ITEM: &str = "test_approval_required";
+const APPROVAL_ITEM_VALUE: &str = "test-approval-secret-5a5a5a5a";
+const APPROVAL_ITEM_USER: &str = "approval-user-77";
+const APPROVAL_TYPO_ITEM: &str = "test_approval_typo";
+const APPROVAL_TYPO_VALUE: &str = "test-approval-typo-6b6b6b6b";
+const BEARER_ITEM_VALUE: &str = "test-bearer-xyz789uvw012";
+
+/// `Authorization: Bearer {{vault:item}}`.
+fn approval_bearer(item: &str) -> Value {
+    json!({ "Authorization": format!("Bearer {{{{vault:{item}}}}}") })
+}
+
+impl TestEnv {
+    /// A key with an explicit `approval` list. Returns (name, id, token).
+    async fn approval_key(&self, label: &str, approval: Value) -> (String, String, String) {
+        let name = format!("{label}-{}", unique_suffix());
+        let resp = self
+            .admin_call(
+                "POST",
+                "/v1/admin/keys",
+                Some(
+                    json!({ "name": name, "credentials": ["*"], "methods": ["*"], "approval": approval }),
+                ),
+            )
+            .await;
+        assert_eq!(resp.status(), 201, "creating key {name}");
+        let body: Value = resp.json().await.unwrap();
+        let token = body["token"].as_str().unwrap().to_string();
+        record_secret_for_gate(&token);
+        (name, body["id"].as_str().unwrap().to_string(), token)
+    }
+
+    async fn approvals(&self) -> Value {
+        let resp = self.admin_call("GET", "/v1/admin/approvals", None).await;
+        assert_eq!(resp.status(), 200);
+        resp.json().await.unwrap()
+    }
+
+    /// The open approvals of the key called `name`.
+    async fn pending_of(&self, name: &str) -> Vec<Value> {
+        self.approvals().await["pending"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["key"]["name"] == name)
+            .cloned()
+            .collect()
+    }
+
+    /// Wait (up to 10 s) until the key has `n` open approvals; returns them.
+    async fn wait_for_pending(&self, name: &str, n: usize) -> Vec<Value> {
+        for _ in 0..100 {
+            let p = self.pending_of(name).await;
+            if p.len() >= n {
+                return p;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("key {name} never had {n} open approval(s)");
+    }
+
+    async fn approve_api(&self, id: &str, minutes: u32) -> reqwest::Response {
+        self.admin_call(
+            "POST",
+            &format!("/v1/admin/approvals/{id}/approve"),
+            Some(json!({ "minutes": minutes })),
+        )
+        .await
+    }
+
+    /// Whether the mock API recorded any request carrying `value`.
+    async fn mock_saw(&self, value: &str) -> bool {
+        self.all_captured_requests()
+            .await
+            .iter()
+            .any(|r| r.to_string().contains(value))
+    }
+
+    /// Events of one action about the approval `id` (newest first).
+    async fn approval_events(&self, action: &str, id: &str) -> Vec<Value> {
+        self.events(1000)
+            .await
+            .into_iter()
+            .filter(|e| {
+                e["event"]["action"] == action && e["ferrowarden"]["details"]["approval_id"] == id
+            })
+            .collect()
+    }
+}
+
+/// A forward as `token` that may be held, run in the background.
+fn spawn_forward(token: &str, item: &str, path: &str) -> tokio::task::JoinHandle<(u16, Value)> {
+    let (token, item, path) = (token.to_string(), item.to_string(), path.to_string());
+    tokio::spawn(async move {
+        let env = TestEnv::load().expect("integration environment");
+        let resp = env
+            .forward_as(&token, "GET", &path, approval_bearer(&item))
+            .await;
+        (
+            resp.status().as_u16(),
+            resp.json().await.unwrap_or(Value::Null),
+        )
+    })
+}
+
+/// A request held for approval goes through when a human approves it while it
+/// waits (here: with the admin key), and the target then receives the value.
+/// Before that nothing is sent and the value is not fetched. The grant covers
+/// the same key's later requests for the same item, any selector, with no wait.
+#[tokio::test]
+async fn test_approval_held_request_is_approved_while_waiting() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    let m = metrics_env();
+    env.reset_mock().await;
+    let (name, id, token) = env.approval_key("appr-held", json!([])).await;
+    let before = m.scrape(&env).await;
+
+    let held = spawn_forward(&token, APPROVAL_ITEM, "/api/held");
+    let pending = env.wait_for_pending(&name, 1).await.remove(0);
+    let approval_id = pending["id"].as_str().unwrap().to_string();
+    assert!(
+        approval_id.len() >= 22,
+        "an unguessable id: at least 128 bits in URL-safe text"
+    );
+    assert_eq!(
+        pending["credentials"],
+        json!([{ "credential": APPROVAL_ITEM, "reasons": ["vault_field"] }])
+    );
+    assert_eq!(pending["method"], "GET");
+    assert_eq!(pending["origin"]["host"], "mock-api:7777");
+    assert!(pending["url"].as_str().unwrap().contains("/api/held"));
+    // Held: the target has seen nothing.
+    assert!(env.all_captured_requests().await.is_empty());
+
+    let r = env.approve_api(&approval_id, 5).await;
+    let (s, approved) = spec
+        .check("/v1/admin/approvals/{id}/approve", "POST", r)
+        .await;
+    assert_eq!(s, 200);
+    assert_eq!(approved["grant"]["approver"], "admin_api");
+    assert_eq!(approved["grant"]["credentials"], json!([APPROVAL_ITEM]));
+    let (status, _) = held.await.unwrap();
+    assert_eq!(status, 200, "the held request went through");
+    let c = env.last_captured_request().await;
+    assert!(
+        captured_header(&c, "authorization")
+            == Some(format!("Bearer {APPROVAL_ITEM_VALUE}").as_str()),
+        "the target got the value"
+    );
+
+    // The grant is listed, and covers every selector of the item.
+    let r = env.admin_call("GET", "/v1/admin/approvals", None).await;
+    let (_, list) = spec.check("/v1/admin/approvals", "GET", r).await;
+    assert!(list["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|g| g["key"]["name"] == name.as_str()));
+    env.reset_mock().await;
+    let resp = env
+        .forward_as(
+            &token,
+            "GET",
+            "/api/user",
+            json!({ "X-User": format!("{{{{vault:{APPROVAL_ITEM}:username}}}}") }),
+        )
+        .await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "the same key, the same item: no new ask"
+    );
+    let c = env.last_captured_request().await;
+    assert!(captured_header(&c, "x-user") == Some(APPROVAL_ITEM_USER));
+    assert!(env.pending_of(&name).await.is_empty());
+
+    // The audit trail: request, decision and the gate's result on both forwards.
+    let requested = env
+        .approval_events("approval_requested", &approval_id)
+        .await;
+    assert_eq!(requested.len(), 1);
+    assert_eq!(
+        requested[0]["ferrowarden"]["credentials"],
+        json!([APPROVAL_ITEM])
+    );
+    assert_eq!(
+        requested[0]["ferrowarden"]["details"]["path"],
+        "/mock-api/api/held"
+    );
+    let granted = env.approval_events("approval_granted", &approval_id).await;
+    assert_eq!(
+        granted[0]["ferrowarden"]["details"]["approver"],
+        "admin_api"
+    );
+    assert_eq!(granted[0]["ferrowarden"]["details"]["minutes"], 5);
+    let results: Vec<String> = env
+        .events(300)
+        .await
+        .iter()
+        .filter(|e| {
+            e["event"]["action"] == "forward" && e["ferrowarden"]["key"]["name"] == name.as_str()
+        })
+        .filter_map(|e| {
+            e["ferrowarden"]["details"]["approval"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect();
+    assert_eq!(results, ["granted_by_grant", "approved_while_waiting"]);
+    // No value in any event, and the metrics saw it.
+    let events = env.all_events_text().await;
+    for v in [APPROVAL_ITEM_VALUE, APPROVAL_ITEM_USER, token.as_str()] {
+        assert!(!events.contains(v), "a value is in an event");
+    }
+    let after = m.scrape(&env).await;
+    let delta =
+        |name: &str, labels: &[(&str, &str)]| after.sum(name, labels) - before.sum(name, labels);
+    assert_eq!(
+        delta(
+            "ferrowarden_approval_requests_total",
+            &[("outcome", "granted")]
+        ),
+        1.0
+    );
+    assert_eq!(
+        delta(
+            "ferrowarden_forward_approval_total",
+            &[("result", "approved_while_waiting")]
+        ),
+        1.0
+    );
+    assert_eq!(
+        delta(
+            "ferrowarden_forward_approval_total",
+            &[("result", "granted_by_grant")]
+        ),
+        1.0
+    );
+    assert_scrape_is_clean(&env, &m, &after);
+    env.revoke_key(&id).await;
+}
+
+/// A denial answers the held request with `403 approval_denied`; the target
+/// is never contacted and the value never fetched; a retry inside the denial
+/// window is refused at once, with no new prompt.
+#[tokio::test]
+async fn test_approval_denied_request_never_reaches_the_target() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_mock().await;
+    let (name, id, token) = env.approval_key("appr-denied", json!([])).await;
+    let held = spawn_forward(&token, APPROVAL_ITEM, "/api/denied");
+    let pending = env.wait_for_pending(&name, 1).await.remove(0);
+    let approval_id = pending["id"].as_str().unwrap().to_string();
+
+    let r = env
+        .admin_call(
+            "POST",
+            &format!("/v1/admin/approvals/{approval_id}/deny"),
+            None,
+        )
+        .await;
+    let (s, body) = spec.check("/v1/admin/approvals/{id}/deny", "POST", r).await;
+    assert_eq!((s, body["status"].as_str()), (200, Some("denied")));
+    let (status, body) = held.await.unwrap();
+    assert_eq!(status, 403);
+    assert_eq!(body["code"], "approval_denied");
+    assert!(!env.mock_saw(APPROVAL_ITEM_VALUE).await);
+    assert!(env.all_captured_requests().await.is_empty());
+
+    // A retry is refused at once; nobody is asked again.
+    let started = std::time::Instant::now();
+    let resp = env
+        .forward_as(&token, "GET", "/api/denied", approval_bearer(APPROVAL_ITEM))
+        .await;
+    let (s, body) = spec.check("/v1/forward", "POST", resp).await;
+    assert_eq!(s, 403);
+    assert_eq!(body["code"], "approval_denied");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(2500),
+        "not held"
+    );
+    assert!(env.all_captured_requests().await.is_empty());
+    assert!(env.pending_of(&name).await.is_empty());
+    let asked = env
+        .events(500)
+        .await
+        .into_iter()
+        .filter(|e| {
+            e["event"]["action"] == "approval_requested"
+                && e["ferrowarden"]["key"]["name"] == name.as_str()
+        })
+        .count();
+    assert_eq!(asked, 1, "one approval_requested for the whole story");
+    let denied = env.approval_events("approval_denied", &approval_id).await;
+    assert_eq!(denied[0]["ferrowarden"]["details"]["approver"], "admin_api");
+    // Deciding again is a 409 and changes nothing.
+    let r = env
+        .admin_call(
+            "POST",
+            &format!("/v1/admin/approvals/{approval_id}/deny"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        spec.check("/v1/admin/approvals/{id}/deny", "POST", r)
+            .await
+            .0,
+        409
+    );
+    assert_eq!(env.approve_api(&approval_id, 5).await.status(), 409);
+    env.revoke_key(&id).await;
+}
+
+/// Nobody decides in time: `403 approval_pending` with the approval's id, the
+/// target untouched. The approval stays open, so approving it afterwards lets a
+/// retry of the very same request through.
+#[tokio::test]
+async fn test_approval_undecided_is_pending_and_a_late_approval_lets_the_retry_pass() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_mock().await;
+    let (name, id, token) = env.approval_key("appr-late", json!([])).await;
+
+    let started = std::time::Instant::now();
+    let resp = env
+        .forward_as(&token, "GET", "/api/late", approval_bearer(APPROVAL_ITEM))
+        .await;
+    let (s, body) = spec.check("/v1/forward", "POST", resp).await;
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(2),
+        "held for the wait"
+    );
+    assert_eq!(s, 403);
+    assert_eq!(body["code"], "approval_pending");
+    let approval_id = body["approval_id"].as_str().unwrap().to_string();
+    let msg = body["error"].as_str().unwrap();
+    assert!(
+        msg.contains("admin UI") && msg.contains("retry the same request"),
+        "{msg}"
+    );
+    assert!(env.all_captured_requests().await.is_empty());
+
+    // The approval is open and has the id from the answer.
+    let open = env.pending_of(&name).await;
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0]["id"], approval_id.as_str());
+
+    // Approve afterwards; the retry of the same request passes.
+    assert_eq!(env.approve_api(&approval_id, 5).await.status(), 200);
+    let resp = env
+        .forward_as(&token, "GET", "/api/late", approval_bearer(APPROVAL_ITEM))
+        .await;
+    assert_eq!(resp.status(), 200);
+    let c = env.last_captured_request().await;
+    assert!(
+        captured_header(&c, "authorization")
+            == Some(format!("Bearer {APPROVAL_ITEM_VALUE}").as_str())
+    );
+    env.revoke_key(&id).await;
+}
+
+/// A grant ends early when it is revoked (the next request asks again), and an
+/// approval nobody decides expires: it is gone, deciding it is a 409, and the
+/// sweep records `approval_expired` with the cause. (A grant's own expiry, at
+/// least one minute, is covered by the unit tests, not waited for here.)
+#[tokio::test]
+async fn test_approval_revoked_grant_asks_again_and_an_open_approval_expires() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_mock().await;
+    let (name, id, token) = env.approval_key("appr-revoke", json!([])).await;
+
+    // Grant, use, revoke.
+    let held = spawn_forward(&token, APPROVAL_ITEM, "/api/a");
+    let first = env.wait_for_pending(&name, 1).await.remove(0);
+    assert_eq!(
+        env.approve_api(first["id"].as_str().unwrap(), 5)
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(held.await.unwrap().0, 200);
+    let grants = env.approvals().await["grants"].as_array().unwrap().clone();
+    let grant_id = grants
+        .iter()
+        .find(|g| g["key"]["name"] == name.as_str())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = env
+        .admin_call("DELETE", &format!("/v1/admin/grants/{grant_id}"), None)
+        .await;
+    assert_eq!(
+        spec.check("/v1/admin/grants/{id}", "DELETE", r).await.0,
+        200
+    );
+    let r = env
+        .admin_call("DELETE", &format!("/v1/admin/grants/{grant_id}"), None)
+        .await;
+    assert_eq!(
+        spec.check("/v1/admin/grants/{id}", "DELETE", r).await.0,
+        404
+    );
+    let revoked = env.events(300).await.into_iter().find(|e| {
+        e["event"]["action"] == "grant_revoked"
+            && e["ferrowarden"]["details"]["grant_id"] == grant_id.as_str()
+    });
+    assert_eq!(
+        revoked.unwrap()["ferrowarden"]["details"]["approver"],
+        "admin_api"
+    );
+
+    // It asks again; leave this one undecided.
+    env.reset_mock().await;
+    let resp = env
+        .forward_as(&token, "GET", "/api/b", approval_bearer(APPROVAL_ITEM))
+        .await;
+    assert_eq!(resp.status(), 403);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "approval_pending");
+    let approval_id = body["approval_id"].as_str().unwrap().to_string();
+    assert_ne!(approval_id, first["id"].as_str().unwrap());
+    assert!(env.all_captured_requests().await.is_empty());
+
+    // Past its 15 seconds it is gone; the sweep says why.
+    tokio::time::sleep(std::time::Duration::from_secs(14)).await;
+    assert_eq!(env.approve_api(&approval_id, 5).await.status(), 409);
+    assert!(env.pending_of(&name).await.is_empty());
+    let mut expired = Vec::new();
+    for _ in 0..30 {
+        expired = env.approval_events("approval_expired", &approval_id).await;
+        if !expired.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert_eq!(expired.len(), 1, "the sweep recorded the expiry");
+    assert_eq!(expired[0]["ferrowarden"]["details"]["cause"], "timeout");
+    // And the next request asks anew.
+    let resp = env
+        .forward_as(&token, "GET", "/api/c", approval_bearer(APPROVAL_ITEM))
+        .await;
+    assert_eq!(resp.status(), 403);
+    env.revoke_key(&id).await;
+}
+
+/// Both sources, and how they combine: a key's `approval` patterns make an
+/// ordinary item need approval for that key only; the vault field asks
+/// whatever the key's list says (a misspelt value included: fail closed); and
+/// the field is not something a placeholder can name.
+#[tokio::test]
+async fn test_approval_sources_key_policy_and_vault_field() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+    let (strict_name, strict_id, strict) = env
+        .approval_key("appr-policy", json!(["test_bearer"]))
+        .await;
+    let (_, plain_id, plain) = env.approval_key("appr-none", json!([])).await;
+
+    // The policy source: `test_bearer` asks for the key that lists it...
+    let resp = env
+        .forward_as(&strict, "GET", "/api/p", approval_bearer("test_bearer"))
+        .await;
+    assert_eq!(resp.status(), 403);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "approval_pending");
+    let open = env.pending_of(&strict_name).await;
+    assert_eq!(
+        open[0]["credentials"],
+        json!([{ "credential": "test_bearer", "reasons": ["key_policy"] }])
+    );
+    assert!(!env.mock_saw(BEARER_ITEM_VALUE).await);
+    // ...and not for the key that does not.
+    let resp = env
+        .forward_as(&plain, "GET", "/api/p", approval_bearer("test_bearer"))
+        .await;
+    assert_eq!(resp.status(), 200);
+    assert!(env.mock_saw(BEARER_ITEM_VALUE).await);
+
+    // The vault field asks for a key with no list, and the misspelt one too.
+    env.reset_mock().await;
+    for item in [APPROVAL_ITEM, APPROVAL_TYPO_ITEM] {
+        let resp = env
+            .forward_as(&plain, "GET", "/api/p", approval_bearer(item))
+            .await;
+        assert_eq!(resp.status(), 403, "{item}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["code"], "approval_pending", "{item}");
+    }
+    assert!(env.all_captured_requests().await.is_empty());
+    assert!(!env.mock_saw(APPROVAL_TYPO_VALUE).await);
+    // A key that lists the item as well has both reasons.
+    let (both_name, both_id, both) = env.approval_key("appr-both", json!([APPROVAL_ITEM])).await;
+    let _ = env
+        .forward_as(&both, "GET", "/api/p", approval_bearer(APPROVAL_ITEM))
+        .await;
+    let open = env.pending_of(&both_name).await;
+    assert_eq!(
+        open[0]["credentials"][0]["reasons"],
+        json!(["vault_field", "key_policy"])
+    );
+
+    // The reserved field cannot be used as a field, and a request for it opens
+    // no approval.
+    let before = env.approvals().await["pending"].as_array().unwrap().len();
+    let resp = env
+        .forward_as(
+            &plain,
+            "GET",
+            "/api/p",
+            json!({ "X": format!("{{{{vault:{APPROVAL_ITEM}:field:ferrowarden_approval}}}}") }),
+        )
+        .await;
+    assert_eq!(resp.status(), 422);
+    assert_eq!(
+        env.approvals().await["pending"].as_array().unwrap().len(),
+        before
+    );
+    // It is in no listing either.
+    let detail: Vec<Value> = env
+        .client
+        .get(format!("{}/v1/credentials?detail=true", env.fw_url))
+        .header("X-Agent-Key", &plain)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for name in [APPROVAL_ITEM, APPROVAL_TYPO_ITEM] {
+        let entry = detail.iter().find(|d| d["name"] == name).unwrap();
+        assert!(entry["fields"].is_null(), "{name}: no usable field");
+        assert!(!entry.to_string().contains("ferrowarden_approval"));
+    }
+    // The preview says what would need approval and asks for nothing.
+    let before = env.approvals().await["pending"].as_array().unwrap().len();
+    let r = env
+        .admin_call(
+            "POST",
+            &format!("/v1/admin/keys/{plain_id}/preview"),
+            Some(json!({
+                "approval": ["test_bearer"],
+                "request": { "method": "GET", "url": "http://mock-api:7777/x",
+                    "headers": { "A": "{{vault:test_bearer}}", "B": format!("{{{{vault:{APPROVAL_ITEM}}}}}") } }
+            })),
+        )
+        .await;
+    let (s, preview) = Spec::load()
+        .check("/v1/admin/keys/{id}/preview", "POST", r)
+        .await;
+    assert_eq!(s, 200);
+    assert_eq!(preview["request_check"]["allowed"], true);
+    assert_eq!(
+        preview["request_check"]["approval"],
+        json!([
+            { "credential": APPROVAL_ITEM, "reasons": ["vault_field"] },
+            { "credential": "test_bearer", "reasons": ["key_policy"] }
+        ])
+    );
+    assert_eq!(
+        env.approvals().await["pending"].as_array().unwrap().len(),
+        before
+    );
+    for id in [strict_id, plain_id, both_id] {
+        env.revoke_key(&id).await;
+    }
+}
+
+/// The agent's key can never decide: every route that lists, approves, denies
+/// or ends a grant refuses it, whichever header carries it, and nothing
+/// changes.
+#[tokio::test]
+async fn test_approval_the_agent_key_cannot_decide() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+    let (name, id, token) = env.approval_key("appr-agent", json!([])).await;
+    let held = spawn_forward(&token, APPROVAL_ITEM, "/api/x");
+    let open = env.wait_for_pending(&name, 1).await.remove(0);
+    let approval_id = open["id"].as_str().unwrap().to_string();
+
+    let routes = [
+        ("GET", "/v1/admin/approvals".to_string(), None),
+        (
+            "POST",
+            format!("/v1/admin/approvals/{approval_id}/approve"),
+            Some(json!({ "minutes": 5 })),
+        ),
+        (
+            "POST",
+            format!("/v1/admin/approvals/{approval_id}/deny"),
+            None,
+        ),
+        ("DELETE", "/v1/admin/grants/anything".to_string(), None),
+    ];
+    for (method, path, body) in &routes {
+        for header in ["x-agent-key", "x-admin-key", "authorization"] {
+            let value = if header == "authorization" {
+                format!("Bearer {token}")
+            } else {
+                token.clone()
+            };
+            let mut req = env
+                .client
+                .request(
+                    reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
+                    format!("{}{path}", env.fw_url),
+                )
+                .header(header, value);
+            if let Some(b) = body {
+                req = req.json(b);
+            }
+            let resp = req.send().await.unwrap();
+            assert_eq!(resp.status(), 401, "{method} {path} with {header}");
+        }
+    }
+    // Still open, still undecided; the held request ends as "pending".
+    assert_eq!(env.pending_of(&name).await.len(), 1);
+    let (status, body) = held.await.unwrap();
+    assert_eq!(status, 403);
+    assert_eq!(body["code"], "approval_pending");
+    // The agent API has no decision route at all.
+    for path in ["/v1/approvals", "/v1/approvals/x/approve", "/v1/grants/x"] {
+        let resp = env
+            .client
+            .post(format!("{}{path}", env.fw_url))
+            .header("X-Agent-Key", &token)
+            .json(&json!({ "minutes": 5 }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "{path}");
+    }
+    assert!(env.all_captured_requests().await.is_empty());
+    let text = env.all_events_text().await;
+    assert!(!text.contains(&token));
+    env.revoke_key(&id).await;
+}
+
+/// An agent cannot flood the operator: a fourth distinct approval is
+/// `429 approval_limit_reached`, at once, with no fourth prompt.
+#[tokio::test]
+async fn test_approval_limits_distinct_pending_approvals_per_key() {
+    let Some(env) = TestEnv::load() else { return };
+    let spec = Spec::load();
+    env.reset_mock().await;
+    let (name, id, token) = env.approval_key("appr-flood", json!(["*"])).await;
+    let held: Vec<_> = ["test_api_token", "test_bearer", "test_basic_password"]
+        .iter()
+        .map(|item| spawn_forward(&token, item, "/api/flood"))
+        .collect();
+    env.wait_for_pending(&name, 3).await;
+
+    let started = std::time::Instant::now();
+    let resp = env
+        .forward_as(
+            &token,
+            "GET",
+            "/api/flood",
+            approval_bearer("proxmox_api_token"),
+        )
+        .await;
+    let (s, body) = spec.check("/v1/forward", "POST", resp).await;
+    assert_eq!(s, 429);
+    assert_eq!(body["code"], "approval_limit_reached");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(2500),
+        "not held"
+    );
+    assert_eq!(env.pending_of(&name).await.len(), 3);
+    for h in held {
+        let (status, body) = h.await.unwrap();
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (403, Some("approval_pending"))
+        );
+    }
+    assert!(env.all_captured_requests().await.is_empty());
+    let asked = env
+        .events(500)
+        .await
+        .into_iter()
+        .filter(|e| {
+            e["event"]["action"] == "approval_requested"
+                && e["ferrowarden"]["key"]["name"] == name.as_str()
+        })
+        .count();
+    assert_eq!(asked, 3);
+    // Revoking the key clears what it had open.
+    env.revoke_key(&id).await;
+    assert!(env.pending_of(&name).await.is_empty());
+}
+
+/// The prompt reaches the notifier once per approval, with the fields the
+/// operator needs to decide and nothing else: the path without its query, the
+/// approval id, the expiry and the link; never a value or a token.
+#[tokio::test]
+async fn test_approval_prompt_notification_has_the_request_details_and_no_values() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+    env.reset_notifications().await;
+    let (name, id, token) = env.approval_key("appr-notify", json!([])).await;
+
+    let url_path = "/api2/json/nodes?probe=query-marker-9&ticket=ticket-marker-9";
+    let first = env
+        .forward_as(&token, "GET", url_path, approval_bearer(APPROVAL_ITEM))
+        .await;
+    assert_eq!(first.status(), 403);
+    let body: Value = first.json().await.unwrap();
+    let approval_id = body["approval_id"].as_str().unwrap().to_string();
+    // A retry reuses the open approval: no second prompt.
+    let again = env
+        .forward_as(&token, "GET", url_path, approval_bearer(APPROVAL_ITEM))
+        .await;
+    assert_eq!(again.status(), 403);
+
+    let n = env
+        .wait_for_notification("the approval prompt", |b| {
+            b["category"] == "approval" && b["event"]["key_name"] == name.as_str()
+        })
+        .await;
+    assert!(has_notifier_bearer(&n));
+    let b = notification_json(&n);
+    assert_eq!(b["title"], "Ferrowarden: approval needed");
+    assert_eq!(b["severity"], "high");
+    assert_eq!(b["event"]["action"], "approval_requested");
+    assert_eq!(b["event"]["credentials"], json!([APPROVAL_ITEM]));
+    assert_eq!(b["event"]["key_id"], id[..8].to_string());
+    let a = &b["event"]["approval"];
+    assert_eq!(a["id"], approval_id.as_str());
+    assert_eq!(a["method"], "GET");
+    assert_eq!(a["target"], "mock-api:7777");
+    assert_eq!(a["path"], "/mock-api/api2/json/nodes");
+    assert!(a["expires_at"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(
+        a["link"],
+        format!("http://localhost:3001/approvals/{approval_id}")
+    );
+    let message = b["message"].as_str().unwrap();
+    assert!(message.contains(&format!(
+        "Approve or deny: http://localhost:3001/approvals/{approval_id}"
+    )));
+    assert!(message.contains("GET mock-api:7777/mock-api/api2/json/nodes"));
+
+    let text = n["body"].as_str().unwrap();
+    for (i, bad) in [
+        "query-marker-9",
+        "ticket-marker-9",
+        "probe",
+        "{{",
+        "Authorization",
+        "Bearer",
+        APPROVAL_ITEM_VALUE,
+        APPROVAL_ITEM_USER,
+        token.as_str(),
+        env.admin_key.as_str(),
+        notify_token().as_str(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(!text.contains(bad), "forbidden item #{i} is in the prompt");
+    }
+    let allowed = [
+        "category",
+        "action",
+        "outcome",
+        "key_name",
+        "key_id",
+        "credentials",
+        "target_host",
+        "source_ip",
+        "request_id",
+        "timestamp",
+        "count",
+        "approval",
+    ];
+    for key in b["event"].as_object().unwrap().keys() {
+        assert!(allowed.contains(&key.as_str()), "unexpected field {key}");
+    }
+    // One prompt for the approval, however many requests waited on it.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let prompts = env
+        .notifications()
+        .await
+        .into_iter()
+        .filter(|n| notification_json(n)["event"]["approval"]["id"] == approval_id.as_str())
+        .count();
+    assert_eq!(prompts, 1);
+    env.revoke_key(&id).await;
+}
+
+/// The admin UI decides: the approver signs in with the vault master password
+/// (a recent sign-in), opens the approval, and approves with a duration or
+/// denies. A request held meanwhile goes through, or is refused.
+#[tokio::test]
+async fn test_approval_ui_approve_and_deny() {
+    let Some(env) = TestEnv::load() else { return };
+    env.reset_mock().await;
+    let (name, id, token) = env.approval_key("appr-ui", json!([])).await;
+    let mut b = env.ui_browser();
+
+    // Not signed in: the page is the sign-in, and a link decides nothing.
+    let held = spawn_forward(&token, APPROVAL_ITEM, "/api/ui1");
+    let open = env.wait_for_pending(&name, 1).await.remove(0);
+    let approval_id = open["id"].as_str().unwrap().to_string();
+    let r = b.get(&format!("/approvals/{approval_id}")).await;
+    assert_eq!(r.status, 303);
+    assert_eq!(r.header("location"), format!("/ui/approvals/{approval_id}"));
+    let r = b.get(&format!("/ui/approvals/{approval_id}")).await;
+    assert_eq!(r.status, 303);
+    assert_eq!(r.header("location"), "/ui/login");
+
+    assert_eq!(b.sign_in(&master_password()).await.status, 303);
+    let page = b.get(&format!("/ui/approvals/{approval_id}")).await;
+    assert_eq!(page.status, 200);
+    assert_ui_security_headers(&page);
+    for needle in [
+        name.as_str(),
+        APPROVAL_ITEM,
+        "mock-api:7777",
+        "/api/ui1",
+        "vault field",
+    ] {
+        assert!(page.body.contains(needle), "{needle}");
+    }
+    assert!(!page.body.contains(APPROVAL_ITEM_VALUE));
+    let list = b.get("/ui/approvals").await;
+    assert!(list.body.contains(&approval_id));
+    // Without the CSRF token or from another origin: refused, nothing decided.
+    let path = format!("/ui/approvals/{approval_id}/approve");
+    let r = b.post(&path, &[("csrf", "wrong"), ("preset", "15")]).await;
+    assert_eq!(r.status, 403);
+    let r = b
+        .send(
+            reqwest::Method::POST,
+            &path,
+            &[("origin", "https://evil.example")],
+            Some(&[("csrf", page.csrf().as_str()), ("preset", "15")]),
+        )
+        .await;
+    assert_eq!(r.status, 403);
+    assert_eq!(env.pending_of(&name).await.len(), 1);
+
+    // Approve with a preset (5 minutes): the held request goes through.
+    let r = b
+        .post(&path, &[("csrf", &page.csrf()), ("preset", "5")])
+        .await;
+    assert_eq!(r.status, 303);
+    assert_eq!(r.header("location"), "/ui/approvals?m=approved");
+    assert_eq!(held.await.unwrap().0, 200);
+    let grants = env.approvals().await["grants"].as_array().unwrap().clone();
+    let grant = grants
+        .iter()
+        .find(|g| g["key"]["name"] == name.as_str())
+        .unwrap();
+    assert_eq!(
+        grant["approver"],
+        ui_email().as_str(),
+        "the signed-in vault account"
+    );
+    let listed = b.get("/ui/approvals").await;
+    assert!(listed.body.contains("Live grants (1)") || listed.body.contains("Live grants"));
+    // Revoke it from the UI.
+    let r = b
+        .post(
+            &format!("/ui/grants/{}/revoke", grant["id"].as_str().unwrap()),
+            &[("csrf", &listed.csrf())],
+        )
+        .await;
+    assert_eq!(r.header("location"), "/ui/approvals?m=revoked");
+
+    // Deny the next one from the UI.
+    let held = spawn_forward(&token, APPROVAL_ITEM, "/api/ui2");
+    let open = env.wait_for_pending(&name, 1).await.remove(0);
+    let id2 = open["id"].as_str().unwrap().to_string();
+    let page = b.get(&format!("/ui/approvals/{id2}")).await;
+    let r = b
+        .post(
+            &format!("/ui/approvals/{id2}/deny"),
+            &[("csrf", &page.csrf())],
+        )
+        .await;
+    assert_eq!(r.header("location"), "/ui/approvals?m=denied");
+    let (status, body) = held.await.unwrap();
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (403, Some("approval_denied"))
+    );
+    // Deciding it again: 409.
+    let r = b
+        .post(
+            &format!("/ui/approvals/{id2}/deny"),
+            &[("csrf", &page.csrf())],
+        )
+        .await;
+    assert_eq!(r.status, 409);
+    let denied = env.approval_events("approval_denied", &id2).await;
+    assert_eq!(denied[0]["ferrowarden"]["details"]["via"], "ui");
+    assert_eq!(
+        denied[0]["ferrowarden"]["details"]["approver"],
+        ui_email().as_str()
+    );
+    env.revoke_key(&id).await;
 }

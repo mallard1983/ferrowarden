@@ -56,6 +56,12 @@ fn all_actions_are_listed() {
             Action::SessionUse => 27,
             Action::SessionExpire => 28,
             Action::SessionDelete => 29,
+            Action::ApprovalRequested => 30,
+            Action::ApprovalGranted => 31,
+            Action::ApprovalDenied => 32,
+            Action::ApprovalExpired => 33,
+            Action::GrantRevoked => 34,
+            Action::GrantExpired => 35,
         }
     }
     for (i, a) in Action::ALL.into_iter().enumerate() {
@@ -345,6 +351,9 @@ fn reason_codes_are_the_documented_snake_case_list() {
         (Reason::SessionHostNotAllowed, "session_host_not_allowed"),
         (Reason::SessionsDisabled, "sessions_disabled"),
         (Reason::CaptureFailed, "capture_failed"),
+        (Reason::ApprovalPending, "approval_pending"),
+        (Reason::ApprovalDenied, "approval_denied"),
+        (Reason::ApprovalLimitReached, "approval_limit_reached"),
     ];
     assert_eq!(all.len(), Reason::ALL.len());
     for ((reason, code), listed) in all.into_iter().zip(Reason::ALL) {

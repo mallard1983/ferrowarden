@@ -132,12 +132,28 @@ pub struct CredentialPlan {
     items: Vec<PlannedItem>,
 }
 
+impl CredentialPlan {
+    /// Every item name the plan uses, and whether its vault item carries the
+    /// reserved `ferrowarden_approval` field (the vault's half of "needs
+    /// approval"; the key policy is the other half).
+    pub fn approval_fields(&self) -> BTreeMap<String, bool> {
+        let mut out = BTreeMap::new();
+        for item in &self.items {
+            let flag = out.entry(item.placeholder.item.clone()).or_insert(false);
+            *flag |= item.approval_field;
+        }
+        out
+    }
+}
+
 #[derive(Debug)]
 struct PlannedItem {
     placeholder: Placeholder,
     id: String,
     fetch: Fetch,
     scrub: bool,
+    /// The vault item has a `ferrowarden_approval` field.
+    approval_field: bool,
 }
 
 /// Check phase: validate every placeholder for a request to `target` against
@@ -181,6 +197,7 @@ pub fn check_credentials(
             id: entry.id.clone(),
             fetch,
             scrub,
+            approval_field: entry.approval_required,
         });
     }
     Ok(CredentialPlan { items })

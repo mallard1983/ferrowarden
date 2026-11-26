@@ -276,6 +276,85 @@ pub fn error_message(body: &[u8]) -> Option<String> {
     (!cleaned.is_empty()).then(|| cleaned.to_string())
 }
 
+/// The stable code of an approval answer (`approval_pending`,
+/// `approval_denied` or `approval_limit_reached`) in Ferrowarden's error body,
+/// or `None` for any other body. Only these three known codes are returned,
+/// so nothing else from the body is ever echoed as a code.
+pub fn approval_code(body: &[u8]) -> Option<&'static str> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    match value.get("code")?.as_str()? {
+        "approval_pending" => Some("approval_pending"),
+        "approval_denied" => Some("approval_denied"),
+        "approval_limit_reached" => Some("approval_limit_reached"),
+        _ => None,
+    }
+}
+
+/// The `approval_id` of an `approval_pending` body, if it is the short
+/// URL-safe token Ferrowarden makes (anything else is not echoed).
+pub fn approval_id(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let id = value.get("approval_id")?.as_str()?;
+    (!id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    .then(|| id.to_string())
+}
+
+/// What the agent does about an approval answer.
+pub fn approval_guidance(code: &str, approval_id: Option<&str>) -> String {
+    match code {
+        "approval_pending" => {
+            let which = match approval_id {
+                Some(id) => format!(" (approval id {id})"),
+                None => String::new(),
+            };
+            format!(
+                "This credential needs a human's approval, and nobody has decided yet{which}. \
+                 Ask your human to approve it in the Ferrowarden admin UI, on its Approvals page, \
+                 then retry the same request unchanged. Do not try other credentials, hosts or \
+                 methods to get around it."
+            )
+        }
+        "approval_denied" => "A human denied this request. Stop: do not retry it, and do not \
+                              look for another way to use the credential. Tell the user what \
+                              was refused."
+            .to_string(),
+        _ => "This agent key has too many approval requests open or made recently. Do not retry \
+              now: tell the user, and wait for the open ones to be decided or to expire."
+            .to_string(),
+    }
+}
+
+/// The text of a tool error for an approval answer from Ferrowarden: the
+/// status, the message, the ids and what to do about it.
+pub fn approval_error_text(
+    status: u16,
+    code: &str,
+    message: Option<&str>,
+    request_id: Option<&str>,
+    approval_id: Option<&str>,
+) -> String {
+    let phrase = reason(status);
+    let mut out = format!("Ferrowarden did not send the request: HTTP {status} {phrase}, {code}.");
+    match message {
+        Some(m) => {
+            let _ = write!(out, "\nMessage: {m}");
+        }
+        None => out.push_str("\nMessage: (none)"),
+    }
+    if let Some(id) = approval_id {
+        let _ = write!(out, "\nApproval ID: {id}");
+    }
+    if let Some(id) = request_id {
+        let _ = write!(out, "\nRequest ID: {id}");
+    }
+    let _ = write!(out, "\n{}", approval_guidance(code, approval_id));
+    out
+}
+
 /// The text of a tool error for an error answer from Ferrowarden.
 pub fn ferrowarden_error_text(
     status: u16,

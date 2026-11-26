@@ -1,4 +1,5 @@
 mod api;
+mod approvals;
 mod config;
 mod error;
 mod events;
@@ -76,6 +77,16 @@ fn startup_event(
             config.ui.enabled() && config.ui.insecure_http,
         )
         .detail("sessions_enabled", config.sessions.enabled)
+        .detail("approval_wait_secs", config.approval.wait_secs)
+        .detail(
+            "approval_pending_ttl_secs",
+            config.approval.pending_ttl_secs,
+        )
+        .detail(
+            "approval_max_grant_minutes",
+            config.approval.max_grant_minutes,
+        )
+        .detail("ui_public_url_set", !config.ui.public_url.trim().is_empty())
         .detail("metrics_enabled", config.metrics.enabled())
         .detail("metrics_auth", config.metrics.auth().as_str())
         .detail(
@@ -287,6 +298,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Captured sessions: remove the expired ones every minute.
     sessions::spawn_sweeper(state.clone());
+    // Approvals: expire open ones and grants, wake the requests held on them.
+    approvals::spawn_sweeper(state.clone());
 
     if config.enforce_credential_hosts {
         tracing::info!("Credential host binding enforced: credentials are only sent to hosts in their vault item URIs");
@@ -371,8 +384,11 @@ async fn main() -> anyhow::Result<()> {
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     tokio::spawn({
         let signal = signal.clone();
+        let state = state.clone();
         async move {
             let _ = signal.set(shutdown_signal().await);
+            // Held approval requests answer now instead of delaying the stop.
+            state.approvals.shutdown();
             let _ = stop_tx.send(true);
         }
     });

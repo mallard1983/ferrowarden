@@ -177,6 +177,99 @@ pub struct Config {
     /// environment (docs/sessions.md).
     #[serde(default)]
     pub sessions: SessionsConfig,
+
+    /// Human approval of sensitive credentials: how long a request is held,
+    /// how long an approval stays open, the longest grant and the limits that
+    /// keep an agent from flooding the operator. `[approval]` in the TOML
+    /// file, `FERROWARDEN_APPROVAL__*` in the environment (docs/approvals.md).
+    #[serde(default)]
+    pub approval: ApprovalConfig,
+}
+
+/// Settings of human approval (see docs/approvals.md).
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct ApprovalConfig {
+    /// How long a forward request that needs approval is held, waiting for a
+    /// decision, in seconds. 1 to 300. Default 60. A reverse proxy in front
+    /// of the API needs a read timeout above it.
+    pub wait_secs: u64,
+    /// How long a pending approval stays open after it was created, and how
+    /// long a denial stands, in seconds. At least `wait_secs`, at most 3600.
+    /// Default 600.
+    pub pending_ttl_secs: u64,
+    /// The longest grant an approver may give, in minutes. 1 to 10080 (7
+    /// days). Default 480.
+    pub max_grant_minutes: u32,
+    /// Distinct pending approvals one agent key may have open. 1 to 50.
+    /// Default 3.
+    pub max_pending_per_key: usize,
+    /// New approval prompts one agent key may cause in any rolling hour. 1 to
+    /// 1000. Default 20.
+    pub max_requests_per_key_per_hour: usize,
+    /// Held requests one agent key may have at a time; beyond that a request
+    /// is answered `approval_pending` at once. 1 to 100. Default 8.
+    pub max_waiters_per_key: usize,
+}
+
+/// The longest `approval.pending_ttl_secs` that is accepted: one hour.
+pub const MAX_APPROVAL_PENDING_TTL_SECS: u64 = 3600;
+/// The longest `approval.wait_secs` that is accepted.
+pub const MAX_APPROVAL_WAIT_SECS: u64 = 300;
+/// The longest `approval.max_grant_minutes` that is accepted: 7 days.
+pub const MAX_APPROVAL_GRANT_MINUTES_CEILING: u32 = 10_080;
+
+impl Default for ApprovalConfig {
+    fn default() -> Self {
+        Self {
+            wait_secs: 60,
+            pending_ttl_secs: 600,
+            max_grant_minutes: 480,
+            max_pending_per_key: 3,
+            max_requests_per_key_per_hour: 20,
+            max_waiters_per_key: 8,
+        }
+    }
+}
+
+impl ApprovalConfig {
+    fn validate(&self) -> FerroResult<()> {
+        let err = |m: String| Err(FerroError::Config(m));
+        if self.wait_secs == 0 || self.wait_secs > MAX_APPROVAL_WAIT_SECS {
+            return err(format!(
+                "approval.wait_secs must be between 1 and {MAX_APPROVAL_WAIT_SECS}"
+            ));
+        }
+        if self.pending_ttl_secs < self.wait_secs {
+            return err(
+                "approval.pending_ttl_secs must be at least approval.wait_secs".to_string(),
+            );
+        }
+        if self.pending_ttl_secs > MAX_APPROVAL_PENDING_TTL_SECS {
+            return err(format!(
+                "approval.pending_ttl_secs may be at most {MAX_APPROVAL_PENDING_TTL_SECS} (1 hour)"
+            ));
+        }
+        if self.max_grant_minutes == 0
+            || self.max_grant_minutes > MAX_APPROVAL_GRANT_MINUTES_CEILING
+        {
+            return err(format!(
+                "approval.max_grant_minutes must be between 1 and {MAX_APPROVAL_GRANT_MINUTES_CEILING}"
+            ));
+        }
+        if self.max_pending_per_key == 0 || self.max_pending_per_key > 50 {
+            return err("approval.max_pending_per_key must be between 1 and 50".to_string());
+        }
+        if self.max_requests_per_key_per_hour == 0 || self.max_requests_per_key_per_hour > 1000 {
+            return err(
+                "approval.max_requests_per_key_per_hour must be between 1 and 1000".to_string(),
+            );
+        }
+        if self.max_waiters_per_key == 0 || self.max_waiters_per_key > 100 {
+            return err("approval.max_waiters_per_key must be between 1 and 100".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// Settings of captured sessions (see docs/sessions.md).
@@ -263,6 +356,11 @@ pub struct UiConfig {
     /// A session ends this many hours after sign-in, whatever its activity.
     /// Default 8.
     pub session_max_hours: u64,
+    /// The address operators reach the admin UI at, for the link in an
+    /// approval prompt (`<public_url>/approvals/<id>`): an absolute `https://`
+    /// URL, or `http://` with `insecure_http`. Empty (default): the prompt
+    /// says to open the Approvals page of the admin UI instead.
+    pub public_url: String,
 }
 
 impl Default for UiConfig {
@@ -274,6 +372,7 @@ impl Default for UiConfig {
             insecure_http: false,
             session_idle_minutes: 15,
             session_max_hours: 8,
+            public_url: String::new(),
         }
     }
 }
@@ -283,7 +382,41 @@ impl UiConfig {
         !self.bind.trim().is_empty()
     }
 
+    /// The link to one approval in the admin UI, `<public_url>/approvals/<id>`,
+    /// or `None` without `ui.public_url`. `id` is a URL-safe token.
+    pub fn approval_link(&self, id: &str) -> Option<String> {
+        let base = self.public_url.trim().trim_end_matches('/');
+        (!base.is_empty()).then(|| format!("{base}/approvals/{id}"))
+    }
+
+    fn validate_public_url(&self) -> FerroResult<()> {
+        let raw = self.public_url.trim();
+        if raw.is_empty() {
+            return Ok(());
+        }
+        let err = |m: &str| Err(FerroError::Config(format!("ui.public_url {m}")));
+        let Ok(url) = reqwest::Url::parse(raw) else {
+            return err("is not an absolute URL");
+        };
+        if url.host_str().is_none() {
+            return err("has no host");
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return err("must not contain a user name or password");
+        }
+        if url.query().is_some() || url.fragment().is_some() {
+            return err("must not have a query or fragment");
+        }
+        match url.scheme() {
+            "https" => Ok(()),
+            "http" if self.insecure_http => Ok(()),
+            "http" => err("must be https:// (http:// only with ui.insecure_http = true)"),
+            _ => err("must be an https:// URL"),
+        }
+    }
+
     fn validate(&self) -> FerroResult<()> {
+        self.validate_public_url()?;
         if !self.enabled() {
             return Ok(());
         }
@@ -859,8 +992,8 @@ pub struct NotifyConfig {
     /// (`FERROWARDEN_NOTIFY_WEBHOOK_TOKEN`) is optional. Empty disables it.
     pub webhook_url: String,
     /// Categories to notify about: `blocked`, `auth_failure`, `vault`,
-    /// `admin`, `system`. A TOML list, or a comma-separated string in the
-    /// environment. Default: all but `admin`.
+    /// `admin`, `system`, `approval`. A TOML list, or a comma-separated
+    /// string in the environment. Default: all but `admin`.
     #[serde(deserialize_with = "string_or_list")]
     pub events: Vec<String>,
     /// At most one notification per category and subject in this many
@@ -980,7 +1113,7 @@ impl NotifyConfig {
                 .filter(|n| crate::notify::Category::parse(n).is_none())
                 .collect();
             return err(format!(
-                "notify.events has unknown categories {bad:?}; valid: blocked, auth_failure, vault, admin, system"
+                "notify.events has unknown categories {bad:?}; valid: blocked, auth_failure, vault, admin, system, approval"
             ));
         }
         if self.max_per_hour == 0 || self.auth_failure_threshold == 0 {
@@ -1242,6 +1375,7 @@ impl Config {
         self.notify.validate()?;
         self.metrics.validate(&self.bind_addr, &self.ui.bind)?;
         self.sessions.validate()?;
+        self.approval.validate()?;
         for warning in self.vault.validate(self.bw_serve_url.is_some())? {
             tracing::warn!("{warning}");
         }

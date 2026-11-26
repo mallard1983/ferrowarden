@@ -75,12 +75,18 @@ pub enum Action {
     SessionUse,
     SessionExpire,
     SessionDelete,
+    ApprovalRequested,
+    ApprovalGranted,
+    ApprovalDenied,
+    ApprovalExpired,
+    GrantRevoked,
+    GrantExpired,
 }
 
 impl Action {
     /// Every action, in the order the audit view lists them. Keep in step
     /// with the enum: the `all_actions_are_listed` test counts the variants.
-    pub const ALL: [Action; 30] = [
+    pub const ALL: [Action; 36] = [
         Action::Forward,
         Action::CredentialsList,
         Action::AgentAuth,
@@ -111,6 +117,12 @@ impl Action {
         Action::SessionUse,
         Action::SessionExpire,
         Action::SessionDelete,
+        Action::ApprovalRequested,
+        Action::ApprovalGranted,
+        Action::ApprovalDenied,
+        Action::ApprovalExpired,
+        Action::GrantRevoked,
+        Action::GrantExpired,
     ];
 
     /// The action whose wire name (`as_str`) is `name`.
@@ -150,6 +162,12 @@ impl Action {
             Action::SessionUse => "session_use",
             Action::SessionExpire => "session_expire",
             Action::SessionDelete => "session_delete",
+            Action::ApprovalRequested => "approval_requested",
+            Action::ApprovalGranted => "approval_granted",
+            Action::ApprovalDenied => "approval_denied",
+            Action::ApprovalExpired => "approval_expired",
+            Action::GrantRevoked => "grant_revoked",
+            Action::GrantExpired => "grant_expired",
         }
     }
 
@@ -179,7 +197,13 @@ impl Action {
             | Action::KeyRevoke
             | Action::KeyList
             | Action::KeyPolicyChange
-            | Action::PolicyPreview => "iam",
+            | Action::PolicyPreview
+            | Action::ApprovalRequested
+            | Action::ApprovalGranted
+            | Action::ApprovalDenied
+            | Action::ApprovalExpired
+            | Action::GrantRevoked
+            | Action::GrantExpired => "iam",
             Action::VaultLock
             | Action::VaultSync
             | Action::Startup
@@ -233,6 +257,12 @@ impl Action {
             Action::SessionUse => "session use",
             Action::SessionExpire => "session expiry",
             Action::SessionDelete => "session deletion",
+            Action::ApprovalRequested => "approval request",
+            Action::ApprovalGranted => "approval grant",
+            Action::ApprovalDenied => "approval denial",
+            Action::ApprovalExpired => "approval expiry",
+            Action::GrantRevoked => "grant revocation",
+            Action::GrantExpired => "grant expiry",
         }
     }
 
@@ -269,6 +299,12 @@ impl Action {
             Action::SessionUse => "session used",
             Action::SessionExpire => "session expired",
             Action::SessionDelete => "session deleted",
+            Action::ApprovalRequested => "approval requested",
+            Action::ApprovalGranted => "approval granted",
+            Action::ApprovalDenied => "approval denied",
+            Action::ApprovalExpired => "approval expired",
+            Action::GrantRevoked => "grant revoked",
+            Action::GrantExpired => "grant expired",
         }
     }
 }
@@ -339,12 +375,15 @@ pub enum Reason {
     SessionHostNotAllowed,
     SessionsDisabled,
     CaptureFailed,
+    ApprovalPending,
+    ApprovalDenied,
+    ApprovalLimitReached,
 }
 
 impl Reason {
     /// Every reason, in declaration order (tests and the notifier tables).
     #[cfg(test)]
-    pub const ALL: [Reason; 36] = [
+    pub const ALL: [Reason; 39] = [
         Reason::MissingKey,
         Reason::InvalidKey,
         Reason::MissingAdminKey,
@@ -381,6 +420,9 @@ impl Reason {
         Reason::SessionHostNotAllowed,
         Reason::SessionsDisabled,
         Reason::CaptureFailed,
+        Reason::ApprovalPending,
+        Reason::ApprovalDenied,
+        Reason::ApprovalLimitReached,
     ];
 
     /// The wire code (`event.reason`), the same text serde writes.
@@ -422,6 +464,9 @@ impl Reason {
             Reason::SessionHostNotAllowed => "session_host_not_allowed",
             Reason::SessionsDisabled => "sessions_disabled",
             Reason::CaptureFailed => "capture_failed",
+            Reason::ApprovalPending => "approval_pending",
+            Reason::ApprovalDenied => "approval_denied",
+            Reason::ApprovalLimitReached => "approval_limit_reached",
         }
     }
 
@@ -451,6 +496,8 @@ impl Reason {
                 | Reason::InvalidMetricsToken
                 | Reason::SessionHostNotAllowed
                 | Reason::SessionsDisabled
+                | Reason::ApprovalDenied
+                | Reason::ApprovalLimitReached
         )
     }
 
@@ -493,6 +540,9 @@ impl Reason {
             Reason::SessionHostNotAllowed => "session not bound to target origin",
             Reason::SessionsDisabled => "captured sessions are disabled",
             Reason::CaptureFailed => "no value could be captured",
+            Reason::ApprovalPending => "waiting for a human to approve",
+            Reason::ApprovalDenied => "a human denied the request",
+            Reason::ApprovalLimitReached => "too many approval requests from this agent key",
         }
     }
 }
@@ -524,6 +574,10 @@ impl From<&FerroError> for Reason {
             FerroError::UnknownSession(_) => Reason::UnknownSession,
             FerroError::SessionHostNotAllowed { .. } => Reason::SessionHostNotAllowed,
             FerroError::SessionsDisabled => Reason::SessionsDisabled,
+            FerroError::ApprovalPending { .. } => Reason::ApprovalPending,
+            FerroError::ApprovalDenied => Reason::ApprovalDenied,
+            FerroError::ApprovalLimitReached => Reason::ApprovalLimitReached,
+            FerroError::ApprovalNotPending | FerroError::GrantNotFound => Reason::InvalidRequest,
             FerroError::Config(_) => Reason::InternalError,
             FerroError::UnlockEndpointDisabled => Reason::InvalidRequest,
             FerroError::InvalidRequest(_) => Reason::InvalidRequest,
@@ -710,7 +764,11 @@ impl SecurityEvent {
             | Action::AuditRead
             | Action::StatusRead
             | Action::OpenapiRead => vec!["access"],
-            Action::KeyPolicyChange => vec!["change"],
+            Action::KeyPolicyChange | Action::ApprovalGranted => vec!["change"],
+            Action::ApprovalRequested => vec!["info"],
+            Action::ApprovalDenied => vec!["denied"],
+            Action::ApprovalExpired | Action::GrantExpired => vec!["end"],
+            Action::GrantRevoked => vec!["deletion"],
             Action::AgentAuth | Action::AdminAuth | Action::MetricsAuth | Action::VaultUnlock => {
                 vec!["start"]
             }

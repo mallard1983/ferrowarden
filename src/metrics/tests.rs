@@ -34,6 +34,8 @@ fn snapshot() -> Snapshot {
         keys_with_policy: 3,
         keys_without_policy: 1,
         events_dropped: 4,
+        approvals_pending: 2,
+        approval_grants: 1,
         notify: NotifySnapshot {
             senders: vec![SenderInfo {
                 kind: "webhook",
@@ -163,6 +165,10 @@ fn every_family_is_registered_with_the_right_type() {
         ("ferrowarden_session_captures", "counter"),
         ("ferrowarden_session_uses", "counter"),
         ("ferrowarden_sessions_active", "gauge"),
+        ("ferrowarden_approval_requests", "counter"),
+        ("ferrowarden_forward_approval", "counter"),
+        ("ferrowarden_approvals_pending", "gauge"),
+        ("ferrowarden_approval_grants_active", "gauge"),
         ("ferrowarden_forward_credential_uses", "counter"),
     ]);
     let got = types(&text);
@@ -850,4 +856,138 @@ async fn the_started_consumer_counts_what_the_log_emits() {
 async fn metrics_off_starts_nothing() {
     let log = Arc::new(EventLog::buffer_only(16));
     assert!(start(&MetricsConfig::default(), "native", &log).is_none());
+}
+
+// ── Approvals ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn the_approval_series_exist_before_any_event_and_the_gauges_follow_the_snapshot() {
+    let m = metrics(false);
+    let text = render(&m);
+    for outcome in ["granted", "denied", "expired", "limit_reached"] {
+        let series = format!("ferrowarden_approval_requests_total{{outcome=\"{outcome}\"}}");
+        assert_eq!(value(&text, &series), Some(0.0), "{series}");
+    }
+    for result in [
+        "granted_by_grant",
+        "approved_while_waiting",
+        "pending",
+        "denied",
+    ] {
+        let series = format!("ferrowarden_forward_approval_total{{result=\"{result}\"}}");
+        assert_eq!(value(&text, &series), Some(0.0), "{series}");
+    }
+    assert_eq!(value(&text, "ferrowarden_approvals_pending"), Some(2.0));
+    assert_eq!(
+        value(&text, "ferrowarden_approval_grants_active"),
+        Some(1.0)
+    );
+}
+
+#[test]
+fn approval_decisions_expiries_and_gate_results_are_counted() {
+    let m = metrics(false);
+    let mut c = Consumer::new(m.clone());
+    let key = key("agent-a");
+    let ev = |action: Action| SecurityEvent::new(action).key(&key);
+    for e in [
+        ev(Action::ApprovalGranted),
+        ev(Action::ApprovalGranted),
+        ev(Action::ApprovalDenied),
+        ev(Action::ApprovalExpired),
+        ev(Action::ApprovalExpired),
+        ev(Action::ApprovalExpired),
+        // A failed attempt to decide (the approval was not pending) is not an outcome.
+        ev(Action::ApprovalGranted)
+            .outcome(Outcome::Failure)
+            .reason(Reason::InvalidRequest),
+        ev(Action::ApprovalDenied)
+            .outcome(Outcome::Failure)
+            .reason(Reason::InvalidRequest),
+        // Not counted as approval outcomes.
+        ev(Action::ApprovalRequested),
+        ev(Action::GrantRevoked),
+        ev(Action::GrantExpired),
+    ] {
+        c.process(&e);
+    }
+    // Forward events: the gate's result is a fixed detail; the limit is a reason.
+    let fwd = |result: Option<&str>| {
+        let e = forward_ok("agent-a");
+        match result {
+            Some(r) => e.detail("approval", r),
+            None => e,
+        }
+    };
+    for e in [
+        fwd(Some("granted_by_grant")),
+        fwd(Some("granted_by_grant")),
+        fwd(Some("approved_while_waiting")),
+        fwd(None),
+        // An unknown value is not counted, whatever it says.
+        fwd(Some("something-from-a-request")),
+    ] {
+        c.process(&e);
+    }
+    for (result, reason) in [
+        ("pending", Reason::ApprovalPending),
+        ("denied", Reason::ApprovalDenied),
+    ] {
+        c.process(
+            &forward_ok("agent-a")
+                .detail("approval", result)
+                .outcome(Outcome::Failure)
+                .reason(reason),
+        );
+    }
+    c.process(
+        &forward_ok("agent-a")
+            .detail("approval", "limit_reached")
+            .outcome(Outcome::Failure)
+            .reason(Reason::ApprovalLimitReached),
+    );
+    let text = render(&m);
+    for (series, want) in [
+        (
+            "ferrowarden_approval_requests_total{outcome=\"granted\"}",
+            2.0,
+        ),
+        (
+            "ferrowarden_approval_requests_total{outcome=\"denied\"}",
+            1.0,
+        ),
+        (
+            "ferrowarden_approval_requests_total{outcome=\"expired\"}",
+            3.0,
+        ),
+        (
+            "ferrowarden_approval_requests_total{outcome=\"limit_reached\"}",
+            1.0,
+        ),
+        (
+            "ferrowarden_forward_approval_total{result=\"granted_by_grant\"}",
+            2.0,
+        ),
+        (
+            "ferrowarden_forward_approval_total{result=\"approved_while_waiting\"}",
+            1.0,
+        ),
+        (
+            "ferrowarden_forward_approval_total{result=\"pending\"}",
+            1.0,
+        ),
+        ("ferrowarden_forward_approval_total{result=\"denied\"}", 1.0),
+    ] {
+        assert_eq!(value(&text, series), Some(want), "{series}");
+    }
+    // No label ever carries a name, an id or free text.
+    assert_eq!(
+        label_names(&text, "ferrowarden_approval_requests_total"),
+        ["outcome"]
+    );
+    assert_eq!(
+        label_names(&text, "ferrowarden_forward_approval_total"),
+        ["result"]
+    );
+    assert!(!text.contains("something-from-a-request"));
 }

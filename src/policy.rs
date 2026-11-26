@@ -10,6 +10,12 @@
 //!   `*` in a name is matched by the wildcard anyway.
 //! * `methods` is a list drawn from [`METHODS`], case-insensitive on input and
 //!   stored upper-case.
+//! * `approval` is a list of credential name patterns, with the same syntax,
+//!   limits and matching as `credentials`: a credential whose name matches
+//!   needs a human's approval before this key can use it (docs/approvals.md).
+//!   It is an extra requirement only: absent in a key file or a create body it
+//!   is `[]` (no extra requirement), which is what a key from before approvals
+//!   existed has. Removing or narrowing patterns widens what the key can do.
 //! * `["*"]` is unrestricted, spelled out. `[]` means nothing is allowed.
 //!   There is no "unset means everything" state anywhere: a key must be given
 //!   both lists when it is created, and a legacy key without them is
@@ -45,14 +51,22 @@ pub struct KeyPolicy {
     pub credentials: Vec<String>,
     /// Allowed methods from [`METHODS`]; `["*"]` = all of them, `[]` = none.
     pub methods: Vec<String>,
+    /// Credential name patterns that need a human's approval for this key;
+    /// `["*"]` = every credential, `[]` = no extra requirement.
+    pub approval: Vec<String>,
 }
 
 impl KeyPolicy {
     /// Build a validated, normalised policy from raw lists.
-    pub fn from_raw(credentials: Vec<String>, methods: Vec<String>) -> FerroResult<Self> {
+    pub fn from_raw(
+        credentials: Vec<String>,
+        methods: Vec<String>,
+        approval: Vec<String>,
+    ) -> FerroResult<Self> {
         Ok(Self {
             credentials: validate_credentials(credentials)?,
             methods: validate_methods(methods)?,
+            approval: validate_approval(approval)?,
         })
     }
 
@@ -62,6 +76,7 @@ impl KeyPolicy {
         &self,
         credentials: Patch<Vec<String>>,
         methods: Patch<Vec<String>>,
+        approval: Patch<Vec<String>>,
     ) -> FerroResult<Self> {
         let mut out = self.clone();
         if let Patch::Value(list) = credentials {
@@ -70,7 +85,16 @@ impl KeyPolicy {
         if let Patch::Value(list) = methods {
             out.methods = validate_methods(list)?;
         }
+        if let Patch::Value(list) = approval {
+            out.approval = validate_approval(list)?;
+        }
         Ok(out)
+    }
+
+    /// Does the key policy make using the credential called `name` need a
+    /// human's approval? (The vault item's own field is the other source.)
+    pub fn requires_approval(&self, name: &str) -> bool {
+        self.approval.iter().any(|p| wildcard_match(p, name))
     }
 
     /// Does the policy let the key reference a credential called `name`?
@@ -109,24 +133,32 @@ impl KeyPolicy {
     }
 
     /// Would replacing this policy with `draft` give the key more access? True
-    /// if `draft` allows a method this one does not, or has a credential
-    /// pattern that this policy's patterns do not cover. The pattern test is
-    /// conservative and independent of the vault: a pattern is covered if one
-    /// of ours matches it read literally (its `*` characters as plain text),
-    /// which holds exactly when every name the pattern can match is matched.
-    /// So `uptime_a*` is covered by `uptime_*`, `up*` is not.
+    /// if `draft` allows a method this one does not, has a credential
+    /// pattern that this policy's patterns do not cover, or **removes or
+    /// narrows an approval pattern** (one of ours that no approval pattern of
+    /// the draft covers: the key could then use a credential without
+    /// asking). The pattern test is conservative and independent of the
+    /// vault: a pattern is covered if one of the other list's matches it
+    /// read literally (its `*` characters as plain text), which holds exactly
+    /// when every name the pattern can match is matched. So `uptime_a*` is
+    /// covered by `uptime_*`, `up*` is not.
     pub fn is_widened_by(&self, draft: &KeyPolicy) -> bool {
         let methods_wider = METHODS
             .iter()
             .any(|m| draft.allows_method(m) && !self.allows_method(m));
         let patterns_wider = draft.credentials.iter().any(|p| !self.allows_credential(p));
-        methods_wider || patterns_wider
+        let approval_weaker = self.approval.iter().any(|p| !draft.requires_approval(p));
+        methods_wider || patterns_wider || approval_weaker
     }
 
-    /// `{ "credentials": [...], "methods": [...] }`, as shown in API output
-    /// and events.
+    /// `{ "credentials": [...], "methods": [...], "approval": [...] }`, as
+    /// shown in API output and events.
     pub fn to_json(&self) -> Value {
-        json!({ "credentials": self.credentials, "methods": self.methods })
+        json!({
+            "credentials": self.credentials,
+            "methods": self.methods,
+            "approval": self.approval,
+        })
     }
 }
 
@@ -180,9 +212,18 @@ pub fn wildcard_match(pattern: &str, name: &str) -> bool {
 /// Validate credential patterns. A pattern that is exactly `*` collapses the
 /// list to `["*"]`; otherwise the result is de-duplicated, in the given order.
 pub fn validate_credentials(patterns: Vec<String>) -> FerroResult<Vec<String>> {
+    validate_patterns("credentials", patterns)
+}
+
+/// Validate the approval patterns: the same rules as the credential patterns.
+pub fn validate_approval(patterns: Vec<String>) -> FerroResult<Vec<String>> {
+    validate_patterns("approval", patterns)
+}
+
+fn validate_patterns(field: &str, patterns: Vec<String>) -> FerroResult<Vec<String>> {
     if patterns.len() > MAX_PATTERNS {
         return Err(FerroError::InvalidRequest(format!(
-            "credentials may have at most {MAX_PATTERNS} patterns"
+            "{field} may have at most {MAX_PATTERNS} patterns"
         )));
     }
     // No pre-sized allocation from the request-controlled length (the bound
@@ -192,12 +233,12 @@ pub fn validate_credentials(patterns: Vec<String>) -> FerroResult<Vec<String>> {
         let chars = pattern.chars().count();
         if chars == 0 || chars > MAX_PATTERN_CHARS {
             return Err(FerroError::InvalidRequest(format!(
-                "credentials[{i}]: a pattern must be 1-{MAX_PATTERN_CHARS} characters"
+                "{field}[{i}]: a pattern must be 1-{MAX_PATTERN_CHARS} characters"
             )));
         }
         if pattern.chars().any(char::is_control) {
             return Err(FerroError::InvalidRequest(format!(
-                "credentials[{i}]: a pattern may not contain control characters"
+                "{field}[{i}]: a pattern may not contain control characters"
             )));
         }
         if !out.contains(&pattern) {
@@ -298,9 +339,13 @@ impl<'de> Visitor<'de> for ListVisitor {
     }
 
     fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        let hint = if self.0 == "approval" {
+            "leave it out for no extra approval requirement, or send [\"*\"] to require approval for every credential"
+        } else {
+            "leave it out to keep the default, or send [\"*\"] to allow everything"
+        };
         Err(E::custom(format!(
-            "policy field `{}` must be an array of strings, not null; \
-             leave it out to keep the default, or send [\"*\"] to allow everything",
+            "policy field `{}` must be an array of strings, not null; {hint}",
             self.0
         )))
     }
@@ -366,6 +411,12 @@ list_fields!(
     "credentials"
 );
 list_fields!(patch_methods, required_methods, stored_methods, "methods");
+list_fields!(
+    patch_approval,
+    required_approval,
+    stored_approval,
+    "approval"
+);
 
 /// For an optional nested object (`request`): absent is `None`, `null` is an
 /// error rather than another way of saying "absent".

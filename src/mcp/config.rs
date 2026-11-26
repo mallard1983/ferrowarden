@@ -18,7 +18,7 @@ pub const ENV_CA_FILE: &str = "FERROWARDEN_CA_FILE";
 pub const ENV_TIMEOUT: &str = "FERROWARDEN_MCP_TIMEOUT_SECS";
 pub const ENV_ALLOW_HTTP: &str = "FERROWARDEN_MCP_ALLOW_HTTP";
 
-pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
+pub const DEFAULT_TIMEOUT_SECS: u64 = 400;
 pub const MIN_TIMEOUT_SECS: u64 = 1;
 pub const MAX_TIMEOUT_SECS: u64 = 600;
 

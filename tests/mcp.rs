@@ -682,3 +682,57 @@ fn unreachable_ferrowarden_does_not_crash_the_server() {
     assert!(again["result"]["tools"].is_array());
     s.finish();
 }
+
+/// A credential that needs a human's approval (its vault item says so): the
+/// `http_request` tool is held while Ferrowarden waits, then renders the
+/// pending answer so the agent knows to ask its human and retry the same
+/// request, rather than reading it as an ordinary refusal. Nothing is
+/// forwarded and the value is not shown.
+#[tokio::test]
+async fn mcp_http_request_for_an_approval_item_says_to_ask_the_human_and_retry() {
+    let Some(stack) = Stack::load() else { return };
+    stack.reset_mock().await;
+    let mut s = stack.session();
+    s.initialize();
+    let call = json!({
+        "method": "GET",
+        "url": format!("{}/mock-api/api/needs-approval", stack.mock_internal),
+        "headers": { "Authorization": "Bearer {{vault:test_approval_required}}" }
+    });
+    let refused = s.call("http_request", call);
+    assert_eq!(refused["isError"], true, "{}", text_of(&refused));
+    let text = text_of(&refused);
+    assert!(
+        text.contains("HTTP 403 Forbidden, approval_pending"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Ask your human to approve it in the Ferrowarden admin UI"),
+        "{text}"
+    );
+    assert!(text.contains("retry the same request unchanged"), "{text}");
+    assert!(
+        !text.contains("Do not retry it with other credentials"),
+        "it is not the generic refusal"
+    );
+    let structured = &refused["structuredContent"];
+    assert_eq!(structured["error_source"], "ferrowarden");
+    assert_eq!(structured["status"], 403);
+    assert_eq!(structured["code"], "approval_pending");
+    let id = structured["approval_id"].as_str().expect("an approval id");
+    assert!(id.len() >= 22 && text.contains(id), "{text}");
+    // Nothing was forwarded, and no value is in what the agent sees.
+    assert_eq!(stack.mock_get("/__requests__").await, json!([]));
+    assert!(!refused
+        .to_string()
+        .contains("test-approval-secret-5a5a5a5a"));
+
+    let (stdout, stderr) = s.finish();
+    for (name, text) in [("stdout", &stdout), ("stderr", &stderr)] {
+        assert!(
+            !text.contains(&stack.agent_key),
+            "{name} shows the agent key"
+        );
+        assert!(!text.contains("test-approval-secret-5a5a5a5a"), "{name}");
+    }
+}

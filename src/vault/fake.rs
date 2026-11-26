@@ -7,9 +7,13 @@
 //! binary cannot contain it.
 //!
 //! It holds no secrets. It reports the account email it was given (and a
-//! fixed last-sync time) as its status, counts those lookups, and fails every value read, so a test that
-//! reaches for a credential value without arranging one fails loudly.
+//! fixed last-sync time) as its status, counts those lookups, and fails every
+//! value read unless the test arranged one with [`FakeVault::set_value`], so a
+//! test that reaches for a credential value without arranging one fails
+//! loudly. [`FakeVault::value_reads`] counts the reads, which is how a test
+//! shows that a value was never fetched.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -27,12 +31,28 @@ pub struct FakeVault {
     /// The logged-in account; `None` reports the vault as unauthenticated.
     email: Mutex<Option<String>>,
     status_calls: AtomicUsize,
+    /// Values a test arranged, by item id and built-in.
+    values: Mutex<HashMap<(String, &'static str), String>>,
+    value_reads: AtomicUsize,
 }
 
 impl FakeVault {
     /// Make `status` report this account (or none).
     pub fn set_email(&self, email: Option<&str>) {
         *self.email.lock().unwrap() = email.map(str::to_string);
+    }
+
+    /// Arrange the password of item `id` (a test value).
+    pub fn set_password(&self, id: &str, value: &str) {
+        self.values
+            .lock()
+            .unwrap()
+            .insert((id.to_string(), "password"), value.to_string());
+    }
+
+    /// How many times a value (built-in or field) was asked for, found or not.
+    pub fn value_reads(&self) -> usize {
+        self.value_reads.load(Ordering::SeqCst)
     }
 
     /// How many times `status` was asked for.
@@ -79,11 +99,24 @@ impl Vault for FakeVault {
         Ok(Listing::default())
     }
 
-    async fn get_value(&self, _: Builtin, _: &str, _: &str) -> FerroResult<Zeroizing<String>> {
-        Err(FerroError::VaultUnavailable)
+    async fn get_value(&self, which: Builtin, id: &str, _: &str) -> FerroResult<Zeroizing<String>> {
+        self.value_reads.fetch_add(1, Ordering::SeqCst);
+        let key = match which {
+            Builtin::Password => "password",
+            Builtin::Username => "username",
+            Builtin::Totp => "totp",
+            Builtin::Notes => "notes",
+        };
+        self.values
+            .lock()
+            .unwrap()
+            .get(&(id.to_string(), key))
+            .map(|v| Zeroizing::new(v.clone()))
+            .ok_or(FerroError::VaultUnavailable)
     }
 
     async fn get_field(&self, _: &str, _: &str, _: &str) -> FerroResult<Zeroizing<String>> {
+        self.value_reads.fetch_add(1, Ordering::SeqCst);
         Err(FerroError::VaultUnavailable)
     }
 }

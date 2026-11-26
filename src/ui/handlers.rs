@@ -424,6 +424,11 @@ impl UiState {
         Err(Reply::redirect(&target))
     }
 
+    /// Approvals waiting for a decision (the count in the navigation).
+    pub(super) fn pending_approvals(&self) -> usize {
+        self.app.approvals.counts(chrono::Utc::now()).0
+    }
+
     /// "Signed in N minutes ago" and the sudo state, for pages with
     /// sensitive actions.
     pub(super) fn sudo_info(&self, view: &SessionView) -> SudoInfo {
@@ -455,6 +460,7 @@ impl UiState {
                 css_path: &self.css_path,
                 nav: Some(Nav {
                     current: "",
+                    pending_approvals: self.pending_approvals(),
                     account_email: &email,
                     csrf: &view.csrf,
                 }),
@@ -635,6 +641,7 @@ pub(super) async fn status_page(
     let email = ui.account_email().await.unwrap_or_default();
     let nav = Nav {
         current: "status",
+        pending_approvals: ui.pending_approvals(),
         account_email: &email,
         csrf: &view.csrf,
     };

@@ -558,6 +558,16 @@ impl Origin {
         })
     }
 
+    /// The scheme, lower case.
+    pub fn scheme(&self) -> &str {
+        &self.scheme
+    }
+
+    /// The port (the scheme's default when the URL gave none).
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     /// The host, with `:port` when the port is not the scheme's default. What
     /// `GET /v1/sessions` shows.
     pub fn host_label(&self) -> String {

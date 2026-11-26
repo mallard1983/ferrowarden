@@ -50,6 +50,8 @@ pub struct SavedDraft {
     /// The key name (create form only).
     pub name: String,
     pub patterns: Vec<String>,
+    /// The approval patterns.
+    pub approval: Vec<String>,
     /// One flag per entry of `policy::METHODS`, in order.
     pub checked: Vec<bool>,
     pub all_methods: bool,

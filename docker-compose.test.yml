@@ -145,10 +145,17 @@ services:
       # HTTP, hence insecure_http; never do this outside a test stack.
       FERROWARDEN_UI__BIND: "0.0.0.0:3001"
       FERROWARDEN_UI__INSECURE_HTTP: "true"
+      # Approval prompts link to <public_url>/approvals/<id> (the notification test checks it).
+      FERROWARDEN_UI__PUBLIC_URL: "http://localhost:3001"
+      # Human approval (docs/approvals.md), tuned so the suite can wait for it:
+      # a held request is answered after 3 seconds, an undecided approval and a
+      # denial last 15 seconds, so expiry and the denial window fit in a test.
+      FERROWARDEN_APPROVAL__WAIT_SECS: "3"
+      FERROWARDEN_APPROVAL__PENDING_TTL_SECS: "15"
       FERROWARDEN_NOTIFY__WEBHOOK_URL: "http://notify-sink:7777/notify"
       FERROWARDEN_NOTIFY__ALLOW_HTTP: "true"
       FERROWARDEN_NOTIFY_WEBHOOK_TOKEN_FILE: "/run/secrets/notify_webhook_token"
-      FERROWARDEN_NOTIFY__EVENTS: "blocked,auth_failure,vault,system"
+      FERROWARDEN_NOTIFY__EVENTS: "blocked,auth_failure,vault,system,approval"
       FERROWARDEN_NOTIFY__MIN_INTERVAL_SECS: "2"
       FERROWARDEN_NOTIFY__MAX_PER_HOUR: "100000"
       # Prometheus metrics (docs/metrics.md) on their own port, bearer token

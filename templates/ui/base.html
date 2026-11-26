@@ -21,6 +21,7 @@
 <nav class="mainnav" aria-label="Main">
 <a href="/ui/"{% if nav.current == "status" %} aria-current="page"{% endif %}>Status</a>
 <a href="/ui/keys"{% if nav.current == "keys" %} aria-current="page"{% endif %}>Keys</a>
+<a href="/ui/approvals"{% if nav.current == "approvals" %} aria-current="page"{% endif %}>Approvals{% if nav.pending_approvals > 0 %} <span class="badge warn" title="Waiting for a decision">{{ nav.pending_approvals }}</span>{% endif %}</a>
 <a href="/ui/audit"{% if nav.current == "audit" %} aria-current="page"{% endif %}>Audit</a>
 </nav>
 <div class="acct">

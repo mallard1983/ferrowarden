@@ -29,7 +29,7 @@ Response: `{ "status": 200, "headers": {...}, "body": "..." }`
 
 ## If you have MCP tools
 
-If your harness lists the tools `list_credentials` and `http_request` (from `ferrowarden-mcp`), use them instead of raw HTTP. `list_credentials` returns the same data as `GET /v1/credentials?detail=true`. `http_request` takes `method`, `url`, `headers` and `body` as in the `request` object below, plus an optional `capture` (see "Services that log in first"), and the bridge holds the agent key. The workflow and the rules are the same: copy placeholders from `list_credentials`; on `403` do not retry with other credentials, hosts or methods, and tell the user; on `422` copy a placeholder from the listing. A refusal from Ferrowarden itself is a tool error (`isError`) with the status and guidance; a `404` or `500` from the target is a normal result with that status.
+If your harness lists the tools `list_credentials` and `http_request` (from `ferrowarden-mcp`), use them instead of raw HTTP. `list_credentials` returns the same data as `GET /v1/credentials?detail=true`. `http_request` takes `method`, `url`, `headers` and `body` as in the `request` object below, plus an optional `capture` (see "Services that log in first"), and the bridge holds the agent key. The workflow and the rules are the same: copy placeholders from `list_credentials`; on `403` do not retry with other credentials, hosts or methods, and tell the user (except `approval_pending`: see "Credentials that need approval"); on `422` copy a placeholder from the listing. A refusal from Ferrowarden itself is a tool error (`isError`) with the status and guidance; a `404` or `500` from the target is a normal result with that status.
 
 ## Why
 
@@ -71,6 +71,16 @@ The response shows `[CAPTURED:portainer]` and a `captures` list (`status: "captu
 - `from` is `json:/pointer`, `header:Name` or `cookie:name`. `as` is a plain word you choose.
 - A session only works for the same scheme, host and port it was captured from, and only for your key. Another origin is `403`; an unknown, expired or deleted name is `422`: repeat the login.
 - Capture every token the login returns (e.g. ticket and CSRF token). `GET /v1/sessions` lists yours; `DELETE /v1/sessions/{name}` forgets one.
+
+## Credentials that need approval
+
+Some credentials need a person's yes before you can use them. Your request is held for a while, then you get `403` with `"code": "approval_pending"` and an `approval_id`.
+
+- Tell the user which credential you need and ask them to approve it in the Ferrowarden admin UI (the Approvals page), quoting the `approval_id`. Then **retry the same request**.
+- `"code": "approval_denied"` means a person said no: stop, do not retry, do not look for another way, tell the user.
+- `429` with `"code": "approval_limit_reached"`: you have too many open requests; do not retry now.
+- An approval covers your key, that credential and that host for the minutes the person chose. Do not try other credentials, hosts or methods to get around a pending approval.
+- Do not give these requests a short timeout: they can be held for a minute or more.
 
 ## Anti-patterns
 

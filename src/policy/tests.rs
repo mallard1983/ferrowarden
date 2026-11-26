@@ -4,6 +4,7 @@ fn pol(c: &[&str], m: &[&str]) -> KeyPolicy {
     KeyPolicy::from_raw(
         c.iter().map(|s| s.to_string()).collect(),
         m.iter().map(|s| s.to_string()).collect(),
+        Vec::new(),
     )
     .unwrap()
 }
@@ -213,35 +214,41 @@ fn default_policy_is_deny_all() {
     for m in METHODS {
         assert!(!p.allows_method(m));
     }
-    assert_eq!(p.to_json(), json!({"credentials": [], "methods": []}));
+    assert_eq!(
+        p.to_json(),
+        json!({"credentials": [], "methods": [], "approval": []})
+    );
 }
 
 #[test]
 fn star_star_is_unrestricted_but_only_for_known_methods() {
-    let p = KeyPolicy::from_raw(s(&["*"]), s(&["*"])).unwrap();
+    let p = KeyPolicy::from_raw(s(&["*"]), s(&["*"]), vec![]).unwrap();
     assert!(p.allows_credential("anything"));
     for m in METHODS {
         assert!(p.allows_method(m));
     }
     assert!(!p.allows_method("TRACE"));
-    assert_eq!(p.to_json(), json!({"credentials": ["*"], "methods": ["*"]}));
+    assert_eq!(
+        p.to_json(),
+        json!({"credentials": ["*"], "methods": ["*"], "approval": []})
+    );
 }
 
 #[test]
 fn empty_lists_allow_nothing() {
-    let p = KeyPolicy::from_raw(vec![], vec![]).unwrap();
+    let p = KeyPolicy::from_raw(vec![], vec![], vec![]).unwrap();
     assert!(!p.allows_credential("x"));
     assert!(!p.allows_method("GET"));
     // A request with no placeholders still passes the scope check; only
     // the method matters then.
-    let open = KeyPolicy::from_raw(vec![], s(&["*"])).unwrap();
+    let open = KeyPolicy::from_raw(vec![], s(&["*"]), vec![]).unwrap();
     assert!(open.check_request("GET", &set(&[])).is_ok());
     assert!(open.check_request("GET", &set(&["x"])).is_err());
 }
 
 #[test]
 fn method_is_checked_before_scope() {
-    let p = KeyPolicy::from_raw(s(&["a"]), s(&["GET"])).unwrap();
+    let p = KeyPolicy::from_raw(s(&["a"]), s(&["GET"]), vec![]).unwrap();
     assert!(matches!(
         p.check_request("POST", &set(&["not_a"])),
         Err(FerroError::MethodNotAllowed(m)) if m == "POST"
@@ -257,7 +264,7 @@ fn method_is_checked_before_scope() {
 fn out_of_scope_error_does_not_depend_on_the_vault() {
     // The check takes only the policy and the placeholder names, so an
     // existing and a nonexistent out-of-scope name are indistinguishable.
-    let p = KeyPolicy::from_raw(s(&["lab_*"]), s(&["*"])).unwrap();
+    let p = KeyPolicy::from_raw(s(&["lab_*"]), s(&["*"]), vec![]).unwrap();
     let a = p.check_request("GET", &set(&["prod_db"])).unwrap_err();
     let b = p
         .check_request("GET", &set(&["does_not_exist_anywhere"]))
@@ -282,7 +289,7 @@ fn out_of_scope_error_does_not_depend_on_the_vault() {
 
 #[test]
 fn scope_uses_the_unquoted_item_name_but_reports_the_label() {
-    let p = KeyPolicy::from_raw(s(&["Proxmox (*)"]), s(&["*"])).unwrap();
+    let p = KeyPolicy::from_raw(s(&["Proxmox (*)"]), s(&["*"]), vec![]).unwrap();
     let quoted = Placeholder {
         item: "Proxmox (prod)".into(),
         selector: crate::proxy::placeholder::Selector::Username,
@@ -304,7 +311,7 @@ fn scope_uses_the_unquoted_item_name_but_reports_the_label() {
 #[test]
 fn patching_a_deny_all_policy_leaves_the_other_field_denied() {
     let p = KeyPolicy::default()
-        .patched(Patch::Value(s(&["a"])), Patch::Absent)
+        .patched(Patch::Value(s(&["a"])), Patch::Absent, Patch::Absent)
         .unwrap();
     assert_eq!(p.credentials, s(&["a"]));
     assert!(p.methods.is_empty());
@@ -313,26 +320,35 @@ fn patching_a_deny_all_policy_leaves_the_other_field_denied() {
 
 #[test]
 fn patched_replaces_only_present_fields() {
-    let base = KeyPolicy::from_raw(s(&["a"]), s(&["GET"])).unwrap();
+    let base = KeyPolicy::from_raw(s(&["a"]), s(&["GET"]), vec![]).unwrap();
     let p = base
-        .patched(Patch::Value(s(&["b_*"])), Patch::Absent)
+        .patched(Patch::Value(s(&["b_*"])), Patch::Absent, Patch::Absent)
         .unwrap();
     assert_eq!(p.credentials, s(&["b_*"]));
     assert_eq!(p.methods, s(&["GET"]));
     let p = base
-        .patched(Patch::Absent, Patch::Value(s(&["*"])))
+        .patched(Patch::Absent, Patch::Value(s(&["*"])), Patch::Absent)
         .unwrap();
     assert_eq!(p.credentials, s(&["a"]));
     assert_eq!(p.methods, s(&["*"]));
     // Lifting a restriction.
     let p = base
-        .patched(Patch::Value(s(&["*"])), Patch::Value(s(&["*"])))
+        .patched(
+            Patch::Value(s(&["*"])),
+            Patch::Value(s(&["*"])),
+            Patch::Absent,
+        )
         .unwrap();
-    assert_eq!(p, KeyPolicy::from_raw(s(&["*"]), s(&["*"])).unwrap());
+    assert_eq!(
+        p,
+        KeyPolicy::from_raw(s(&["*"]), s(&["*"]), vec![]).unwrap()
+    );
     // Invalid values are rejected and leave `base` untouched.
-    assert!(base.patched(Patch::Value(s(&[""])), Patch::Absent).is_err());
     assert!(base
-        .patched(Patch::Absent, Patch::Value(s(&["TRACE"])))
+        .patched(Patch::Value(s(&[""])), Patch::Absent, Patch::Absent)
+        .is_err());
+    assert!(base
+        .patched(Patch::Absent, Patch::Value(s(&["TRACE"])), Patch::Absent)
         .is_err());
 }
 
@@ -439,4 +455,126 @@ fn optional_object_rejects_null() {
         .request
         .is_some());
     assert!(parse_strict::<Nested>(br#"{"request":null}"#).is_err());
+}
+
+// ── approval patterns ─────────────────────────────────────────────────────
+
+fn pol_a(c: &[&str], a: &[&str]) -> KeyPolicy {
+    KeyPolicy::from_raw(s(c), s(&["GET"]), s(a)).unwrap()
+}
+
+#[test]
+fn approval_patterns_match_like_credential_patterns_and_default_to_none() {
+    let p = pol_a(&["*"], &["proxmox_*", "Firewall (prod)", "exact"]);
+    assert!(p.requires_approval("proxmox_root"));
+    assert!(p.requires_approval("Firewall (prod)"));
+    assert!(p.requires_approval("exact"));
+    assert!(!p.requires_approval("exact2"));
+    assert!(!p.requires_approval("grafana"));
+    assert!(!p.requires_approval("Proxmox_root"), "case-sensitive");
+    // `[]`: no extra requirement. `["*"]`: every credential.
+    assert!(!KeyPolicy::default().requires_approval("anything"));
+    assert!(pol_a(&["*"], &[]).approval.is_empty());
+    assert!(pol_a(&["*"], &["*"]).requires_approval("anything"));
+    // The same normalisation: `*` collapses the list, duplicates go.
+    assert_eq!(pol_a(&["*"], &["a", "*", "b"]).approval, ["*"]);
+    assert_eq!(pol_a(&["*"], &["a", "a", "b"]).approval, ["a", "b"]);
+}
+
+#[test]
+fn approval_patterns_are_validated_like_credential_patterns() {
+    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), s(&[""])).is_err());
+    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), s(&["a\nb"])).is_err());
+    let long = "x".repeat(MAX_PATTERN_CHARS + 1);
+    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![long]).is_err());
+    let many: Vec<String> = (0..=MAX_PATTERNS).map(|i| format!("p{i}")).collect();
+    let e = KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), many).unwrap_err();
+    assert!(e.to_string().contains("approval may have at most"), "{e}");
+    // The message names the field it is about.
+    let e = KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), s(&[""])).unwrap_err();
+    assert!(e.to_string().contains("approval[0]"), "{e}");
+}
+
+#[test]
+fn approval_follows_the_patch_rules_and_never_accepts_null() {
+    let base = pol_a(&["a"], &["x"]);
+    // Absent: unchanged. Present: replaced. An empty list clears it.
+    let kept = base
+        .patched(Patch::Value(s(&["b"])), Patch::Absent, Patch::Absent)
+        .unwrap();
+    assert_eq!(kept.approval, ["x"]);
+    let replaced = base
+        .patched(Patch::Absent, Patch::Absent, Patch::Value(s(&["y*"])))
+        .unwrap();
+    assert_eq!(replaced.approval, ["y*"]);
+    assert_eq!(replaced.credentials, ["a"]);
+    let cleared = base
+        .patched(Patch::Absent, Patch::Absent, Patch::Value(vec![]))
+        .unwrap();
+    assert!(cleared.approval.is_empty());
+    assert!(base
+        .patched(Patch::Absent, Patch::Absent, Patch::Value(s(&[""])))
+        .is_err());
+
+    // `null` is an error that says what to send instead.
+    #[derive(Deserialize)]
+    struct Body {
+        #[serde(default, deserialize_with = "patch_approval")]
+        approval: Patch<Vec<String>>,
+    }
+    let body: Body = parse_strict(br#"{"approval":["a"]}"#).unwrap();
+    assert_eq!(body.approval, Patch::Value(s(&["a"])));
+    let body: Body = parse_strict(b"{}").unwrap();
+    assert!(body.approval.is_absent());
+    let e = parse_strict::<Body>(br#"{"approval":null}"#).err().unwrap();
+    assert!(
+        e.to_string()
+            .contains("policy field `approval` must be an array of strings, not null"),
+        "{e}"
+    );
+    assert!(
+        e.to_string().contains("no extra approval requirement"),
+        "{e}"
+    );
+    for bad in [
+        br#"{"approval":"*"}"#.as_slice(),
+        br#"{"approval":5}"#,
+        br#"{"approval":{}}"#,
+    ] {
+        assert!(parse_strict::<Body>(bad).is_err());
+    }
+}
+
+#[test]
+fn removing_or_narrowing_approval_patterns_is_a_widening() {
+    let saved = pol_a(&["*"], &["proxmox_*", "firewall"]);
+    // Same, more, or broader patterns: not a widening (it asks for more).
+    assert!(!saved.is_widened_by(&saved));
+    assert!(!saved.is_widened_by(&pol_a(&["*"], &["proxmox_*", "firewall", "nas"])));
+    assert!(!saved.is_widened_by(&pol_a(&["*"], &["*"])));
+    assert!(!saved.is_widened_by(&pol_a(&["*"], &["prox*", "firewall"])));
+    // Removing a pattern, or narrowing one so that names are no longer
+    // covered, is: the key could then use a credential without asking.
+    assert!(saved.is_widened_by(&pol_a(&["*"], &["proxmox_*"])));
+    assert!(saved.is_widened_by(&pol_a(&["*"], &[])));
+    assert!(saved.is_widened_by(&pol_a(&["*"], &["proxmox_a*", "firewall"])));
+    assert!(saved.is_widened_by(&pol_a(&["*"], &["proxmox_*", "fire"])));
+    // From nothing, adding patterns never widens; having none and keeping
+    // none does not either.
+    let none = pol_a(&["*"], &[]);
+    assert!(!none.is_widened_by(&pol_a(&["*"], &["x"])));
+    assert!(!none.is_widened_by(&none));
+    // It combines with the other two reasons.
+    assert!(saved
+        .is_widened_by(&KeyPolicy::from_raw(s(&["*"]), s(&["GET", "POST"]), s(&["*"])).unwrap()));
+    assert!(!none.is_widened_by(&KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), s(&[])).unwrap()));
+}
+
+#[test]
+fn the_policy_json_lists_the_approval_patterns() {
+    let p = pol_a(&["a"], &["b"]);
+    assert_eq!(
+        p.to_json(),
+        json!({"credentials": ["a"], "methods": ["GET"], "approval": ["b"]})
+    );
 }

@@ -121,6 +121,10 @@ Every name starts with `ferrowarden_`. Types are as exposed (the counter `events
 | `ferrowarden_session_captures_total` | counter | `outcome` | `capture` entries of forward requests, by the capture status: `captured`, `not_found`, `not_a_string`, `ambiguous`, `too_short`, `too_long`, `expired`, `limit_reached` ([captured sessions](sessions.md)). All eight series exist from the start |
 | `ferrowarden_session_uses_total` | counter | `outcome` | Forward requests that used a `{{session:NAME}}`: `success`, `unknown_session` or `session_host_not_allowed` |
 | `ferrowarden_sessions_active` | gauge | none | Captured sessions that are live now, all agent keys together. Read from memory when you scrape. A session's name, key and host are never exported |
+| `ferrowarden_approval_requests_total` | counter | `outcome` | [Approvals](approvals.md) by how they ended: `granted`, `denied`, `expired` (open approvals that ran out or were cleared) and `limit_reached` (a request refused because the key was over its approval limits). All four series exist from the start |
+| `ferrowarden_approvals_pending` | gauge | none | Approvals waiting for a decision now, all agent keys together. Read from memory when you scrape; ids, keys and names are never exported |
+| `ferrowarden_approval_grants_active` | gauge | none | Grants that are live now, all agent keys together |
+| `ferrowarden_forward_approval_total` | counter | `result` | Forward requests that needed approval, by how they ended at the gate: `granted_by_grant`, `approved_while_waiting`, `pending` (answered `approval_pending`) or `denied` |
 | `ferrowarden_forward_credential_uses_total` | counter | `credential` | Only with [`metrics.credential_labels`](#credential-names-as-labels-opt-in) |
 
 Not exported: process metrics (CPU, memory, file descriptors). `prometheus-client` does not provide them for Linux without extra dependencies, and the container runtime or node exporter already does.

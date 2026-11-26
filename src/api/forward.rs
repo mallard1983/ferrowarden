@@ -10,6 +10,7 @@ use zeroize::Zeroizing;
 
 use crate::api::credentials::authenticate_agent;
 use crate::api::strict_json::StrictJson;
+use crate::approvals::{self, ApprovalNeed, GateResult};
 use crate::error::{FerroError, FerroResult};
 use crate::events::{emit_rejected, Action, SecurityEvent};
 use crate::middleware::request_context::RequestContext;
@@ -46,6 +47,11 @@ pub struct ForwardPayload {
 /// With `capture`, values of the response (a login token) are kept in
 /// Ferrowarden under a name, hidden from the agent, and later requests use
 /// them as `{{session:name}}`.
+///
+/// A credential that needs a human's approval (its vault item says so, or the
+/// key's policy does) is not fetched, and nothing is sent, until a human has
+/// decided: the request is held for up to `approval.wait_secs`, then answered
+/// `approval_pending` for the agent to retry (docs/approvals.md).
 pub async fn forward(
     State(state): State<Arc<AppState>>,
     ctx: RequestContext,
@@ -85,12 +91,26 @@ pub async fn forward(
     // Session names are not credential names and are not matched against the
     // credential patterns: a session can only ever be sent back to the origin
     // it came from, and the method policy applies as it does to any request.
+    // What the approval gate did, if it ran: set by `run_forward` when the
+    // request got through it; a refusal is read from the error.
+    let mut gate_passed: Option<GateResult> = None;
     let mut result = match checked.and_then(|()| {
         agent
             .policy
             .check_request(&req.normalized_method(), &used.vault)
     }) {
-        Ok(()) => run_forward(&state, &agent, &req, &used, &captures).await,
+        Ok(()) => {
+            run_forward(
+                &state,
+                &agent,
+                &ctx,
+                &req,
+                &used,
+                &captures,
+                &mut gate_passed,
+            )
+            .await
+        }
         Err(e) => Err(e),
     };
 
@@ -103,7 +123,17 @@ pub async fn forward(
         // before anything is sent to the target.
         state.set_locked("forward_vault_locked").await;
         if reunlock_if_possible(&state).await {
-            result = run_forward(&state, &agent, &req, &used, &captures).await;
+            gate_passed = None;
+            result = run_forward(
+                &state,
+                &agent,
+                &ctx,
+                &req,
+                &used,
+                &captures,
+                &mut gate_passed,
+            )
+            .await;
         }
     }
 
@@ -147,6 +177,15 @@ pub async fn forward(
         .sessions(&session_names)
         .items(used.vault.iter().map(|p| p.item.as_str()))
         .duration(ctx.started.elapsed());
+    // Whether the approval gate ran, and how it ended.
+    let approval = match &result {
+        Ok(_) => gate_passed.map(GateResult::as_str),
+        Err(e) => approvals::refusal_result(e),
+    };
+    let event = match approval {
+        Some(result) => event.detail("approval", result),
+        None => event,
+    };
     state.events.emit(match &result {
         Ok(resp) => event
             .response_bytes(resp.upstream_bytes)
@@ -231,22 +270,31 @@ async fn prepare(
 /// Session placeholders are checked for syntax, and for sessions being
 /// switched on, but not against the session store: sessions are runtime state
 /// of an agent key, not something a policy decides.
+///
+/// Returns the credentials of the request that would need approval under
+/// `policy`, and why. A preview never creates an approval request.
 pub(crate) async fn check_only(
     state: &Arc<AppState>,
     policy: &KeyPolicy,
     req: &ProxyRequest,
-) -> FerroResult<()> {
+) -> FerroResult<Vec<ApprovalNeed>> {
     let (_, used) = check_request(state, req, None)?;
     policy.check_request(&req.normalized_method(), &used.vault)?;
-    prepare(state, req, &used.vault, true).await.map(|_| ())
+    let (_, plan) = prepare(state, req, &used.vault, true).await?;
+    Ok(approvals::needs(&approvals::required_items(
+        policy,
+        &plan.approval_fields(),
+    )))
 }
 
 async fn run_forward(
     state: &Arc<AppState>,
     agent: &AgentKey,
+    ctx: &RequestContext,
     req: &ProxyRequest,
     used: &Collected,
     captures: &[Capture],
+    gate_passed: &mut Option<GateResult>,
 ) -> FerroResult<ProxyResponse> {
     let (target, plan) = prepare(state, req, &used.vault, false).await?;
 
@@ -258,6 +306,26 @@ async fn run_forward(
     let session_values = state
         .sessions
         .resolve(&agent.id, &used.sessions, &origin, Utc::now())?;
+
+    // Approval: the last check, after every other one (so nobody is asked
+    // about a request that would be refused anyway) and before any value is
+    // fetched or any connection is opened. A request that needs approval is
+    // held here, or refused with `approval_pending` / `approval_denied`.
+    let required = approvals::required_items(&agent.policy, &plan.approval_fields());
+    if !required.is_empty() {
+        *gate_passed = Some(
+            approvals::gate(
+                state,
+                agent,
+                ctx,
+                &req.normalized_method(),
+                &req.url,
+                &origin,
+                &required,
+            )
+            .await?,
+        );
+    }
 
     let values = fetch_credentials(&plan, &*state.vault).await?;
 

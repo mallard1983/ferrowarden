@@ -335,10 +335,17 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `ui.insecure_http` | `FERROWARDEN_UI__INSECURE_HTTP` | `false` — serve the sign-in form over plain HTTP (local testing only) |
 | `ui.session_idle_minutes` | `FERROWARDEN_UI__SESSION_IDLE_MINUTES` | `15` |
 | `ui.session_max_hours` | `FERROWARDEN_UI__SESSION_MAX_HOURS` | `8` |
+| `ui.public_url` | `FERROWARDEN_UI__PUBLIC_URL` | *(empty)* — the address the admin UI is reached at, `https://` (or `http://` with `ui.insecure_http`); approval prompts link to `<public_url>/approvals/<id>` |
 | `sessions.enabled` | `FERROWARDEN_SESSIONS__ENABLED` | `true` — accept `capture` and `{{session:name}}` ([sessions.md](sessions.md)); `false` refuses both with a `400` |
 | `sessions.default_ttl_secs` | `FERROWARDEN_SESSIONS__DEFAULT_TTL_SECS` | `1800` — lifetime of a captured session when the request gives none |
 | `sessions.max_ttl_secs` | `FERROWARDEN_SESSIONS__MAX_TTL_SECS` | `86400` — the most a request may ask for; at least the default, at most 7 days |
 | `sessions.max_per_key` | `FERROWARDEN_SESSIONS__MAX_PER_KEY` | `32` — live sessions one agent key may hold (1 to 256) |
+| `approval.wait_secs` | `FERROWARDEN_APPROVAL__WAIT_SECS` | `60` — how long a request that needs approval is held, 1 to 300 ([approvals.md](approvals.md)); a reverse proxy in front of the API needs a read timeout above it |
+| `approval.pending_ttl_secs` | `FERROWARDEN_APPROVAL__PENDING_TTL_SECS` | `600` — how long an approval stays open, and how long a denial stands; at least `wait_secs`, at most 3600 |
+| `approval.max_grant_minutes` | `FERROWARDEN_APPROVAL__MAX_GRANT_MINUTES` | `480` — the longest grant an approver may give, 1 to 10080 |
+| `approval.max_pending_per_key` | `FERROWARDEN_APPROVAL__MAX_PENDING_PER_KEY` | `3` — open approvals one agent key may have, 1 to 50 |
+| `approval.max_requests_per_key_per_hour` | `FERROWARDEN_APPROVAL__MAX_REQUESTS_PER_KEY_PER_HOUR` | `20` — new prompts one agent key may cause in a rolling hour, 1 to 1000 |
+| `approval.max_waiters_per_key` | `FERROWARDEN_APPROVAL__MAX_WAITERS_PER_KEY` | `8` — requests one agent key may have held at once, 1 to 100 |
 | *(env only)* | `FERROWARDEN_LOG_LEVEL` | `info` — requires restart to change |
 
 ---

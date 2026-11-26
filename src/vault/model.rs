@@ -6,6 +6,25 @@
 /// and overrides a login's URIs when present. Not offered as a selectable field.
 pub const BINDINGS_FIELD: &str = "ferrowarden_uris";
 
+/// Name of the reserved custom field that marks a credential as needing a
+/// human's approval before it is used (docs/approvals.md). `required` says so;
+/// any other value, an empty one included, also means required, so a typo can
+/// only ever make a credential stricter. Not offered as a selectable field.
+pub const APPROVAL_FIELD: &str = "ferrowarden_approval";
+
+/// Is a custom field named `name` the approval field? Trimmed and in any
+/// letter case, so a mistyped capital cannot silently drop the requirement.
+pub fn is_approval_field_name(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case(APPROVAL_FIELD)
+}
+
+/// What a `ferrowarden_approval` field says. Fail closed: only the value
+/// `required` (trimmed, any letter case) is a clean spelling, and every
+/// other value still means approval is required.
+pub fn approval_field_valid(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("required")
+}
+
 /// Kind of vault item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
@@ -107,10 +126,17 @@ pub struct CredentialEntry {
     pub has_password: bool,
     pub has_totp: bool,
     pub has_notes: bool,
-    /// Custom fields, excluding the reserved bindings field.
+    /// Custom fields, excluding the reserved bindings and approval fields.
     pub fields: Vec<FieldInfo>,
     /// Master password re-prompt is enabled on the item.
     pub reprompt: bool,
+    /// The item carries a `ferrowarden_approval` field: a human has to
+    /// approve its use (whatever the field's value says: see
+    /// [`APPROVAL_FIELD`]).
+    pub approval_required: bool,
+    /// The field's value is not `required`: it still means required, and the
+    /// sync reports it as a warning so the operator can fix the spelling.
+    pub approval_field_invalid: bool,
 }
 
 impl CredentialEntry {
@@ -127,6 +153,8 @@ impl CredentialEntry {
             has_notes: false,
             fields: Vec::new(),
             reprompt: false,
+            approval_required: false,
+            approval_field_invalid: false,
         }
     }
 
@@ -215,6 +243,9 @@ pub struct SyncStats {
     /// 0 until the first one.
     last_sync_unix: std::sync::atomic::AtomicI64,
     excluded: std::sync::atomic::AtomicU64,
+    /// Items whose `ferrowarden_approval` value is not `required`, as of the
+    /// last listing (to report a change once, not on every refresh).
+    approval_invalid: std::sync::atomic::AtomicU64,
 }
 
 impl SyncStats {
@@ -229,6 +260,15 @@ impl SyncStats {
     pub fn last_sync_unix(&self) -> i64 {
         self.last_sync_unix
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record how many items carry a `ferrowarden_approval` field whose value
+    /// is not `required`; returns the number before.
+    pub fn swap_approval_invalid(&self, n: usize) -> u64 {
+        self.approval_invalid.swap(
+            u64::try_from(n).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        )
     }
 
     pub fn excluded(&self) -> u64 {

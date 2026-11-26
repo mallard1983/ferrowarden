@@ -35,6 +35,7 @@ fn cfg(allowed: &str, allow_private: bool) -> Config {
         vault,
         metrics: Default::default(),
         sessions: Default::default(),
+        approval: Default::default(),
     }
 }
 

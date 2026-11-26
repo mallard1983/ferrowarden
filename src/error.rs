@@ -89,6 +89,24 @@ pub enum FerroError {
     #[error("Captured sessions are disabled (sessions.enabled = false)")]
     SessionsDisabled,
 
+    // Human approval (docs/approvals.md). Each has a stable `code` in the
+    // response body, and `ApprovalPending` carries the approval id.
+    #[error("Approval required: a human has to approve this request. Ask your human to approve approval {id} in the Ferrowarden admin UI, then retry the same request.")]
+    ApprovalPending { id: String },
+
+    #[error("Approval denied: a human denied this request. Do not retry it; tell your human what was refused.")]
+    ApprovalDenied,
+
+    // Deciding: only the admin API and the admin UI reach these.
+    #[error("That approval is no longer pending: it was decided, has expired or was cleared. Nothing was changed.")]
+    ApprovalNotPending,
+
+    #[error("There is no such live grant: it was revoked, has expired or was cleared. Nothing was changed.")]
+    GrantNotFound,
+
+    #[error("Too many approval requests from this agent key. Wait for the pending ones to be decided or to expire, then retry.")]
+    ApprovalLimitReached,
+
     // Config errors
     #[error("Configuration error: {0}")]
     Config(String),
@@ -112,6 +130,17 @@ impl FerroError {
     /// The HTTP status code this error is returned with.
     pub fn status_code(&self) -> StatusCode {
         self.status_and_message().0
+    }
+
+    /// The stable code of the approval errors, which carry it in the response
+    /// body next to the message (`None` for every other error).
+    pub fn approval_code(&self) -> Option<&'static str> {
+        match self {
+            FerroError::ApprovalPending { .. } => Some("approval_pending"),
+            FerroError::ApprovalDenied => Some("approval_denied"),
+            FerroError::ApprovalLimitReached => Some("approval_limit_reached"),
+            _ => None,
+        }
     }
 
     fn status_and_message(&self) -> (StatusCode, String) {
@@ -142,6 +171,12 @@ impl FerroError {
             | FerroError::UnknownSession(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             FerroError::SessionHostNotAllowed { .. } => (StatusCode::FORBIDDEN, self.to_string()),
             FerroError::SessionsDisabled => (StatusCode::BAD_REQUEST, self.to_string()),
+            FerroError::ApprovalPending { .. } | FerroError::ApprovalDenied => {
+                (StatusCode::FORBIDDEN, self.to_string())
+            }
+            FerroError::ApprovalLimitReached => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+            FerroError::ApprovalNotPending => (StatusCode::CONFLICT, self.to_string()),
+            FerroError::GrantNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             FerroError::AmbiguousField { .. } => (StatusCode::CONFLICT, self.to_string()),
             FerroError::RepromptRequired(_) => (StatusCode::FORBIDDEN, self.to_string()),
             FerroError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
@@ -161,7 +196,14 @@ impl FerroError {
 impl IntoResponse for FerroError {
     fn into_response(self) -> Response {
         let (status, message) = self.status_and_message();
-        (status, Json(json!({ "error": message }))).into_response()
+        let mut body = json!({ "error": message });
+        if let Some(code) = self.approval_code() {
+            body["code"] = json!(code);
+        }
+        if let FerroError::ApprovalPending { id } = &self {
+            body["approval_id"] = json!(id);
+        }
+        (status, Json(body)).into_response()
     }
 }
 

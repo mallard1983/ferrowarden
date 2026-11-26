@@ -255,6 +255,29 @@ fn unexpected_result(raw: &Raw, what: &str) -> CallToolResult {
 /// a target's own 4xx or 5xx, which arrives inside a 2xx.
 fn failure_result(client: &FerroClient, raw: &Raw) -> CallToolResult {
     let message = render::error_message(&raw.body).map(|m| client.redactor.scrub_error_text(&m));
+    // A human's approval is needed (or was refused): the agent is told what to
+    // do about it, which is not what any other 403 or 429 asks of it.
+    if let Some(code) = render::approval_code(&raw.body) {
+        let approval_id = render::approval_id(&raw.body);
+        let text = render::approval_error_text(
+            raw.status,
+            code,
+            message.as_deref(),
+            raw.request_id.as_deref(),
+            approval_id.as_deref(),
+        );
+        return tool_error(
+            text,
+            json!({
+                "error_source": "ferrowarden",
+                "status": raw.status,
+                "code": code,
+                "approval_id": approval_id,
+                "error": message,
+                "request_id": raw.request_id,
+            }),
+        );
+    }
     let text = render::ferrowarden_error_text(
         raw.status,
         message.as_deref(),

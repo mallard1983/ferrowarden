@@ -15,7 +15,8 @@
 //!     "token_hash": "hex-encoded-sha256",
 //!     "created_at": "2026-11-21T01:00:00Z",
 //!     "credentials": ["uptime_*"],
-//!     "methods": ["GET"]
+//!     "methods": ["GET"],
+//!     "approval": []
 //!   }
 //! ]
 //! ```
@@ -25,6 +26,11 @@
 //! was written by 0.1.0 and loads as **deny-all**: the operator has to set a
 //! policy with `PATCH /v1/admin/keys/{id}`. `null` is rejected, so startup
 //! fails rather than guessing what was meant.
+//!
+//! `approval` (credential patterns that need a human's approval for this key,
+//! docs/approvals.md) is the one optional list: entries written before
+//! approvals existed lack it and load as `[]`, which only means "no extra
+//! requirement". `null` is rejected like every other policy value.
 //!
 //! # Key rotation
 //!
@@ -63,6 +69,14 @@ pub struct StoredKey {
         deserialize_with = "policy::stored_methods"
     )]
     pub methods: Option<Vec<String>>,
+    /// Credential patterns that need approval for this key. Absent in
+    /// entries written before approvals existed: `[]`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "policy::stored_approval"
+    )]
+    pub approval: Option<Vec<String>>,
 }
 
 impl StoredKey {
@@ -81,6 +95,7 @@ impl StoredKey {
             created_at,
             credentials: Some(policy.credentials.clone()),
             methods: Some(policy.methods.clone()),
+            approval: Some(policy.approval.clone()),
         }
     }
 
@@ -96,6 +111,7 @@ impl StoredKey {
         KeyPolicy {
             credentials: self.credentials.clone().unwrap_or_default(),
             methods: self.methods.clone().unwrap_or_default(),
+            approval: self.approval.clone().unwrap_or_default(),
         }
     }
 
@@ -103,6 +119,7 @@ impl StoredKey {
     pub fn set_policy(&mut self, policy: &KeyPolicy) {
         self.credentials = Some(policy.credentials.clone());
         self.methods = Some(policy.methods.clone());
+        self.approval = Some(policy.approval.clone());
     }
 }
 
@@ -150,6 +167,9 @@ pub fn load(path: &Path) -> io::Result<Vec<StoredKey>> {
         }
         if let Some(list) = key.methods.take() {
             key.methods = Some(policy::validate_methods(list).map_err(bad)?);
+        }
+        if let Some(list) = key.approval.take() {
+            key.approval = Some(policy::validate_approval(list).map_err(bad)?);
         }
     }
     Ok(keys)

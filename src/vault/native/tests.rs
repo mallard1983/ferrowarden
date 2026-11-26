@@ -336,6 +336,7 @@ fn test_config() -> Config {
         vault: Default::default(),
         metrics: Default::default(),
         sessions: Default::default(),
+        approval: Default::default(),
     }
 }
 
@@ -1265,4 +1266,85 @@ async fn the_web_vault_capture_uses_only_supported_formats() {
         .unwrap()
         .iter()
         .all(|c| c["key"].is_string()));
+}
+
+// ── The reserved approval field through the whole backend ─────────────────────
+
+fn approval_items(a: &Account) -> Vec<Value> {
+    let field = |k: &SymKey, value: Option<&str>| {
+        json!([
+            {"name": enc(k, "api"), "value": enc(k, "FV"), "type": 1, "linkedId": null},
+            {"name": enc(k, "ferrowarden_approval"),
+             "value": value.map(|v| enc(k, v)), "type": 0, "linkedId": null}
+        ])
+    };
+    vec![
+        login_item(
+            "a1",
+            &a.user,
+            "guarded",
+            json!({"fields": field(&a.user, Some("required"))}),
+        ),
+        login_item(
+            "a2",
+            &a.user,
+            "typo",
+            json!({"fields": field(&a.user, Some("requird"))}),
+        ),
+        login_item(
+            "a3",
+            &a.user,
+            "blank",
+            json!({"fields": field(&a.user, None)}),
+        ),
+        login_item("a4", &a.user, "ordinary", json!({})),
+    ]
+}
+
+#[tokio::test]
+async fn the_listing_carries_the_approval_flags_and_hides_the_field() {
+    let h = harness_with(approval_items).await;
+    h.vault.unlock(pw()).await.unwrap();
+    let listing = h.vault.list_credentials().await.unwrap();
+    let entry = |name: &str| listing.map[name][0].clone();
+    assert!(entry("guarded").approval_required && !entry("guarded").approval_field_invalid);
+    assert!(entry("typo").approval_required && entry("typo").approval_field_invalid);
+    assert!(entry("blank").approval_required && entry("blank").approval_field_invalid);
+    assert!(!entry("ordinary").approval_required && !entry("ordinary").approval_field_invalid);
+    // The field is not offered as a custom field (so no placeholder can name it).
+    for name in ["guarded", "typo", "blank"] {
+        let names: Vec<_> = entry(name).fields.iter().map(|f| f.name.clone()).collect();
+        assert_eq!(names, ["api"], "{name}");
+    }
+}
+
+#[tokio::test]
+async fn the_sync_reports_misspelt_approval_fields_once() {
+    use crate::events::EventLog;
+    use crate::vault::refresh::refresh_credentials;
+    let h = harness_with(approval_items).await;
+    let state =
+        crate::state::AppState::try_new(h.config.clone(), Arc::new(EventLog::buffer_only(100)))
+            .unwrap();
+    state.vault.unlock(pw()).await.unwrap();
+    refresh_credentials(&state).await.unwrap();
+    state.set_unlocked().await;
+
+    let syncs = event_json(&state, "vault_sync");
+    assert_eq!(syncs.len(), 1);
+    let d = &syncs[0]["ferrowarden"]["details"];
+    assert_eq!(d["warnings"]["approval_field_invalid"], 2, "{d}");
+    // Counts only: not the names of the items, nor the field's value.
+    let text = syncs[0].to_string();
+    for needle in ["guarded", "typo", "blank", "requird", "required"] {
+        assert!(!text.contains(needle), "{needle}");
+    }
+    // The same number again is not news.
+    refresh_credentials(&state).await.unwrap();
+    assert_eq!(event_json(&state, "vault_sync").len(), 1);
+    // The items that carry the field are all in the cache and flagged.
+    let map = state.credentials.read().await;
+    assert!(["guarded", "typo", "blank"]
+        .iter()
+        .all(|n| map[*n][0].approval_required));
 }

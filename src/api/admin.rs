@@ -29,6 +29,11 @@ pub struct CreateKeyRequest {
     /// Allowed HTTP methods. Required: `["*"]` for all, `[]` for none.
     #[serde(deserialize_with = "policy::required_methods")]
     pub methods: Vec<String>,
+    /// Credential name patterns that need a human's approval for this key
+    /// (docs/approvals.md). Optional: left out it is `[]`, no extra
+    /// requirement. `null` is rejected.
+    #[serde(default, deserialize_with = "policy::required_approval")]
+    pub approval: Vec<String>,
 }
 
 /// `PATCH /v1/admin/keys/{id}`: a field that is left out is unchanged, one that
@@ -40,6 +45,8 @@ pub struct PatchKeyRequest {
     pub credentials: Patch<Vec<String>>,
     #[serde(default, deserialize_with = "policy::patch_methods")]
     pub methods: Patch<Vec<String>>,
+    #[serde(default, deserialize_with = "policy::patch_approval")]
+    pub approval: Patch<Vec<String>>,
 }
 
 /// `POST /v1/admin/keys/{id}/preview`
@@ -52,6 +59,9 @@ pub struct PreviewRequest {
     /// Draft methods; absent = the saved value.
     #[serde(default, deserialize_with = "policy::patch_methods")]
     pub methods: Patch<Vec<String>>,
+    /// Draft approval patterns; absent = the saved value.
+    #[serde(default, deserialize_with = "policy::patch_approval")]
+    pub approval: Patch<Vec<String>>,
     /// A request to check against the draft policy (same shape as `/v1/forward`).
     #[serde(default, deserialize_with = "policy::some_not_null")]
     pub request: Option<ProxyRequest>,
@@ -83,8 +93,15 @@ pub async fn create_key(
         ctx: &ctx,
         via: Via::Api,
     };
-    let created =
-        key_service::create_key(&state, caller, &req.name, req.credentials, req.methods).await?;
+    let created = key_service::create_key(
+        &state,
+        caller,
+        &req.name,
+        req.credentials,
+        req.methods,
+        req.approval,
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -150,7 +167,15 @@ pub async fn patch_key(
         ctx: &ctx,
         via: Via::Api,
     };
-    let change = key_service::patch_key(&state, caller, &id, req.credentials, req.methods).await?;
+    let change = key_service::patch_key(
+        &state,
+        caller,
+        &id,
+        req.credentials,
+        req.methods,
+        req.approval,
+    )
+    .await?;
     Ok(Json(change.summary))
 }
 
@@ -187,6 +212,7 @@ pub async fn preview_key(
         &id,
         req.credentials,
         req.methods,
+        req.approval,
         req.request.as_ref(),
     )
     .await?;

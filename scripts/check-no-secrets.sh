@@ -123,6 +123,10 @@ for item in items:
         # legitimately appears in events.
         if field.get("name") == "ferrowarden_uris":
             continue
+        # A switch (`required`), not a secret: the word is ordinary text that
+        # events and logs use.
+        if field.get("name") == "ferrowarden_approval":
+            continue
         emit(f"{name}: field {field.get('name', '?')}", field.get("value"))
 # Its username is kept out of logs and events like a secret (the other
 # items' usernames are deliberately not treated as secret).
