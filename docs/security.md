@@ -28,6 +28,7 @@ This document describes what Ferrowarden is designed to protect against, the sec
 | Target services | Return credential values or credential-shaped content in responses | Exact substituted values (raw, JSON-escaped, URL-encoded, base64) are scrubbed from body and headers, then common credential patterns |
 | A service that logs in and returns a session token | The token reaches the agent, and with it the conversation, a log or an injected request | The agent asks Ferrowarden to capture the token; it is kept in memory, bound to the agent key and the origin, and hidden from every response (property 20) |
 | An attacker who compromises the agent process | Reads credential values from agent memory or conversation | Same as AI agent above |
+| An agent that asks for credentials it should not make | Creates items, or fills the managed collection | The key's `create` patterns, one human approval per operation, one managed collection, per-key approval limits (property 22) |
 | A network observer between agent and Ferrowarden | Reads credentials in transit | Native TLS (rustls) is enabled by default; TLS can be disabled only when both agent and Ferrowarden run on the same host |
 | Another container or process on the internal Docker network | Reads decrypted credential values off the wire between the vault component and Ferrowarden | There are none: the only traffic to Vaultwarden is the login and the encrypted vault, over verified HTTPS, and a value is decrypted inside Ferrowarden only for the request that needs it |
 
@@ -342,6 +343,25 @@ A credential can be marked as needing a person's decision before an agent uses i
 - The approver identity in events is the vault account signed in to the UI, or `admin_api`. There is one account: the events do not tell two people apart.
 - A held request occupies a connection for up to `approval.wait_secs`; a reverse proxy in front of the API needs a read timeout above it ([approvals.md](approvals.md#reverse-proxies-and-timeouts)).
 
+### 22. Generated Credentials and the Managed Collection
+
+An agent key can be allowed to ask for a **new credential**: Ferrowarden generates the password, stores it in one Vaultwarden collection and answers with a placeholder ([managed-credentials.md](managed-credentials.md)). The properties:
+
+- **A generated value never reaches the agent.** It is generated inside Ferrowarden, encrypted there, and sent to Vaultwarden; the answer to the agent, every event, log line and metric carry names and codes only. There is no route that returns it. The value later leaves Ferrowarden only through a placeholder, to the hosts the credential is bound to.
+- **Writes go to the managed collection only.** `vault.managed.collection` names one organisation collection. The request for a write takes its target from Ferrowarden's own evaluated state of that collection, not from the request, so no agent policy and no request can aim a write elsewhere. If the collection is not usable (missing, "View only", "Hide passwords", an ambiguous name, no organisation key), nothing is written and nothing falls back to another collection or the personal vault. With file unlock, Ferrowarden does not start when a configured collection is not usable.
+- **Every create is approved by a human, for that one operation.** Nothing is generated or written before the approval. The approval is for exactly one operation (the agent key, name, username, URIs, generation options and approval flag) and is used up by the request it lets through: it is never a grant that a second request could reuse.
+- **Agents ask, a human decides.** The key's `create` patterns bound what it may *ask for*; they are separate from `credentials` and `methods`. A name that already exists anywhere in the vault is refused before any prompt, so an agent cannot use a create to overwrite or shadow one of your items.
+- **Only places Ferrowarden may reach.** Each URI of the new credential must pass the outbound target policy, and it becomes the credential's host binding.
+- **New cryptography, small and checked.** Items are written in the same format as clients write them (a per-item key wrapped under the organisation key, EncString type 2), by about a hundred lines of Rust built from the format and RustCrypto primitives. It is checked against vectors from Node's `crypto` and cross-read by an independent Node reader in CI ([native-vault.md](native-vault.md#the-write-path-and-the-managed-collection)). Randomness comes from the operating system; the password is picked by rejection sampling, so no character is likelier than another.
+
+**What you are trusting.** The Ferrowarden account now needs **edit rights on the managed collection** (an owner or admin of the organisation, or a member with "Can edit" and without "Hide passwords"). Until now it only read the vault. A compromised Ferrowarden (or its API key) could therefore create, and with the account's other access, change, items in that collection; keep the collection dedicated and the account's access to everything else as narrow as you can. Anyone with access to the collection in Vaultwarden can read the generated passwords, which is how you get one when you need it.
+
+**What this does not protect against.**
+
+- The agent can *ask* for any name its `create` patterns allow, and a human who approves without reading approves it. The prompt shows the name, username, URIs, length and character set, and the collection.
+- A created credential is as safe as the target it is sent to: a service that reveals the password it was given (an echo, a log) can show it. Scrubbing covers the response, not the target's own storage.
+- An item written to Vaultwarden is a normal item: whoever can edit the collection can change or delete it, and Ferrowarden does not watch for that.
+
 ### 19. The Metrics Listener
 
 The optional [Prometheus endpoint](metrics.md) (`metrics.bind`) is a third listener, off by default. It exposes counts and state, not secrets, but it is still an information source about your vault and your agents, so it is built to leak as little as possible and to be hard to misconfigure.
@@ -396,6 +416,7 @@ Before going to production:
 - [ ] Every vault item agents use has URIs for exactly the hosts it belongs to, and `enforce_credential_hosts` is `true`
 - [ ] `allowed_targets` lists only the internal hosts/ranges agents need; `allow_private_targets` is `false`
 - [ ] If a reverse proxy fronts Ferrowarden, `trusted_proxies` is set to its address (and nothing else), and its read timeout for the API is above `approval.wait_secs` (60 seconds by default, 300 at most) if you use [human approval](approvals.md)
+- [ ] If agents may create credentials: `vault.managed.collection` is a dedicated collection (your own items are not in it), the Ferrowarden account has **Can edit** on it and nothing wider than it needs, and agent keys have `create` patterns only for the names they should make
 - [ ] Credentials that should not be used without a person (root tokens, firewalls) carry a `ferrowarden_approval` field or are listed in the agent key's `approval` patterns, and a notifier delivers the prompt
 - [ ] The admin UI is disabled (`ui.bind` empty) unless you use it; if enabled, it is served over HTTPS (never `ui.insecure_http`), its port is not reachable from agent networks, and the Vaultwarden account has two-step login. `ferrowarden` mounts `internal-ca-public`, never `internal-pki` (see [admin-ui.md](admin-ui.md))
 - [ ] TLS is configured — either Ferrowarden's built-in TLS or a TLS-terminating proxy (Pangolin, Caddy, Nginx). See [docs/tls.md](tls.md) for both options. If TLS is disabled, Ferrowarden and the agent must run on the same host with no network hop.

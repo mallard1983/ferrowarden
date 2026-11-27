@@ -93,6 +93,11 @@ pub struct AppState {
     /// only, like captured sessions: a restart empties it, and the vault
     /// locking clears it.
     pub approvals: Arc<ApprovalStore>,
+
+    /// Serializes creating credentials past the approval: the name check, the
+    /// write and the cache refresh of one create happen while it is held, so
+    /// two approved requests for one name cannot both pass the check.
+    pub create_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -133,6 +138,7 @@ impl AppState {
             sync_stats: Arc::new(SyncStats::default()),
             sessions: Arc::new(SessionStore::default()),
             approvals: Arc::new(ApprovalStore::default()),
+            create_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 

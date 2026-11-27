@@ -259,7 +259,7 @@ function New-AgentKey([string]$url, [string]$file) {
         $resp = Invoke-RestMethod "$url/v1/admin/keys" `
             -Method POST `
             -Headers @{ 'X-Admin-Key' = $adminKey; 'Content-Type' = 'application/json' } `
-            -Body '{"name":"integration-test-agent","credentials":["*"],"methods":["*"]}' `
+            -Body '{"name":"integration-test-agent","credentials":["*"],"methods":["*"],"create":["agent_*"]}' `
             -ErrorAction Stop
         Write-Secret $file $resp.token
         Write-Sub "Agent key written to $file"

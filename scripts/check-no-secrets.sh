@@ -19,6 +19,10 @@
 #     (captured sessions, docs/sessions.md): Ferrowarden must have kept them
 #     from the agent, so they must not be in its logs, events or metrics either.
 #     Read from the mock's GET /__issued__, with the URL-encoded form of each.
+#   - every password Ferrowarden generated for a credential created by an agent
+#     (docs/managed-credentials.md) and then sent to the mock's setup API
+#     (kind `created_password` in /__issued__): generated inside Ferrowarden,
+#     it must never have reached a log, an event, a metric or any response
 # then greps (fixed-string) for each of them in
 #   - `docker compose -f docker-compose.test.yml logs <service>`
 #   - the event file(s) copied out of the container with `docker compose cp`
@@ -191,6 +195,12 @@ PY
     issued_n="$(grep -c '^issued_' "$secrets" || true)"
     [ "$issued_n" -ge 1 ] || fail "the mock API has issued no session tokens; run the integration tests first (nothing meaningful to check)"
     echo "Including $issued_n issued session token form(s) from the mock API."
+    # The credential-create tests deliver each generated password to the mock's
+    # setup API; without at least one the check below would prove nothing about
+    # generated values.
+    created_n="$(grep -c '^issued_created_password' "$secrets" || true)"
+    [ "$created_n" -ge 1 ] || fail "the mock API received no generated password; run the credential-create integration tests first (nothing meaningful to check)"
+    echo "Including $created_n generated-password form(s) from the mock API."
 fi
 
 count="$(wc -l < "$secrets" | tr -d ' ')"

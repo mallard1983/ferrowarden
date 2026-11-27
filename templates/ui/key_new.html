@@ -24,6 +24,12 @@
 <textarea id="approval" name="approval" rows="3" spellcheck="false" autocomplete="off">
 {{ approval }}</textarea>
 </div>
+<div class="field">
+<label for="create">Credentials this key may create</label>
+<p class="muted hint">Optional. One pattern per line, matched like the credential patterns. A name that matches may be created in the managed collection with <code>POST /v1/credentials</code>, after a human approves each one. Leave empty so the key cannot create credentials.</p>
+<textarea id="create" name="create" rows="3" spellcheck="false" autocomplete="off">
+{{ create }}</textarea>
+</div>
 <fieldset>
 <legend>Methods</legend>
 <div class="checks">

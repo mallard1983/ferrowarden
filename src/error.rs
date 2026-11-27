@@ -6,6 +6,8 @@ use axum::{
 use serde_json::json;
 use thiserror::Error;
 
+use crate::vault::model::ManagedProblem;
+
 #[derive(Debug, Error)]
 pub enum FerroError {
     // Vault errors
@@ -107,6 +109,25 @@ pub enum FerroError {
     #[error("Too many approval requests from this agent key. Wait for the pending ones to be decided or to expire, then retry.")]
     ApprovalLimitReached,
 
+    // Creating credentials (docs/managed-credentials.md). Each has a stable
+    // `code` in the response body.
+    #[error("Creating credentials is switched off: no managed collection is configured (vault.managed.collection)")]
+    CredentialCreateDisabled,
+
+    #[error("This agent key may not create a credential called {0}")]
+    CredentialCreateOutOfScope(String),
+
+    #[error("A credential called {0} already exists; choose another name")]
+    CredentialExists(String),
+
+    #[error("The managed collection cannot be written to right now: {}", .0.describe())]
+    ManagedCollectionUnavailable(ManagedProblem),
+
+    #[error(
+        "The credential could not be written to the vault; nothing was created. Try again later."
+    )]
+    VaultWriteFailed,
+
     // Config errors
     #[error("Configuration error: {0}")]
     Config(String),
@@ -139,6 +160,19 @@ impl FerroError {
             FerroError::ApprovalPending { .. } => Some("approval_pending"),
             FerroError::ApprovalDenied => Some("approval_denied"),
             FerroError::ApprovalLimitReached => Some("approval_limit_reached"),
+            _ => None,
+        }
+    }
+
+    /// The stable code of the errors of creating a credential (`None` for
+    /// every other error).
+    pub fn create_code(&self) -> Option<&'static str> {
+        match self {
+            FerroError::CredentialCreateDisabled => Some("credential_create_disabled"),
+            FerroError::CredentialCreateOutOfScope(_) => Some("credential_create_out_of_scope"),
+            FerroError::CredentialExists(_) => Some("credential_exists"),
+            FerroError::ManagedCollectionUnavailable(_) => Some("managed_collection_unavailable"),
+            FerroError::VaultWriteFailed => Some("vault_write_failed"),
             _ => None,
         }
     }
@@ -179,6 +213,14 @@ impl FerroError {
             FerroError::GrantNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             FerroError::AmbiguousField { .. } => (StatusCode::CONFLICT, self.to_string()),
             FerroError::RepromptRequired(_) => (StatusCode::FORBIDDEN, self.to_string()),
+            FerroError::CredentialCreateDisabled | FerroError::CredentialCreateOutOfScope(_) => {
+                (StatusCode::FORBIDDEN, self.to_string())
+            }
+            FerroError::CredentialExists(_) => (StatusCode::CONFLICT, self.to_string()),
+            FerroError::ManagedCollectionUnavailable(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+            }
+            FerroError::VaultWriteFailed => (StatusCode::BAD_GATEWAY, self.to_string()),
             FerroError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             FerroError::UnlockEndpointDisabled => (StatusCode::NOT_FOUND, self.to_string()),
             FerroError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
@@ -197,8 +239,11 @@ impl IntoResponse for FerroError {
     fn into_response(self) -> Response {
         let (status, message) = self.status_and_message();
         let mut body = json!({ "error": message });
-        if let Some(code) = self.approval_code() {
+        if let Some(code) = self.approval_code().or_else(|| self.create_code()) {
             body["code"] = json!(code);
+        }
+        if let FerroError::ManagedCollectionUnavailable(problem) = &self {
+            body["reason"] = json!(problem.code());
         }
         if let FerroError::ApprovalPending { id } = &self {
             body["approval_id"] = json!(id);

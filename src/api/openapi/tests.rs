@@ -78,6 +78,7 @@ fn the_agent_view_has_no_trace_of_the_admin_api() {
     let expected: BTreeSet<String> = [
         "GET /health",
         "GET /v1/credentials",
+        "POST /v1/credentials",
         "POST /v1/forward",
         "GET /v1/sessions",
         "DELETE /v1/sessions/{name}",

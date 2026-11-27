@@ -125,9 +125,12 @@ jobs:
       # The test stack runs one Ferrowarden against the Vaultwarden account
       # (docs/native-vault.md), on port 3000. The integration suite includes
       # the checks of the listing and of every offered placeholder against the
-      # seed data (tests/seed). FERROWARDEN_KEEP_GATE_SECRETS keeps the
-      # run-generated tokens for the secret gate; the file is cleared once,
-      # here.
+      # seed data (tests/seed). It also creates credentials through
+      # Ferrowarden (docs/managed-credentials.md) and reads each one back with
+      # the independent Node reader (the `vault-reader` service, run with
+      # `docker compose run` from the tests; its image is built by dev-setup).
+      # FERROWARDEN_KEEP_GATE_SECRETS keeps the run-generated tokens for the
+      # secret gate; the file is cleared once, here.
       - name: Run integration tests
         run: |
           rm -f target/integration-secrets.txt
@@ -143,8 +146,9 @@ jobs:
           cargo test --test mcp -- --nocapture --test-threads=1
 
       # Secret gate: no seeded secret value, agent key, admin key, master
-      # password or Vaultwarden API key may appear in the logs, the security
-      # event file or the metrics scrape of Ferrowarden.
+      # password, Vaultwarden API key, session token or generated password
+      # may appear in the logs, the security event file or the metrics scrape
+      # of Ferrowarden.
       - name: Check logs and events for secret values
         run: bash scripts/check-no-secrets.sh
 

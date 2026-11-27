@@ -257,7 +257,7 @@ echo "[7/7] Creating the test agent key..."
 
 ADMIN_KEY="$(cat "$SECRETS_DIR/ferrowarden_admin_key")"
 
-response=$(curl -sf -X POST "$FERROWARDEN_URL/v1/admin/keys"     -H "X-Admin-Key: $ADMIN_KEY"     -H "Content-Type: application/json"     -d '{"name": "integration-test-agent", "credentials": ["*"], "methods": ["*"]}')
+response=$(curl -sf -X POST "$FERROWARDEN_URL/v1/admin/keys"     -H "X-Admin-Key: $ADMIN_KEY"     -H "Content-Type: application/json"     -d '{"name": "integration-test-agent", "credentials": ["*"], "methods": ["*"], "create": ["agent_*"]}')
 token=$(printf '%s' "$response" | python3 -c "
 import sys, json
 print(json.load(sys.stdin).get('token', ''), end='')

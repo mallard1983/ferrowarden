@@ -15,7 +15,8 @@
 <dd>{% if key.policy_set %}
 Credentials: {% if key.credentials.is_empty() %}none{% else %}{% for p in key.credentials %}<code>{{ p }}</code> {% endfor %}{% endif %}<br>
 Methods: {{ key.methods }}<br>
-Needs approval: {% if key.approval.is_empty() %}<span class="muted">no patterns (vault items can still ask)</span>{% else %}{% for p in key.approval %}<code>{{ p }}</code> {% endfor %}{% endif %}
+Needs approval: {% if key.approval.is_empty() %}<span class="muted">no patterns (vault items can still ask)</span>{% else %}{% for p in key.approval %}<code>{{ p }}</code> {% endfor %}{% endif %}<br>
+May create: {% if key.create.is_empty() %}<span class="muted">nothing</span>{% else %}{% for p in key.create %}<code>{{ p }}</code> {% endfor %}{% endif %}
 {% else %}<span class="badge bad">No policy &mdash; deny-all</span>{% endif %}</dd>
 </dl>
 {% if !key.policy_set %}
@@ -36,6 +37,7 @@ Needs approval: {% if key.approval.is_empty() %}<span class="muted">no patterns 
 <input type="hidden" name="confirm" value="1">
 <input type="hidden" name="credentials" value="{{ form.patterns }}">
 <input type="hidden" name="approval" value="{{ form.approval }}">
+<input type="hidden" name="create" value="{{ form.create }}">
 {% for m in form.methods %}{% if m.checked %}<input type="hidden" name="{{ m.field }}" value="1">{% endif %}{% endfor %}
 {% if form.all_methods %}<input type="hidden" name="m_all" value="1">{% endif %}
 <p class="actions"><button type="submit">Confirm save</button>
@@ -54,12 +56,14 @@ Needs approval: {% if key.approval.is_empty() %}<span class="muted">no patterns 
 <p>Credentials: {% if pv.saved.credentials.is_empty() %}none{% else %}{% for p in pv.saved.credentials %}<code>{{ p }}</code> {% endfor %}{% endif %}</p>
 <p>Methods: {{ pv.saved.methods }}</p>
 <p>Needs approval: {% if pv.saved.approval.is_empty() %}none{% else %}{% for p in pv.saved.approval %}<code>{{ p }}</code> {% endfor %}{% endif %}</p>
+<p>May create: {% if pv.saved.create.is_empty() %}none{% else %}{% for p in pv.saved.create %}<code>{{ p }}</code> {% endfor %}{% endif %}</p>
 </div>
 <div>
 <h3>Draft</h3>
 <p>Credentials: {% if pv.draft.credentials.is_empty() %}none{% else %}{% for p in pv.draft.credentials %}<code>{{ p }}</code> {% endfor %}{% endif %}</p>
 <p>Methods: {{ pv.draft.methods }}</p>
 <p>Needs approval: {% if pv.draft.approval.is_empty() %}none{% else %}{% for p in pv.draft.approval %}<code>{{ p }}</code> {% endfor %}{% endif %}</p>
+<p>May create: {% if pv.draft.create.is_empty() %}none{% else %}{% for p in pv.draft.create %}<code>{{ p }}</code> {% endfor %}{% endif %}</p>
 </div>
 </div>
 {% if pv.widens %}<p class="alert warn" role="note">Saving this draft would give the key more access than it has now.</p>{% endif %}
@@ -133,6 +137,12 @@ Needs approval: {% if key.approval.is_empty() %}<span class="muted">no patterns 
 <p class="muted hint">One pattern per line, matched like the credential patterns. A credential whose name matches needs a human's approval before this key can use it, whatever its vault item says; a vault item can also ask for approval itself (a <code>ferrowarden_approval</code> field), and the key cannot switch that off. Removing or narrowing a pattern needs confirmation.</p>
 <textarea id="approval" name="approval" rows="3" spellcheck="false" autocomplete="off">
 {{ form.approval }}</textarea>
+</div>
+<div class="field">
+<label for="create">Credentials this key may create</label>
+<p class="muted hint">One pattern per line, matched like the credential patterns. A name that matches may be created in the managed collection (<code>vault.managed.collection</code>) with <code>POST /v1/credentials</code>, and only after a human approves each one. This is separate from the credential patterns and the methods above. Leave empty so the key cannot create credentials. Adding or broadening a pattern needs confirmation.</p>
+<textarea id="create" name="create" rows="3" spellcheck="false" autocomplete="off">
+{{ form.create }}</textarea>
 </div>
 <fieldset>
 <legend>Methods</legend>

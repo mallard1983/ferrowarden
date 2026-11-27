@@ -10,6 +10,7 @@ fn draft(target: DraftTarget, pattern: &str) -> SavedDraft {
         name: String::new(),
         patterns: vec![pattern.to_string()],
         approval: Vec::new(),
+        create: Vec::new(),
         checked: vec![true, false],
         all_methods: false,
         request: None,

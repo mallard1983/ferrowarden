@@ -241,3 +241,40 @@ fn a_shorter_secret_inside_a_longer_one_does_not_break_the_longer_match() {
     );
     assert_eq!(bytes, format!("a {REDACTED} b [CAPTURED:s] c").into_bytes());
 }
+
+#[test]
+fn a_secret_starting_with_an_escaped_slash_leaves_valid_json() {
+    // `\/abc` matched as `/abc` would leave a stray backslash; the body must
+    // still be JSON, with the value replaced.
+    let token = "/abcd+efgh";
+    let body = r#"{"token": "\/abcd+efgh", "ok": true}"#;
+    let label = "[CAPTURED:php]".to_string();
+    let secrets = [Secret {
+        value: token,
+        replacement: &label,
+    }];
+    let out = scrub_json_body(body, &secrets);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["token"], "[CAPTURED:php]");
+    assert_eq!(v["ok"], true);
+}
+
+#[test]
+fn php_escaped_random_tokens_are_always_replaced_in_valid_json() {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    let label = "[CAPTURED:php]".to_string();
+    for _ in 0..5000 {
+        let mut b = [0u8; 36];
+        getrandom::fill(&mut b).unwrap();
+        let token = STANDARD.encode(b);
+        let body = format!("{{\"token\": \"{token}\", \"ok\": true}}").replace('/', r"\/");
+        let secrets = [Secret {
+            value: &token,
+            replacement: &label,
+        }];
+        let out = scrub_json_body(&body, &secrets);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v["token"], "[CAPTURED:php]");
+    }
+}

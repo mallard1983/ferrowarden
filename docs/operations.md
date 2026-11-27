@@ -431,6 +431,18 @@ Useful LogQL queries:
 {service="ferrowarden"} | json | line_format "{{.credential_names}}" |= "proxmox_api_token"
 ```
 
+### Creating credentials for agents
+
+Agents can ask Ferrowarden to create a credential, with a password they never see ([managed-credentials.md](managed-credentials.md)). To switch it on:
+
+1. In Vaultwarden, make a dedicated **organisation collection** (for example `Ferrowarden managed`) and give Ferrowarden's account **Can edit** on it, with "Hide passwords" off. An owner or admin of the organisation works.
+2. Set `vault.managed.collection` (`FERROWARDEN_VAULT__MANAGED__COLLECTION`) to its name or id, and restart. With file unlock, Ferrowarden refuses to start when the collection is not usable, and says why.
+3. Give a key a `create` list: `curl -s -X PATCH .../v1/admin/keys/<id> -H "X-Admin-Key: $ADMIN_KEY" -H "Content-Type: application/json" -d '{"create": ["agent_*"]}'`. It is the key's own permission; it does not follow from `credentials` or `methods`.
+
+Every create is held for approval (kind `create`): approve with `POST /v1/admin/approvals/<id>/approve` and **no body** (a create has no duration), or in the admin UI. The managed collection and whether it is usable are in `GET /v1/admin/status` (`managed_collection`) and on the UI's status page.
+
+If it stops working later (someone made the collection "View only", turned on "Hide passwords", renamed it, or deleted it), agents get `503 managed_collection_unavailable` with a `reason`, and the log and a `vault_sync` event say so once. Nothing is written elsewhere in the meantime. Items created by agents have a `ferrowarden_created_by` field naming the key.
+
 ### Admin Status
 
 ```sh
@@ -444,9 +456,12 @@ curl https://<ferrowarden-host>:3000/v1/admin/status \
   "locked": false,
   "vault_backend": "native",
   "credential_count": 12,
-  "agent_key_count": 2
+  "agent_key_count": 2,
+  "managed_collection": { "configured": false, "usable": false }
 }
 ```
+
+`managed_collection` says whether agents can create credentials ([managed-credentials.md](managed-credentials.md)): with a collection set it has its `name`, `id` and `usable`, or the `reason` it cannot be written to.
 
 A `locked: true` response means all proxy requests are failing. Unlock the vault (manual mode) or check startup logs for why file-mode unlock failed.
 
@@ -526,6 +541,10 @@ The placeholder name does not match any login item in the vault. Options:
 ### `403 Forbidden` with `approval_pending` or `approval_denied`
 
 A credential needs a person's approval ([approvals.md](approvals.md)). `approval_pending` means nobody decided in `approval.wait_secs`: open the Approvals page (or `GET /v1/admin/approvals`), decide, and have the agent retry the same request. No prompt arrived? Check that `approval` is in `notify.events` and that a notifier is configured (Ferrowarden logs a warning once when it is not). `approval_denied` repeats for `approval.pending_ttl_secs` after a denial. `429 approval_limit_reached`: the key has too many open or recent approval requests; decide or wait for them to expire. A gateway timeout instead of these answers: the reverse proxy's read timeout is shorter than `approval.wait_secs`.
+
+### `503` with `managed_collection_unavailable`, or `403` with `credential_create_disabled`
+
+`POST /v1/credentials` ([managed-credentials.md](managed-credentials.md)). `credential_create_disabled`: `vault.managed.collection` is not set. `managed_collection_unavailable` carries a `reason`: `not_found` (no collection with that id or name in the account's vault: check the setting and that the account is a member of the organisation), `read_only` (the account has "View only": set **Can edit**), `hides_passwords` (turn "Hide passwords" off for the account), `ambiguous_name` (two collections have that name: set the id), `no_organization_key` (the organisation's key could not be read: the member may not be confirmed). Ferrowarden checks again on every sync, so it recovers on its own once it is fixed. `credential_create_out_of_scope`: the agent key has no `create` pattern for that name. `409 credential_exists`: the name is taken in the vault.
 
 ### `403 Forbidden` — credential not allowed for this host
 

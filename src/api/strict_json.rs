@@ -62,6 +62,18 @@ where
     }
 }
 
+/// Parse a request body that was read without the extractor (a route whose
+/// body depends on something else, such as the kind of the approval it
+/// decides): the same checks as [`StrictJson`].
+pub fn parse_body<T: DeserializeOwned>(headers: &HeaderMap, bytes: &[u8]) -> Result<T, FerroError> {
+    if !is_json_content_type(headers) {
+        return Err(FerroError::InvalidJson(
+            "Content-Type must be application/json".to_string(),
+        ));
+    }
+    parse_strict(bytes).map_err(FerroError::InvalidJson)
+}
+
 /// Same rule as axum's `Json`: `application/json` or `application/*+json`,
 /// ignoring parameters and case.
 fn is_json_content_type(headers: &HeaderMap) -> bool {

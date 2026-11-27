@@ -310,6 +310,7 @@ Environment variables mirror config file keys with the `FERROWARDEN_` prefix:
 | `vault.url` | `FERROWARDEN_VAULT__URL` | `https://vaultwarden` — how Ferrowarden reaches Vaultwarden (the vault connection and the admin UI sign-in) |
 | `vault.ca_file` | `FERROWARDEN_VAULT__CA_FILE` | *(empty; the Compose files set `/ca-public/ca.crt`)* — extra CA for `vault.url`, on top of the public roots |
 | `vault.allow_hidden_passwords` | `FERROWARDEN_VAULT__ALLOW_HIDDEN_PASSWORDS` | `false` — items whose collection hides passwords from the account ("Hide passwords") are left out; `true` makes them usable by agents (warning at startup). See [native-vault.md](native-vault.md#hidden-passwords-collections-that-hide-them) |
+| `vault.managed.collection` | `FERROWARDEN_VAULT__MANAGED__COLLECTION` | *(unset: agents cannot create credentials)* — the one organisation collection (an id or a name) Ferrowarden may create credentials in; the account needs "Can edit" on it. With file unlock, Ferrowarden does not start if it is set and not usable. See [managed-credentials.md](managed-credentials.md) |
 | *(env or file only)* | `FERROWARDEN_VAULT_CLIENT_ID` / `_FILE`, `FERROWARDEN_VAULT_CLIENT_SECRET` / `_FILE` | Vaultwarden personal API key, **required** by the native backend (`secrets/bw_client_id` and `secrets/bw_client_secret` in the Compose file) |
 | `unlock_mode` | `FERROWARDEN_UNLOCK_MODE` | *(required)* |
 | `unlock_file` | `FERROWARDEN_UNLOCK_FILE` | *(required in file mode)* |

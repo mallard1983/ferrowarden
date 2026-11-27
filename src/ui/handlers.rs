@@ -26,8 +26,8 @@ use crate::middleware::request_context::RequestContext;
 use crate::ui::crypto::{self, Kdf};
 use crate::ui::lockout::LockedBy;
 use crate::ui::pages::{
-    InsecurePage, LoginPage, MessagePage, Nav, NotifySenderRow, NotifyTestView, NotifyView,
-    ProviderOption, StatusPage, SudoInfo, TwoFactorPage,
+    InsecurePage, LoginPage, ManagedView, MessagePage, Nav, NotifySenderRow, NotifyTestView,
+    NotifyView, ProviderOption, StatusPage, SudoInfo, TwoFactorPage,
 };
 use crate::ui::session::{
     random_token, secrets_equal, Lookup, PendingCheck, PendingLogin, SessionView,
@@ -685,6 +685,7 @@ pub(super) async fn status_page(
         test,
     };
 
+    let managed = managed_view(&ui.app).await;
     page(
         StatusCode::OK,
         StatusPage {
@@ -704,9 +705,52 @@ pub(super) async fn status_page(
             session_expires: &expires,
             csrf: &view.csrf,
             notify,
+            managed,
         }
         .render(),
     )
+}
+
+/// The managed collection as the status page shows it.
+async fn managed_view(app: &crate::state::AppState) -> ManagedView {
+    use crate::vault::model::ManagedState;
+    let setting = app.config.vault.managed.setting().is_some();
+    match app.vault.managed_collection().await {
+        Ok(ManagedState::Off) => ManagedView {
+            configured: false,
+            usable: false,
+            name: String::new(),
+            id: String::new(),
+            problem: String::new(),
+        },
+        Ok(ManagedState::Usable(c)) => ManagedView {
+            configured: true,
+            usable: true,
+            name: c.name,
+            id: c.id,
+            problem: String::new(),
+        },
+        Ok(ManagedState::Unavailable { setting, problem }) => ManagedView {
+            configured: true,
+            usable: false,
+            name: setting,
+            id: String::new(),
+            problem: problem.describe().to_string(),
+        },
+        Err(_) => ManagedView {
+            configured: setting,
+            usable: false,
+            name: app
+                .config
+                .vault
+                .managed
+                .setting()
+                .unwrap_or_default()
+                .to_string(),
+            id: String::new(),
+            problem: "the vault is locked, so it is not known yet".to_string(),
+        },
+    }
 }
 
 // ── Sign-in: password ─────────────────────────────────────────────────────────

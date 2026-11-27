@@ -1,5 +1,6 @@
 //! The slice of Vaultwarden's HTTP API the native backend uses: API-key login,
-//! `GET /api/sync`, `GET /api/accounts/revision-date` and the account profile.
+//! `GET /api/sync`, `GET /api/accounts/revision-date`, the account profile and
+//! `POST /api/ciphers/create` (the write path, docs/native-vault.md).
 //!
 //! The HTTP client is locked down: no proxy (vault traffic must never go
 //! through `HTTP(S)_PROXY`), no redirects, timeouts, a cap on every response
@@ -103,10 +104,45 @@ pub struct SyncResponse {
     pub profile: Profile,
     #[serde(default)]
     pub ciphers: Vec<RawCipher>,
+    /// The collections the account can see (those of its organisations).
+    #[serde(default)]
+    pub collections: Vec<RawCollection>,
+}
+
+/// A collection as `/api/sync` lists it for this account. The name is
+/// ciphertext under the organisation key. The permission flags are the
+/// account's own on this collection; one that is absent is not trusted
+/// (fail closed: see `ManagedState`). Servers also send
+/// `manage` and `externalId`: creating an item needs "Can edit", not "Can
+/// manage", so they are ignored.
+#[derive(Deserialize, Clone)]
+pub struct RawCollection {
+    pub id: String,
+    #[serde(rename = "organizationId", default)]
+    pub organization_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// "View only": the account cannot change the collection's items.
+    #[serde(rename = "readOnly", default)]
+    pub read_only: Option<bool>,
+    /// "Hide passwords": the account may not see the items' passwords.
+    #[serde(rename = "hidePasswords", default)]
+    pub hide_passwords: Option<bool>,
+}
+
+impl std::fmt::Debug for RawCollection {
+    // The name is ciphertext, but there is no reason to print even that.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawCollection")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Deserialize)]
 pub struct Profile {
+    #[serde(default)]
+    pub id: Option<String>,
     pub email: String,
     /// The user key, encrypted with the stretched master key.
     #[serde(default)]
@@ -154,6 +190,9 @@ pub struct RawCipher {
     /// ("Hide passwords"). Absent (an older server) counts as visible.
     #[serde(rename = "viewPassword", default)]
     pub view_password: Option<bool>,
+    /// The collections the item is in (organisation items).
+    #[serde(rename = "collectionIds", default)]
+    pub collection_ids: Vec<String>,
     #[serde(default)]
     pub login: Option<RawLogin>,
     #[serde(default)]
@@ -370,6 +409,33 @@ impl Api {
             return Err(ApiError::BadResponse);
         }
         Ok(parsed)
+    }
+
+    /// `POST /api/ciphers/create`: write a new item (the JSON body is
+    /// ciphertext and structure only) and return the id the server gave it.
+    /// Not retried here: a request that timed out may have been applied.
+    pub async fn create_cipher(
+        &self,
+        token: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, ApiError> {
+        #[derive(Deserialize)]
+        struct Created {
+            id: String,
+        }
+        let resp = Self::with_client_headers(
+            self.client
+                .post(format!("{}/api/ciphers/create", self.base)),
+        )
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await
+        .map_err(|_| ApiError::Unavailable)?;
+        Self::classify(resp.status(), false)?;
+        let raw = Self::read_body(resp, MAX_SMALL_BODY).await?;
+        let created: Created = serde_json::from_slice(&raw).map_err(|_| ApiError::BadResponse)?;
+        Ok(created.id)
     }
 
     /// `GET /api/accounts/profile`: only the account email is read.

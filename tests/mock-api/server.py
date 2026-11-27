@@ -48,6 +48,12 @@ management endpoint, for tests only) so a test can hand it to the secret gate.
     POST /api/php/login             -> {"token": ...} written like PHP's
                                     json_encode: every slash escaped with a backslash
     GET  /api/php/me                needs "Authorization: Bearer <that token>"
+  A new service's setup API (credential creation, docs/managed-credentials.md)
+    POST /api/created/setup         JSON {"password": ...} -> {"ok": true, "length": N}
+                                    (the password is kept, and listed at
+                                    GET /__issued__ as "created_password", so a
+                                    test can compare it with what Vaultwarden
+                                    stores and the secret gate can search for it)
   Careless targets
     GET  /api/reflect               returns every token it was sent in the body
                                     (raw, base64, URL-encoded), a header and an
@@ -91,6 +97,7 @@ LOGIN_PASSWORD = "test-full-pass-88880000"
 # Tokens issued by the login services, newest last.
 _issued: dict[str, list[str]] = {
     "portainer_jwt": [], "pve_ticket": [], "pve_csrf": [], "php_token": [],
+    "created_password": [],
 }
 
 
@@ -348,6 +355,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"jwt": token})
             else:
                 self._send_json(422, {"message": "Invalid credentials", "details": "Unauthorized"})
+            return True
+
+        if path == "/api/created/setup" and method == "POST":
+            try:
+                data = json.loads(body)
+            except ValueError:
+                data = {}
+            password = data.get("password") if isinstance(data, dict) else None
+            if isinstance(password, str) and password:
+                with _lock:
+                    _issued["created_password"].append(password)
+                self._send_json(200, {"ok": True, "length": len(password)})
+            else:
+                self._send_json(422, {"ok": False, "message": "no password"})
             return True
 
         if path == "/api/php/login" and method == "POST":

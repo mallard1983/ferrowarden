@@ -167,6 +167,7 @@ fn every_family_is_registered_with_the_right_type() {
         ("ferrowarden_sessions_active", "gauge"),
         ("ferrowarden_approval_requests", "counter"),
         ("ferrowarden_forward_approval", "counter"),
+        ("ferrowarden_credential_creates", "counter"),
         ("ferrowarden_approvals_pending", "gauge"),
         ("ferrowarden_approval_grants_active", "gauge"),
         ("ferrowarden_forward_credential_uses", "counter"),
@@ -990,4 +991,70 @@ fn approval_decisions_expiries_and_gate_results_are_counted() {
         ["result"]
     );
     assert!(!text.contains("something-from-a-request"));
+}
+
+// ── Credential creates ────────────────────────────────────────────────────────
+
+fn create_event(failure: Option<Reason>) -> SecurityEvent {
+    let e = SecurityEvent::new(Action::CredentialCreate)
+        .request(&ctx())
+        .key(&key("agent-a"))
+        .credentials(["agent_keycloak_admin"]);
+    match failure {
+        Some(reason) => e.outcome(Outcome::Failure).reason(reason),
+        None => e,
+    }
+}
+
+#[test]
+fn credential_creates_are_counted_by_a_fixed_outcome() {
+    let m = metrics(false);
+    let mut c = Consumer::new(m.clone());
+
+    // Every outcome is there from the start, at zero.
+    let text = render(&m);
+    for outcome in CREATE_OUTCOMES {
+        let series = format!("ferrowarden_credential_creates_total{{outcome=\"{outcome}\"}}");
+        assert_eq!(value(&text, &series), Some(0.0), "{series}");
+    }
+
+    c.process(&create_event(None));
+    c.process(&create_event(None));
+    for reason in [
+        Reason::CredentialExists,
+        Reason::ApprovalDenied,
+        Reason::ApprovalPending,
+        Reason::ApprovalLimitReached,
+        Reason::ManagedCollectionUnavailable,
+        Reason::CredentialCreateDisabled,
+        Reason::CredentialCreateOutOfScope,
+        Reason::VaultWriteFailed,
+        // Anything else is counted as `other`, never as a new label.
+        Reason::TargetBlocked,
+        Reason::VaultLocked,
+    ] {
+        c.process(&create_event(Some(reason)));
+    }
+    let text = render(&m);
+    for (outcome, want) in [
+        ("created", 2.0),
+        ("credential_exists", 1.0),
+        ("approval_denied", 1.0),
+        ("approval_pending", 1.0),
+        ("approval_limit_reached", 1.0),
+        ("managed_collection_unavailable", 1.0),
+        ("credential_create_disabled", 1.0),
+        ("credential_create_out_of_scope", 1.0),
+        ("vault_write_failed", 1.0),
+        ("other", 2.0),
+    ] {
+        let series = format!("ferrowarden_credential_creates_total{{outcome=\"{outcome}\"}}");
+        assert_eq!(value(&text, &series), Some(want), "{series}");
+    }
+    // Only the outcome is a label: no name, key or id.
+    assert_eq!(
+        label_names(&text, "ferrowarden_credential_creates_total"),
+        ["outcome"]
+    );
+    assert!(!text.contains("agent_keycloak_admin"));
 }

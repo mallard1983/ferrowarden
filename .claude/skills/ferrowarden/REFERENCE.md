@@ -63,6 +63,38 @@ Returns the OpenAPI 3.1 description of the operations your key can call, as JSON
 
 ---
 
+### POST /v1/credentials
+
+Ask Ferrowarden to create a credential with a generated password. You get the name and a placeholder, never the password. Needs a `create` pattern on your key that matches `name`, and a human's approval of this request (it is held like an approval-gated forward).
+
+**Headers:** `X-Agent-Key: <token>`, `Content-Type: application/json`
+
+**Body**
+
+```json
+{ "name": "agent_keycloak_admin", "username": "admin",
+  "uris": ["https://keycloak.example.com"],
+  "generate": { "length": 32, "charset": "alphanumeric" },
+  "approval_required": false }
+```
+
+`name` 1-128 characters. `username` optional, 1-256. `uris` 1-16 absolute http(s) URLs (the hosts the credential is bound to; each must be reachable by Ferrowarden's target policy). `generate.length` 16-128 (default 32); `generate.charset` `alphanumeric` (default), `ascii` (letters, digits, `-_.~!@#%^*+=:,`), `hex`, `base64url`. `approval_required` default false. Strict JSON: no other fields, no `null`.
+
+**Response `201`:** `{ "name": "...", "placeholder": "{{vault:...}}", "cache_refreshed": true }`.
+
+| Status / `code` | Meaning | Action |
+|---|---|---|
+| 403 `credential_create_out_of_scope` | Your key may not create that name | Tell the user; do not try other names |
+| 403 `credential_create_disabled` | Creating is not configured | Tell the user |
+| 403 `approval_pending` | Not decided yet (`approval_id`) | Ask the user to approve it, then retry the **identical** request |
+| 403 `approval_denied` | A human refused | Stop; tell the user |
+| 409 `credential_exists` | The name is taken | Choose another name |
+| 429 `approval_limit_reached` | Too many open approvals | Do not retry now |
+| 502 `vault_write_failed` | The vault refused the write; nothing created | Tell the user; a retry needs a new approval |
+| 503 `managed_collection_unavailable` | The storage collection cannot be written to (`reason`) | Tell the user |
+
+---
+
 ### GET /health
 
 Returns `200 OK` with no body. No authentication required. Used by health checks.
@@ -79,6 +111,8 @@ Returns `200 OK` with no body. No authentication required. Used by health checks
 | 403 | Forbidden | "Credential X is not available to this agent key" (your key's scope excludes it; same answer whether or not it exists) | Do not retry with other names. Tell the user which credential you needed |
 | 403 | Forbidden | "Method M is not allowed for this agent key" | Do not switch methods to work around it. Tell the user which method you needed |
 | 403 | Forbidden | `code` `approval_pending` (with `approval_id`): a human has to approve this credential and has not yet | Tell the user to approve it in the Ferrowarden admin UI, quoting the id; when they have, **retry the same request**. Do not use other credentials, hosts or methods |
+| 403 | Forbidden | `code` `credential_create_out_of_scope` / `credential_create_disabled` (creating a credential) | Tell the user; do not try other names |
+| 409 | Conflict | `code` `credential_exists`: a credential with that name exists | Choose another name |
 | 403 | Forbidden | `code` `approval_denied`: a human refused it | Stop; do not retry or look for another way. Tell the user |
 | 429 | Too Many Requests | `code` `approval_limit_reached`: too many open or recent approval requests for your key | Do not retry now; tell the user |
 | 403 | Forbidden | "Session X may not be sent to H: it was captured from another origin" | Do not work around it. Log in to that host with its own `capture`, or tell the user |
@@ -113,7 +147,7 @@ All error responses: `{ "error": "message" }`
 
 | Route group | Sustained rate | Burst |
 |---|---|---|
-| Agent endpoints (`/v1/credentials`, `/v1/forward`, `/v1/sessions`) | 120 req/min (operator-configurable) | 20 (operator-configurable) |
+| Agent endpoints (`/v1/credentials` (GET and POST), `/v1/forward`, `/v1/sessions`) | 120 req/min (operator-configurable) | 20 (operator-configurable) |
 | Admin endpoints (`/v1/admin/*`, `/v1/unlock`) | 30 req/min | 5 |
 
 Limits are per source IP. `Retry-After` header on 429 gives seconds until the next token is available.

@@ -42,6 +42,11 @@ COPY bw-seed.js /usr/local/share/ferrowarden/bw-seed.js
 # account (viewPassword = false), owned by a second account.
 COPY bw-seed-hidden.js /usr/local/share/ferrowarden/bw-seed-hidden.js
 
+# bw-read-item.js: the independent reader of the credential-create tests: it
+# finds an item in the test account's sync and decrypts it with Node's crypto,
+# printing only the SHA-256 of the password (docs/native-vault.md).
+COPY bw-read-item.js /usr/local/share/ferrowarden/bw-read-item.js
+
 # node:*-slim images ship with a non-root "node" user (UID 1000).
 USER node
 WORKDIR /home/node

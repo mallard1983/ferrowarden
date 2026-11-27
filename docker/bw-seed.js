@@ -49,6 +49,10 @@ const password          = process.env.SETUP_MASTER_PASSWORD;
 const credentialsFile   = process.env.CREDENTIALS_FILE || '/seed/credentials.json';
 
 const ORG_NAME = 'ferrowarden-test-org';
+// The organisation's default collection (the seed items go in it) and the one
+// Ferrowarden may create items in (vault.managed.collection, docs/managed-credentials.md).
+const DEFAULT_COLLECTION = 'ferrowarden-test-collection';
+const MANAGED_COLLECTION = 'Ferrowarden managed';
 // Sent so the sync includes every item type (SSH keys need >= 2024.12.0).
 const CLIENT_HEADERS = { 'Bitwarden-Client-Name': 'cli', 'Bitwarden-Client-Version': '2024.12.0' };
 
@@ -139,7 +143,7 @@ async function seed() {
     const res = await postJson('/api/organizations', {
       name: ORG_NAME,
       billingEmail: email,
-      collectionName: encryptCipherString(orgKeyBytes, Buffer.from('ferrowarden-test-collection')),
+      collectionName: encryptCipherString(orgKeyBytes, Buffer.from(DEFAULT_COLLECTION)),
       key: encOrgKey,
       keys: {
         publicKey: kp.publicKey.toString('base64'),
@@ -159,11 +163,33 @@ async function seed() {
   let collectionId = null;
   if (org) {
     orgKey = rsaUnwrap(privateKey, org.key);
-    const col = (sync.collections || []).find((c) => (c.organizationId || c.OrganizationId) === org.id);
+    // Collections are found by their decrypted names: there is more than one.
+    const collectionNamed = (s, name) => (s.collections || []).find((c) =>
+      (c.organizationId || c.OrganizationId) === org.id &&
+      decryptCipherString(orgKey, c.name || c.Name).toString('utf8') === name);
+    const col = collectionNamed(sync, DEFAULT_COLLECTION);
     collectionId = col ? col.id : null;
     if (orgNeeded && !collectionId) {
       console.error('[seed] the test organisation has no collection');
       return 1;
+    }
+    // The collection Ferrowarden may create items in. The account owns the
+    // organisation, so it can edit the collection and sees its passwords
+    // (the only thing that matters for vault.managed.collection). Dedicated:
+    // no seed item goes in it.
+    if (orgNeeded && !collectionNamed(sync, MANAGED_COLLECTION)) {
+      const res = await postJson(`/api/organizations/${org.id}/collections`, {
+        name: encryptCipherString(orgKey, Buffer.from(MANAGED_COLLECTION)),
+        groups: [],
+        users: [],
+        externalId: null,
+      });
+      if (res.status !== 200) {
+        console.error(`[seed] creating the managed collection failed (${res.status}): ${res.body}`);
+        return 1;
+      }
+      console.log(`  created collection: ${MANAGED_COLLECTION}`);
+      sync = await syncVault();
     }
   }
 

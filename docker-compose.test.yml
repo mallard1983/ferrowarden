@@ -108,6 +108,9 @@ services:
     environment:
       FERROWARDEN_VAULT__URL: "https://vaultwarden"
       FERROWARDEN_VAULT__CA_FILE: "/ca-public/ca.crt"
+      # The collection agents may create credentials in (docs/managed-credentials.md):
+      # seeded by docker/bw-seed.js, with the account as the organisation's owner.
+      FERROWARDEN_VAULT__MANAGED__COLLECTION: "Ferrowarden managed"
       FERROWARDEN_VAULT_CLIENT_ID_FILE: "/run/secrets/bw_client_id"
       FERROWARDEN_VAULT_CLIENT_SECRET_FILE: "/run/secrets/bw_client_secret"
       FERROWARDEN_UNLOCK_MODE: "file"
@@ -280,6 +283,33 @@ services:
       BW_SERVER_URL: "https://vaultwarden"
       SETUP_EMAIL: "${SETUP_EMAIL:-admin@ferrowarden.test}"
       HIDDEN_OWNER_EMAIL: "${HIDDEN_OWNER_EMAIL:-org-owner@ferrowarden.test}"
+    networks:
+      - vault-internal
+    depends_on:
+      - vaultwarden
+    restart: "no"
+
+  # ── Vault Reader (one-shot, per run) ─────────────────────────────────────────
+  # The independent reader of the credential-create tests: logs in as the test
+  # account, decrypts one item with Node's crypto and prints the SHA-256 of its
+  # password, never the password (docker/bw-read-item.js). The integration
+  # tests run it with
+  #   docker compose -f docker-compose.test.yml run --rm -e ITEM_NAME=... vault-reader
+  vault-reader:
+    profiles: ["setup"]
+    build:
+      context: ./docker
+      dockerfile: setup.Dockerfile
+    entrypoint: ["node", "/usr/local/share/ferrowarden/bw-read-item.js"]
+    volumes:
+      - internal-pki:/pki:ro
+    secrets:
+      - bw_master_password
+    environment:
+      BW_SERVER_URL: "https://vaultwarden"
+      SETUP_EMAIL: "${SETUP_EMAIL:-admin@ferrowarden.test}"
+      # The master password, read from the secret file by the script.
+      SETUP_MASTER_PASSWORD_FILE: "/run/secrets/bw_master_password"
     networks:
       - vault-internal
     depends_on:

@@ -11,6 +11,7 @@
 //! credential names, the host, the approver and the ids.
 
 use axum::{
+    body::Bytes,
     extract::{Path, State},
     http::HeaderMap,
     Json,
@@ -23,7 +24,7 @@ use std::time::Duration;
 
 use crate::api::admin::authenticate_admin;
 use crate::api::key_service::{Caller, Via};
-use crate::api::strict_json::StrictJson;
+use crate::api::strict_json::parse_body;
 use crate::approvals::{self, GrantView, PendingView};
 use crate::error::{FerroError, FerroResult};
 use crate::events::{emit_rejected, Action};
@@ -69,6 +70,7 @@ pub fn approve(
                 .status(200)
                 .key_named(&pending.key_id, &pending.key_name)
                 .credentials(pending.item_names())
+                .detail("kind", pending.kind.as_str())
                 .detail("approval_id", pending.id.as_str())
                 .detail("grant_id", grant.id.as_str())
                 .detail("host", pending.host.as_str())
@@ -104,8 +106,51 @@ fn approve_inner(
         .map_err(|_| FerroError::ApprovalNotPending)
 }
 
+/// Approve the pending **create** approval `id`: exactly one operation, the
+/// one it was opened for, may proceed. There is no duration and no grant: the
+/// approval is used up by the first request that matches it (the held one, or
+/// a retry within `approval.pending_ttl_secs`). Wakes the held requests and
+/// emits `approval_granted` with `kind` `create`.
+pub fn approve_create(
+    state: &AppState,
+    caller: Caller<'_>,
+    id: &str,
+    approver: &str,
+) -> FerroResult<PendingView> {
+    let ttl = Duration::from_secs(state.config.approval.pending_ttl_secs);
+    let result = if approvals::valid_id(id) {
+        state
+            .approvals
+            .approve_create(id, ttl, Utc::now())
+            .map_err(|_| FerroError::ApprovalNotPending)
+    } else {
+        Err(FerroError::ApprovalNotPending)
+    };
+    match &result {
+        Ok(pending) => state.events.emit(
+            caller
+                .event(Action::ApprovalGranted)
+                .status(200)
+                .key_named(&pending.key_id, &pending.key_name)
+                .credentials(pending.item_names())
+                .detail("kind", pending.kind.as_str())
+                .detail("approval_id", pending.id.as_str())
+                .detail_str("approver", approver),
+        ),
+        Err(e) => state.events.emit(
+            caller
+                .event(Action::ApprovalGranted)
+                .failed_with(e)
+                .status(e.status_code().as_u16())
+                .detail_str("approver", approver),
+        ),
+    }
+    result
+}
+
 /// Deny the pending approval `id`: its credentials are refused for the key
-/// and origin for `approval.pending_ttl_secs`. Emits `approval_denied`.
+/// and origin for `approval.pending_ttl_secs` (a create: that one operation).
+/// Emits `approval_denied`.
 pub fn deny(
     state: &AppState,
     caller: Caller<'_>,
@@ -128,6 +173,7 @@ pub fn deny(
                 .status(200)
                 .key_named(&pending.key_id, &pending.key_name)
                 .credentials(pending.item_names())
+                .detail("kind", pending.kind.as_str())
                 .detail("approval_id", pending.id.as_str())
                 .detail("host", pending.host.as_str())
                 .detail_str("approver", approver),
@@ -184,9 +230,11 @@ pub fn revoke_grant(
 
 // ── The admin API ─────────────────────────────────────────────────────────────
 
-/// `POST /v1/admin/approvals/{id}/approve`: `minutes` is required, there is
-/// no default and no other field, and the body is a JSON object (serde would
-/// also read a struct from an array, which is not what an approval takes).
+/// `POST /v1/admin/approvals/{id}/approve` for a **forward** approval:
+/// `minutes` is required, there is no default and no other field, and the body
+/// is a JSON object (serde would also read a struct from an array, which is
+/// not what an approval takes). A **create** approval takes no body at all
+/// (see [`approve_approval`]).
 #[derive(Debug)]
 pub struct ApproveRequest {
     pub minutes: u64,
@@ -236,39 +284,82 @@ pub async fn list_approvals(
 
 /// POST /v1/admin/approvals/{id}/approve
 ///
-/// Approve a pending approval for `minutes`. Held requests proceed at once;
-/// a request retried within the grant passes. Admin auth required.
+/// Approve a pending approval. The body depends on its `kind`:
+///
+/// * `forward`: `{ "minutes": N }`. Creates a grant for `minutes`; held
+///   requests proceed at once, and a request retried within the grant passes.
+///   The answer is `{ "status": "approved", "kind": "forward", "grant": {...} }`.
+/// * `create`: **no body** (an empty body or `{}`). Allows exactly one
+///   operation, once; there is no duration, and a `minutes` is refused
+///   (`400`). The answer is `{ "status": "approved", "kind": "create" }`.
+///
+/// Admin auth required.
 pub async fn approve_approval(
     State(state): State<Arc<AppState>>,
     ctx: RequestContext,
     headers: HeaderMap,
     Path(id): Path<String>,
-    body: Result<StrictJson<ApproveRequest>, FerroError>,
+    body: Bytes,
 ) -> FerroResult<Json<Value>> {
     const ENDPOINT: &str = "/v1/admin/approvals/{id}/approve";
     authenticate_admin(&state, &ctx, &headers, ENDPOINT)?;
-    let req = match body {
-        Ok(StrictJson(req)) => req,
-        Err(e) => {
-            emit_rejected(&state.events, &ctx, None, ENDPOINT, &e);
-            return Err(e);
-        }
-    };
     let caller = Caller {
         ctx: &ctx,
         via: Via::Api,
     };
-    let minutes = match check_minutes(state.config.approval.max_grant_minutes, req.minutes) {
-        Ok(m) => m,
-        Err(e) => {
-            emit_rejected(&state.events, &ctx, None, ENDPOINT, &e);
-            return Err(e);
-        }
+    // The kind decides what the body may be. An approval that is not open
+    // takes the ordinary 409 path below, whatever was sent.
+    let kind = if approvals::valid_id(&id) {
+        state.approvals.kind_of(&id, Utc::now())
+    } else {
+        None
     };
-    let (_, grant) = approve(&state, caller, &id, minutes, API_APPROVER)?;
-    Ok(Json(
-        json!({ "status": "approved", "grant": grant.to_json() }),
-    ))
+    let reject = |e: FerroError| {
+        emit_rejected(&state.events, &ctx, None, ENDPOINT, &e);
+        e
+    };
+    match kind {
+        Some(approvals::ApprovalKind::Create) => {
+            check_create_body(&headers, &body).map_err(reject)?;
+            approve_create(&state, caller, &id, API_APPROVER)?;
+            Ok(Json(json!({ "status": "approved", "kind": "create" })))
+        }
+        Some(approvals::ApprovalKind::Forward) | None => {
+            let minutes = if kind.is_some() {
+                let req: ApproveRequest = parse_body(&headers, &body).map_err(reject)?;
+                check_minutes(state.config.approval.max_grant_minutes, req.minutes)
+                    .map_err(reject)?
+            } else {
+                // Not open: the decision fails as not pending.
+                1
+            };
+            let (_, grant) = approve(&state, caller, &id, minutes, API_APPROVER)?;
+            Ok(Json(json!({
+                "status": "approved",
+                "kind": "forward",
+                "grant": grant.to_json(),
+            })))
+        }
+    }
+}
+
+/// The body of an approval of a create: nothing, or an empty JSON object.
+/// Anything else (a `minutes` included) is refused: there is no duration to
+/// give.
+fn check_create_body(headers: &HeaderMap, body: &[u8]) -> FerroResult<()> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(());
+    }
+    let fields: serde_json::Map<String, Value> = parse_body(headers, body)?;
+    if fields.is_empty() {
+        Ok(())
+    } else {
+        Err(FerroError::InvalidRequest(
+            "an approval to create a credential takes no body and has no duration \
+             (send no body, or {})"
+                .to_string(),
+        ))
+    }
 }
 
 /// POST /v1/admin/approvals/{id}/deny

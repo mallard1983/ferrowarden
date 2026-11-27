@@ -1,6 +1,8 @@
 //! What the rest of Ferrowarden knows about a vault item, whichever backend
 //! supplies it: names, ids, URIs and which values exist. Never a value.
 
+use zeroize::Zeroizing;
+
 /// Name of the reserved custom field that lists a credential's host bindings
 /// (comma- or newline-separated URIs). It provides bindings for secure notes
 /// and overrides a login's URIs when present. Not offered as a selectable field.
@@ -24,6 +26,11 @@ pub fn is_approval_field_name(name: &str) -> bool {
 pub fn approval_field_valid(value: &str) -> bool {
     value.trim().eq_ignore_ascii_case("required")
 }
+
+/// Name of the reserved custom field that records which agent key created an
+/// item (docs/managed-credentials.md). A plain text field, written when
+/// Ferrowarden creates an item; shown like any other field.
+pub const CREATED_BY_FIELD: &str = "ferrowarden_created_by";
 
 /// Kind of vault item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +253,9 @@ pub struct SyncStats {
     /// Items whose `ferrowarden_approval` value is not `required`, as of the
     /// last listing (to report a change once, not on every refresh).
     approval_invalid: std::sync::atomic::AtomicU64,
+    /// The managed collection's problem code as of the last listing, to report
+    /// a change once, not on every refresh.
+    managed_problem: std::sync::Mutex<Option<&'static str>>,
 }
 
 impl SyncStats {
@@ -271,7 +281,144 @@ impl SyncStats {
         )
     }
 
+    /// Record the managed collection's problem (`None`: usable or not
+    /// configured); returns the one before.
+    pub fn swap_managed_problem(&self, problem: Option<&'static str>) -> Option<&'static str> {
+        std::mem::replace(
+            &mut *self
+                .managed_problem
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            problem,
+        )
+    }
+
     pub fn excluded(&self) -> u64 {
         self.excluded.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+// ── The managed collection (docs/managed-credentials.md) ──────────────────────
+
+/// Why the managed collection cannot be written to right now. A fixed set:
+/// the reason is shown to the operator and, as a code, to the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedProblem {
+    /// No collection with that id or name in the account's sync.
+    NotFound,
+    /// The account has "View only" on the collection.
+    ReadOnly,
+    /// The account has "Hide passwords" on the collection.
+    HidesPasswords,
+    /// More than one collection has that name: use the id.
+    Ambiguous,
+    /// The collection's organisation key could not be unwrapped.
+    NoOrganizationKey,
+}
+
+impl ManagedProblem {
+    /// The fixed code.
+    pub fn code(self) -> &'static str {
+        match self {
+            ManagedProblem::NotFound => "not_found",
+            ManagedProblem::ReadOnly => "read_only",
+            ManagedProblem::HidesPasswords => "hides_passwords",
+            ManagedProblem::Ambiguous => "ambiguous_name",
+            ManagedProblem::NoOrganizationKey => "no_organization_key",
+        }
+    }
+
+    /// A sentence for the operator, the log and the agent.
+    pub fn describe(self) -> &'static str {
+        match self {
+            ManagedProblem::NotFound => {
+                "the managed collection was not found in the account's vault"
+            }
+            ManagedProblem::ReadOnly => {
+                "the account has only view access to the managed collection (it needs Can edit)"
+            }
+            ManagedProblem::HidesPasswords => {
+                "the managed collection hides passwords from the account (turn off Hide passwords)"
+            }
+            ManagedProblem::Ambiguous => {
+                "more than one collection has the configured name; set the collection's id instead"
+            }
+            ManagedProblem::NoOrganizationKey => {
+                "the managed collection's organisation key could not be read"
+            }
+        }
+    }
+}
+
+/// The collection Ferrowarden may create items in: a collection the account
+/// can edit and whose passwords it can see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedCollection {
+    pub id: String,
+    pub organization_id: String,
+    pub name: String,
+    /// How many readable items of the vault are in it.
+    pub items: usize,
+}
+
+/// Where `vault.managed.collection` stands, evaluated on every unlock and
+/// sync.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ManagedState {
+    /// Not configured: creating is off.
+    #[default]
+    Off,
+    /// Configured and writable.
+    Usable(ManagedCollection),
+    /// Configured but not writable now. `setting` is what the operator wrote
+    /// (an id or a name, not a secret).
+    Unavailable {
+        setting: String,
+        problem: ManagedProblem,
+    },
+}
+
+impl ManagedState {
+    /// The status shown to the operator (admin API and UI): the collection's
+    /// name and id and whether it is usable. No secrets.
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            ManagedState::Off => serde_json::json!({ "configured": false, "usable": false }),
+            ManagedState::Usable(c) => serde_json::json!({
+                "configured": true,
+                "usable": true,
+                "id": c.id,
+                "name": c.name,
+                "items": c.items,
+            }),
+            ManagedState::Unavailable { setting, problem } => serde_json::json!({
+                "configured": true,
+                "usable": false,
+                "setting": setting,
+                "reason": problem.code(),
+                "message": problem.describe(),
+            }),
+        }
+    }
+}
+
+/// What the vault is asked to write as a new login item. The value is wiped
+/// when dropped and never printed.
+pub struct NewLogin {
+    pub name: String,
+    pub username: Option<String>,
+    pub uris: Vec<String>,
+    pub password: Zeroizing<String>,
+    /// The agent key's name, recorded in the `ferrowarden_created_by` field.
+    pub created_by: String,
+    /// Add a `ferrowarden_approval = required` field.
+    pub approval_required: bool,
+}
+
+impl std::fmt::Debug for NewLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewLogin")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
     }
 }

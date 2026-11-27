@@ -210,12 +210,20 @@ pub fn scrub_json_body(body: &str, secrets: &[Secret<'_>]) -> String {
     if needles.is_empty() {
         return first;
     }
-    let Ok(mut decoded) = serde_json::from_str::<Value>(&first) else {
-        return first;
+    // Fall back when a decoded string still holds a secret, and also when the
+    // text pass broke the JSON: a secret that starts with a character the
+    // target escaped (`\/abc`) is matched without its backslash, leaving a
+    // stray `\` that makes the body unreadable, and an unreadable body can't
+    // be checked for other secrets.
+    let fallback = match serde_json::from_str::<Value>(&first) {
+        Ok(mut decoded) => {
+            let leaks = json_mentions(&decoded, &needles);
+            crate::proxy::substitute::zeroize_json(&mut decoded);
+            leaks
+        }
+        Err(_) => true,
     };
-    let leaks = json_mentions(&decoded, &needles);
-    crate::proxy::substitute::zeroize_json(&mut decoded);
-    if !leaks {
+    if !fallback {
         return first;
     }
     let Ok(mut original) = serde_json::from_str::<Value>(body) else {

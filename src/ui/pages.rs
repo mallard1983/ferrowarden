@@ -75,6 +75,20 @@ pub struct StatusPage<'a> {
     pub session_expires: &'a str,
     pub csrf: &'a str,
     pub notify: NotifyView,
+    /// The managed collection, as one line for the status page.
+    pub managed: ManagedView,
+}
+
+/// The managed collection on the status page (docs/managed-credentials.md).
+pub struct ManagedView {
+    /// `vault.managed.collection` is set.
+    pub configured: bool,
+    pub usable: bool,
+    /// Name and id when usable; the configured text otherwise.
+    pub name: String,
+    pub id: String,
+    /// Why it is not usable.
+    pub problem: String,
 }
 
 /// The "Notifications" section of the status page.
@@ -179,6 +193,7 @@ pub struct KeyNewPage<'a> {
     pub name: &'a str,
     pub patterns: &'a str,
     pub approval: &'a str,
+    pub create: &'a str,
     pub methods: Vec<MethodBox>,
     pub all_methods: bool,
 }
@@ -202,6 +217,7 @@ pub struct KeyTokenPage<'a> {
     pub credentials: &'a [String],
     pub methods: &'a str,
     pub approval: &'a [String],
+    pub create: &'a [String],
 }
 
 /// A policy as text: the pattern list and the method label.
@@ -209,6 +225,7 @@ pub struct PolicyView {
     pub credentials: Vec<String>,
     pub methods: String,
     pub approval: Vec<String>,
+    pub create: Vec<String>,
 }
 
 /// One credential that needs approval, and why (`vault field`, `key policy`).
@@ -254,6 +271,7 @@ pub struct Opt {
 pub struct DraftForm {
     pub patterns: String,
     pub approval: String,
+    pub create: String,
     pub methods: Vec<MethodBox>,
     pub all_methods: bool,
     pub req_methods: Vec<Opt>,
@@ -270,6 +288,7 @@ pub struct KeyFacts {
     pub credentials: Vec<String>,
     pub methods: String,
     pub approval: Vec<String>,
+    pub create: Vec<String>,
 }
 
 #[derive(Template)]
@@ -305,8 +324,13 @@ pub struct KeyRevokePage<'a> {
 /// One approval in the list.
 pub struct ApprovalListRow {
     pub id: String,
+    /// `forward` or `create`.
+    pub kind: &'static str,
+    pub is_create: bool,
     pub key_name: String,
     pub credentials: Vec<ApprovalRow>,
+    /// For a create: the collection it would go to.
+    pub collection: String,
     pub method: String,
     /// `scheme://host[:port]`.
     pub target: String,
@@ -340,6 +364,11 @@ pub struct ApprovalsPage<'a> {
 /// Everything the detail page shows about one approval.
 pub struct ApprovalDetail {
     pub id: String,
+    /// `forward` or `create`.
+    pub kind: &'static str,
+    pub is_create: bool,
+    /// What a create asks for (empty strings and lists for a forward).
+    pub create: CreateRow,
     pub key_id: String,
     pub key_name: String,
     pub credentials: Vec<ApprovalRow>,
@@ -351,6 +380,20 @@ pub struct ApprovalDetail {
     pub request_id: String,
     pub created: String,
     pub expires: String,
+}
+
+/// What a create approval shows: everything the human decides on. There is no
+/// value to show, because none has been generated yet.
+#[derive(Default)]
+pub struct CreateRow {
+    pub name: String,
+    pub has_username: bool,
+    pub username: String,
+    pub uris: Vec<String>,
+    pub charset: String,
+    pub length: u32,
+    pub approval_required: bool,
+    pub collection: String,
 }
 
 /// One duration preset of the approve form.

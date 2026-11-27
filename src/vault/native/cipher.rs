@@ -30,7 +30,7 @@ use super::totp;
 use crate::error::{FerroError, FerroResult};
 use crate::vault::model::{
     approval_field_valid, is_approval_field_name, match_type_is_binding, split_uris, Builtin,
-    CredentialEntry, FieldInfo, FieldKind, ItemKind, BINDINGS_FIELD,
+    CredentialEntry, FieldInfo, FieldKind, ItemKind, BINDINGS_FIELD, CREATED_BY_FIELD,
 };
 
 /// Every key needed to read the vault. Wiped on drop; never printed.
@@ -172,6 +172,11 @@ pub fn build_metadata(
             if let Some(v) = f.value.as_deref().filter(|v| !v.is_empty()) {
                 bindings_override = Some(split_uris(&dec(&key, v)?));
             }
+            continue;
+        }
+        if field_name.as_str() == CREATED_BY_FIELD {
+            // Written by Ferrowarden itself (the agent key that created the
+            // item): not offered as a field.
             continue;
         }
         if is_approval_field_name(&field_name) {

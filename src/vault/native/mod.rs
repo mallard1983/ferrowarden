@@ -22,10 +22,12 @@
 
 pub mod api;
 pub mod cipher;
+pub mod collections;
 pub mod enc;
 pub mod hardening;
 pub mod keys;
 pub mod totp;
+pub mod write;
 
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
@@ -35,10 +37,13 @@ use chrono::{DateTime, Utc};
 use tokio::sync::{Mutex, RwLock};
 use zeroize::Zeroizing;
 
-use self::api::{Api, ApiError, RawCipher, RawOrganization, Session, SyncResponse};
+use self::api::{Api, ApiError, RawCipher, RawCollection, RawOrganization, Session, SyncResponse};
 use self::cipher::{KeyRing, Keys};
 use self::keys::{derive_user_key, load_rsa_key, unwrap_org_key, UnlockError};
-use super::model::{Builtin, CredentialMap, ExclusionReport, Listing, VaultStatus};
+use super::model::{
+    Builtin, CredentialMap, ExclusionReport, Listing, ManagedProblem, ManagedState, NewLogin,
+    VaultStatus,
+};
 use super::Vault;
 use crate::config::Config;
 use crate::error::{FerroError, FerroResult};
@@ -65,6 +70,11 @@ struct Unlocked {
     /// Account revision date the current copy corresponds to.
     revision: String,
     email: String,
+    /// The account's id, sent as `encryptedFor` when writing.
+    user_id: Option<String>,
+    /// `vault.managed.collection` as of the last sync: whether Ferrowarden
+    /// may write, and where.
+    managed: ManagedState,
     last_sync: DateTime<Utc>,
     last_full_sync: Instant,
     /// Exclusions from the last rebuild, handed out once.
@@ -87,6 +97,9 @@ pub struct NativeVault {
     /// `vault.allow_hidden_passwords`: keep items whose collection hides
     /// passwords from this account (refused by default).
     allow_hidden_passwords: bool,
+    /// `vault.managed.collection`: the one collection Ferrowarden may create
+    /// items in (`None`: creating is off).
+    managed_setting: Option<String>,
     /// Serializes unlock, lock and sync: the state is only written by the
     /// holder, so a sync can read, work without holding the state lock, and
     /// swap the result in.
@@ -120,6 +133,7 @@ impl NativeVault {
             client_secret: secret.clone(),
             full_sync_every,
             allow_hidden_passwords: config.vault.allow_hidden_passwords,
+            managed_setting: config.vault.managed.setting().map(str::to_string),
             gate: Mutex::new(()),
             session: Mutex::new(None),
             state: RwLock::new(State::Locked),
@@ -248,6 +262,26 @@ fn build_all(
     (kept, meta, report)
 }
 
+/// The managed collection's state for this sync: the setting evaluated against
+/// the collections, with how many of the kept items are in it.
+fn managed_state(
+    setting: Option<&str>,
+    collections: &[RawCollection],
+    org: &HashMap<String, enc::SymKey>,
+    kept: &HashMap<String, RawCipher>,
+) -> ManagedState {
+    match collections::evaluate(setting, collections, org) {
+        ManagedState::Usable(mut c) => {
+            c.items = kept
+                .values()
+                .filter(|i| i.collection_ids.contains(&c.id))
+                .count();
+            ManagedState::Usable(c)
+        }
+        other => other,
+    }
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -319,7 +353,11 @@ impl Vault for NativeVault {
         // noticed by the next check instead of being missed.
         let revision = self.api.revision_date(&token).await.map_err(api_error)?;
         let sync = self.api.sync(&token).await.map_err(api_error)?;
-        let SyncResponse { profile, ciphers } = sync;
+        let SyncResponse {
+            profile,
+            ciphers,
+            collections,
+        } = sync;
         let profile_key = profile
             .key
             .clone()
@@ -360,6 +398,12 @@ impl Vault for NativeVault {
         }
         let ring = KeyRing { user, rsa, org };
         let (kept, meta, report) = build_all(&ring.view(), ciphers, self.allow_hidden_passwords);
+        let managed = managed_state(
+            self.managed_setting.as_deref(),
+            &collections,
+            &ring.org,
+            &kept,
+        );
 
         let now = Instant::now();
         *self.state.write().await = State::Unlocked(Box::new(Unlocked {
@@ -370,6 +414,8 @@ impl Vault for NativeVault {
             security_stamp: profile.security_stamp,
             revision,
             email: profile.email,
+            user_id: profile.id,
+            managed,
             last_sync: Utc::now(),
             last_full_sync: now,
             excluded_count: report.total(),
@@ -406,8 +452,11 @@ impl Vault for NativeVault {
             }
             return Ok(());
         }
-        let SyncResponse { profile, ciphers } =
-            authed!(self, |t| self.api.sync(&t)).map_err(api_error)?;
+        let SyncResponse {
+            profile,
+            ciphers,
+            collections,
+        } = authed!(self, |t| self.api.sync(&t)).map_err(api_error)?;
 
         if profile.key.as_deref() != Some(profile_key.as_str()) {
             self.lock_inner("vault_key_changed").await;
@@ -420,7 +469,7 @@ impl Vault for NativeVault {
 
         // Decrypt the metadata with the user key of the current state and the
         // organisation keys of this sync, without holding the write lock.
-        let (org, org_failed, kept, meta, report) = {
+        let (org, org_failed, kept, meta, report, managed) = {
             let guard = self.state.read().await;
             let State::Unlocked(u) = &*guard else {
                 return Err(FerroError::VaultLocked);
@@ -431,7 +480,8 @@ impl Vault for NativeVault {
                 org: &org,
             };
             let (kept, meta, report) = build_all(&keys, ciphers, self.allow_hidden_passwords);
-            (org, org_failed, kept, meta, report)
+            let managed = managed_state(self.managed_setting.as_deref(), &collections, &org, &kept);
+            (org, org_failed, kept, meta, report, managed)
         };
         if org_failed > 0 {
             tracing::warn!(
@@ -447,6 +497,10 @@ impl Vault for NativeVault {
         u.ring.org = org;
         u.ciphers = kept;
         u.meta = meta;
+        u.managed = managed;
+        if profile.id.is_some() {
+            u.user_id = profile.id;
+        }
         u.revision = revision;
         u.last_sync = Utc::now();
         u.last_full_sync = Instant::now();
@@ -499,6 +553,54 @@ impl Vault for NativeVault {
             .get(id)
             .ok_or_else(|| FerroError::CredentialNotFound(label.to_string()))?;
         cipher::field_value(&u.ring.view(), c, field, label)
+    }
+
+    async fn managed_collection(&self) -> FerroResult<ManagedState> {
+        match &*self.state.read().await {
+            State::Locked => Err(FerroError::VaultLocked),
+            State::Unlocked(u) => Ok(u.managed.clone()),
+        }
+    }
+
+    async fn create_login(&self, new: NewLogin) -> FerroResult<String> {
+        // Encrypt under the keys of the current state, then let go of it for
+        // the network call. The target is the evaluated managed collection and
+        // nothing else: if it is not usable, nothing is written.
+        let body = {
+            let guard = self.state.read().await;
+            let State::Unlocked(u) = &*guard else {
+                return Err(FerroError::VaultLocked);
+            };
+            let collection = match &u.managed {
+                ManagedState::Usable(collection) => collection,
+                ManagedState::Unavailable { problem, .. } => {
+                    return Err(FerroError::ManagedCollectionUnavailable(*problem));
+                }
+                ManagedState::Off => return Err(FerroError::CredentialCreateDisabled),
+            };
+            let org_key = u.ring.org.get(&collection.organization_id).ok_or(
+                FerroError::ManagedCollectionUnavailable(ManagedProblem::NoOrganizationKey),
+            )?;
+            write::create_body(
+                &write::Target {
+                    organization_id: &collection.organization_id,
+                    collection_id: &collection.id,
+                    organization_key: org_key,
+                    user_id: u.user_id.as_deref(),
+                },
+                &new,
+            )
+            .map_err(|e| {
+                tracing::warn!(reason = e.code(), "A new vault item could not be encrypted");
+                FerroError::VaultWriteFailed
+            })?
+        };
+        // A 401 is retried once with a fresh login (the request was refused,
+        // not applied). Nothing else is: a timeout may have been applied.
+        authed!(self, |t| self.api.create_cipher(&t, &body)).map_err(|e| {
+            tracing::warn!(error = ?e, "Creating a vault item failed");
+            FerroError::VaultWriteFailed
+        })
     }
 }
 

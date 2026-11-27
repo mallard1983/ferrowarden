@@ -16,6 +16,13 @@
 //!   It is an extra requirement only: absent in a key file or a create body it
 //!   is `[]` (no extra requirement), which is what a key from before approvals
 //!   existed has. Removing or narrowing patterns widens what the key can do.
+//! * `create` is a list of credential name patterns, with the same syntax,
+//!   limits, matching, "no null" rule and absent-means-`[]` as `approval`: the
+//!   names this key may ask Ferrowarden to **create** in the managed
+//!   collection (`POST /v1/credentials`, docs/managed-credentials.md). It is
+//!   its own permission: it is independent of `credentials` (reading and
+//!   using credentials) and of `methods` (forwarding). Adding or broadening a
+//!   pattern widens what the key can do.
 //! * `["*"]` is unrestricted, spelled out. `[]` means nothing is allowed.
 //!   There is no "unset means everything" state anywhere: a key must be given
 //!   both lists when it is created, and a legacy key without them is
@@ -54,6 +61,9 @@ pub struct KeyPolicy {
     /// Credential name patterns that need a human's approval for this key;
     /// `["*"]` = every credential, `[]` = no extra requirement.
     pub approval: Vec<String>,
+    /// Credential name patterns this key may ask to have created in the
+    /// managed collection; `["*"]` = any name, `[]` = none.
+    pub create: Vec<String>,
 }
 
 impl KeyPolicy {
@@ -62,11 +72,13 @@ impl KeyPolicy {
         credentials: Vec<String>,
         methods: Vec<String>,
         approval: Vec<String>,
+        create: Vec<String>,
     ) -> FerroResult<Self> {
         Ok(Self {
             credentials: validate_credentials(credentials)?,
             methods: validate_methods(methods)?,
             approval: validate_approval(approval)?,
+            create: validate_create(create)?,
         })
     }
 
@@ -77,6 +89,7 @@ impl KeyPolicy {
         credentials: Patch<Vec<String>>,
         methods: Patch<Vec<String>>,
         approval: Patch<Vec<String>>,
+        create: Patch<Vec<String>>,
     ) -> FerroResult<Self> {
         let mut out = self.clone();
         if let Patch::Value(list) = credentials {
@@ -88,6 +101,9 @@ impl KeyPolicy {
         if let Patch::Value(list) = approval {
             out.approval = validate_approval(list)?;
         }
+        if let Patch::Value(list) = create {
+            out.create = validate_create(list)?;
+        }
         Ok(out)
     }
 
@@ -95,6 +111,12 @@ impl KeyPolicy {
     /// human's approval? (The vault item's own field is the other source.)
     pub fn requires_approval(&self, name: &str) -> bool {
         self.approval.iter().any(|p| wildcard_match(p, name))
+    }
+
+    /// Does the policy let the key ask for a credential called `name` to be
+    /// created?
+    pub fn allows_create(&self, name: &str) -> bool {
+        self.create.iter().any(|p| wildcard_match(p, name))
     }
 
     /// Does the policy let the key reference a credential called `name`?
@@ -137,7 +159,8 @@ impl KeyPolicy {
     /// pattern that this policy's patterns do not cover, or **removes or
     /// narrows an approval pattern** (one of ours that no approval pattern of
     /// the draft covers: the key could then use a credential without
-    /// asking). The pattern test is conservative and independent of the
+    /// asking), or **adds or broadens a `create` pattern** (a name the key
+    /// could not create before). The pattern test is conservative and independent of the
     /// vault: a pattern is covered if one of the other list's matches it
     /// read literally (its `*` characters as plain text), which holds exactly
     /// when every name the pattern can match is matched. So `uptime_a*` is
@@ -148,16 +171,18 @@ impl KeyPolicy {
             .any(|m| draft.allows_method(m) && !self.allows_method(m));
         let patterns_wider = draft.credentials.iter().any(|p| !self.allows_credential(p));
         let approval_weaker = self.approval.iter().any(|p| !draft.requires_approval(p));
-        methods_wider || patterns_wider || approval_weaker
+        let create_wider = draft.create.iter().any(|p| !self.allows_create(p));
+        methods_wider || patterns_wider || approval_weaker || create_wider
     }
 
-    /// `{ "credentials": [...], "methods": [...], "approval": [...] }`, as
+    /// `{ "credentials": [...], "methods": [...], "approval": [...], "create": [...] }`, as
     /// shown in API output and events.
     pub fn to_json(&self) -> Value {
         json!({
             "credentials": self.credentials,
             "methods": self.methods,
             "approval": self.approval,
+            "create": self.create,
         })
     }
 }
@@ -218,6 +243,11 @@ pub fn validate_credentials(patterns: Vec<String>) -> FerroResult<Vec<String>> {
 /// Validate the approval patterns: the same rules as the credential patterns.
 pub fn validate_approval(patterns: Vec<String>) -> FerroResult<Vec<String>> {
     validate_patterns("approval", patterns)
+}
+
+/// Validate the create patterns: the same rules as the credential patterns.
+pub fn validate_create(patterns: Vec<String>) -> FerroResult<Vec<String>> {
+    validate_patterns("create", patterns)
 }
 
 fn validate_patterns(field: &str, patterns: Vec<String>) -> FerroResult<Vec<String>> {
@@ -341,6 +371,8 @@ impl<'de> Visitor<'de> for ListVisitor {
     fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
         let hint = if self.0 == "approval" {
             "leave it out for no extra approval requirement, or send [\"*\"] to require approval for every credential"
+        } else if self.0 == "create" {
+            "leave it out so the key cannot create credentials, or send [\"*\"] to let it create any name"
         } else {
             "leave it out to keep the default, or send [\"*\"] to allow everything"
         };
@@ -417,6 +449,7 @@ list_fields!(
     stored_approval,
     "approval"
 );
+list_fields!(patch_create, required_create, stored_create, "create");
 
 /// For an optional nested object (`request`): absent is `None`, `null` is an
 /// error rather than another way of saying "absent".

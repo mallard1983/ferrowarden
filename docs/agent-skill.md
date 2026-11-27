@@ -114,6 +114,29 @@ Rules:
 
 ---
 
+## Creating a credential for a new service
+
+When you set up a service that needs a new account, you can ask Ferrowarden to **make the credential for you**. Ferrowarden generates the password, stores it, and gives you only a placeholder: you never see the password. Your key needs a `create` pattern that matches the name (otherwise `403`, `credential_create_out_of_scope`: tell the user), and a person has to approve **each** request.
+
+```json
+POST /v1/credentials
+{
+  "name": "agent_keycloak_admin",
+  "username": "admin",
+  "uris": ["https://keycloak.example.com"],
+  "generate": { "length": 32, "charset": "alphanumeric" }
+}
+```
+
+`uris` are the hosts the credential may be sent to. `generate.charset` is `alphanumeric` (default), `ascii`, `hex` or `base64url`; `length` is 16 to 128 (default 32). Add `"approval_required": true` if every later use of it should need a person's approval too. The answer is `201` with `{ "name": ..., "placeholder": "{{vault:agent_keycloak_admin}}" }`: use that placeholder in the request that sets the password at the service (for example `"password": "{{vault:agent_keycloak_admin}}"` in a `POST /v1/forward` body to the service's setup API).
+
+- The request is held up to a minute or more while the user decides. `403` with `"code": "approval_pending"` and an `approval_id`: tell the user to approve it in the Ferrowarden admin UI (the Approvals page), quoting the id, then **retry the identical request**. `"code": "approval_denied"`: stop and tell the user what was refused.
+- `409` (`credential_exists`): that name is taken; choose another. `503` (`managed_collection_unavailable`): the operator has to fix the collection; tell the user. `403` (`credential_create_disabled`): creating is not set up.
+- An approval is for **exactly that request**, once. Changing the username, the URIs or the generation options is a new request that needs a new approval.
+- The password is never returned. Do not ask a service to echo it.
+
+---
+
 ## Placeholder Syntax
 
 Use placeholders anywhere inside the `url` (path/query), header values, or `body` field. The simplest way to get them right: call `GET /v1/credentials?detail=true` and **copy the placeholder strings it returns** — they are already correctly quoted.
@@ -244,6 +267,9 @@ All errors return `{"error": "message"}` with an appropriate HTTP status. The an
 | `403 Forbidden` (`"code": "approval_pending"`) | A human has to approve this credential and nobody has yet. The answer has an `approval_id` | Tell the user to approve it in the Ferrowarden admin UI (Approvals page), quoting the `approval_id`. When they say it is done, **retry the same request**. Do not try other credentials, hosts or methods |
 | `403 Forbidden` (`"code": "approval_denied"`) | A human refused this credential | Stop. Do not retry and do not look for another way. Tell the user what was refused |
 | `429 Too Many Requests` (`"code": "approval_limit_reached"`) | Your key has too many open or recent approval requests | Do not retry now; tell the user and wait until they have decided or the requests expired |
+| `403 Forbidden` (`"code": "credential_create_out_of_scope"` or `"credential_create_disabled"`) | Your key may not create that name, or creating is not set up | Do not try other names to get around it. Tell the user |
+| `409 Conflict` (`"code": "credential_exists"`) | A credential with that name exists | Choose another name |
+| `503 Service Unavailable` (`"code": "managed_collection_unavailable"`) | The place where new credentials are stored cannot be written to | Tell the user; the operator has to fix it |
 | `403 Forbidden` ("captured from another origin") | `Session <name> may not be sent to <host>`: that session was captured at a different scheme, host or port | Do not try to work around it. Log in to this host with its own `capture`, or tell the user |
 | `409 Conflict` | The credential name matches more than one vault item, or the field name appears twice on the item | Tell the user; the operator must rename one of them |
 | `422 Unprocessable Entity` | Malformed placeholder, unknown credential, or a value/field the item doesn't have | Call `GET /v1/credentials?detail=true` and copy a placeholder from it |
@@ -281,6 +307,7 @@ When you need to make an API call that requires credentials:
 3. Call `POST /v1/forward` with the appropriate `{{vault:name}}` placeholder.
 4. Use the returned `status`, `headers`, and `body` as you would use any HTTP response.
 5. If the service needs a login first, add `capture` to the login request and use `{{session:name}}` afterwards.
+6. If you are setting up a new service that needs a new account, ask for the credential with `POST /v1/credentials` (a person approves it) and use the placeholder it returns: see "Creating a credential for a new service".
 
 A machine-readable description of this API is available too: `GET /v1/openapi.json` with your `X-Agent-Key` returns an OpenAPI 3.1 document listing the operations you can call.
 

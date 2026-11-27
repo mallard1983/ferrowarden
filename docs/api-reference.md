@@ -6,7 +6,7 @@ This page is the narrative reference. The machine-readable description of the sa
 
 All requests require an authentication header. The header name depends on the endpoint:
 
-- **Agent endpoints** (`/v1/credentials`, `/v1/forward`, `/v1/sessions`, `/v1/openapi.json`): `X-Agent-Key: <token>`
+- **Agent endpoints** (`GET` and `POST /v1/credentials`, `/v1/forward`, `/v1/sessions`, `/v1/openapi.json`): `X-Agent-Key: <token>`
 - **Admin endpoints** (`/v1/admin/*`, `/v1/unlock`): `X-Admin-Key: <key>`
 
 `GET /health` needs no authentication.
@@ -82,6 +82,59 @@ Each key is present only when that value exists on the item. `bound_to` lists th
 | `400 Bad Request` | Unknown query parameter (only `detail` is accepted), or `detail` given more than once (authenticated requests only) |
 | `401 Unauthorized` | Missing or invalid agent key |
 | `503 Service Unavailable` | Vault is locked |
+
+---
+
+### `POST /v1/credentials`
+
+Ask Ferrowarden to **create** a credential: a login in the operator's managed collection, with a password Ferrowarden generates. The agent gets a name and a placeholder, never the password. The key needs a matching `create` pattern ([Key policy](#key-policy)), and a human has to approve every request. The full description, with the order of the checks, the charsets and a walkthrough, is [managed-credentials.md](managed-credentials.md).
+
+**Request Body**
+```json
+{
+  "name": "agent_keycloak_admin",
+  "username": "admin",
+  "uris": ["https://keycloak.example.com"],
+  "generate": { "length": 32, "charset": "alphanumeric" },
+  "approval_required": false
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | 1-128 characters, no control characters; must match one of the key's `create` patterns |
+| `username` | string | no | 1-256 characters |
+| `uris` | array of strings | yes | 1-16 absolute `http` or `https` URLs, each passing the outbound target policy; the credential's host bindings |
+| `generate` | object | yes | `length` (16-128, default 32) and `charset` (`alphanumeric` (default), `ascii`, `hex`, `base64url`); `{}` is all defaults |
+| `approval_required` | boolean | no | Default `false`. `true` adds a `ferrowarden_approval` field to the new item, so each use of it needs approval too |
+
+`ascii` is letters, digits and `-_.~!@#%^*+=:,` (chosen to avoid the characters that most often need quoting: no quotes, backslash, `$`, backtick, space, `&`, `;`, `|`, `<`, `>`; the value still has to be quoted where `*`, `!`, `#` or `%` matter). The body is strict JSON: unknown fields and `null` are rejected.
+
+**Response `201 Created`**
+```json
+{ "name": "agent_keycloak_admin", "placeholder": "{{vault:agent_keycloak_admin}}", "cache_refreshed": true }
+```
+
+Never the value. `cache_refreshed` is `false` when the item was written but the cache could not be refreshed: the placeholder works after the next refresh.
+
+**Errors.** Each of these carries a stable `code` in the body:
+
+| Status | `code` | Condition |
+|---|---|---|
+| `400` | | The body is invalid (strict JSON, a field out of range, a URI that is not absolute `http`/`https`) |
+| `401` | | No valid agent key |
+| `403` | `credential_create_out_of_scope` | No `create` pattern of the key matches the name |
+| `403` | `credential_create_disabled` | `vault.managed.collection` is not set |
+| `403` | | A URI is blocked by the outbound target policy |
+| `403` | `approval_pending` | Nobody decided in time (with `approval_id`): ask your human, then **retry the identical request** |
+| `403` | `approval_denied` | A human said no |
+| `409` | `credential_exists` | A vault item with that name exists (checked against a fresh sync, before any prompt) |
+| `429` | `approval_limit_reached` | The key has too many open or recent approval requests |
+| `502` | `vault_write_failed` | Vaultwarden did not accept the write; nothing was created |
+| `503` | `managed_collection_unavailable` | The collection cannot be written to; `reason` is `not_found`, `read_only`, `hides_passwords`, `ambiguous_name` or `no_organization_key` |
+| `503` | | The vault is locked or unreachable |
+
+The request is held up to `approval.wait_secs` (60 s by default) while a person decides, like a forward ([Approvals](#approvals)). A client needs a read timeout above it. Emits a `credential_create` event.
 
 ---
 
@@ -209,6 +262,8 @@ The answers the agent can get, besides the target's own response:
   "code": "approval_pending", "approval_id": "2m3x8Qk0Zr1YtV5pUa9bLw" }
 ```
 
+The same holds for a request to [create a credential](#post-v1credentials): its approval is of the `create` kind and covers that one operation once, not a timed grant.
+
 `403 approval_pending` means nobody decided in time: the approval stays open, so after a person approves it **retrying the same request** passes. `403 approval_denied` means stop. `429 approval_limit_reached` means do not retry now. A client needs a read timeout above `approval.wait_secs` (up to 300 seconds) plus the forward time. See [approvals.md](approvals.md).
 
 ### Captured sessions
@@ -292,8 +347,9 @@ Every agent key carries a policy, set when the key is created and changed with `
 | `methods` | List of allowed HTTP methods: `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`. Case-insensitive on input, returned upper case. |
 
 | `approval` | Optional list of patterns, matched like `credentials`: a credential whose name matches needs a human's approval before this key can use it ([approvals.md](approvals.md)). `[]` (the default when left out) adds no requirement. A vault item that carries a `ferrowarden_approval` field needs approval whatever this list says. |
+| `create` | Optional list of patterns, matched like `credentials`: the names this key may ask Ferrowarden to **create** in the managed collection with `POST /v1/credentials` ([managed-credentials.md](managed-credentials.md)). `[]` (the default when left out) means the key cannot create anything. It is its own permission, independent of `credentials` and `methods`. Adding or broadening a pattern widens the key's access. |
 
-**`credentials` and `methods` are required when creating a key. There is no default access.** `approval` is the one optional list: it only adds a requirement, and a key without it (including every key from 0.2.0) has none.
+**`credentials` and `methods` are required when creating a key. There is no default access.** `approval` and `create` are optional: `approval` only adds a requirement, `create` is off unless given, and a key without them (including every key from 0.2.0) has `[]` for both.
 
 | Value | Meaning |
 |---|---|
@@ -328,6 +384,8 @@ Create a new agent API key with an explicit policy.
 | `name` | string | yes | 1-128 characters |
 | `credentials` | array of strings | yes | Credential name patterns. `["*"]` = all, `[]` = none |
 | `methods` | array of strings | yes | Allowed methods. `["*"]` = all, `[]` = none |
+| `approval` | array of strings | no | Names that need approval for this key (default `[]`) |
+| `create` | array of strings | no | Names this key may create in the managed collection (default `[]`) |
 
 **Response `201 Created`**
 ```json
@@ -377,7 +435,7 @@ List all active agent keys with their policies. Token values are never included.
 
 Change a key's policy. The new policy applies to the very next request made with that key's token. The token stays the same.
 
-**Request Body**: any of `credentials`, `methods` and `approval`.
+**Request Body**: any of `credentials`, `methods`, `approval` and `create`.
 ```json
 { "credentials": ["uptime_kuma_*", "lab_*"] }
 ```
@@ -418,14 +476,14 @@ Show what a draft policy would allow for an existing key, **without saving anyth
 }
 ```
 
-`credentials`, `methods` and `approval` are the draft policy; a field left out means the key's saved value, and `null` is rejected. `request` has exactly the shape of `/v1/forward`'s `request` (same strictness) and asks "would this request be allowed under the draft?".
+`credentials`, `methods`, `approval` and `create` are the draft policy; a field left out means the key's saved value, and `null` is rejected. `request` has exactly the shape of `/v1/forward`'s `request` (same strictness) and asks "would this request be allowed under the draft?".
 
 **Response `200 OK`**
 ```json
 {
   "key": { "id": "550e8400-...", "name": "homelab-agent", "policy_set": true },
-  "saved_policy": { "credentials": ["*"], "methods": ["*"], "approval": [] },
-  "draft_policy": { "credentials": ["uptime_kuma_*"], "methods": ["GET"], "approval": [] },
+  "saved_policy": { "credentials": ["*"], "methods": ["*"], "approval": [], "create": [] },
+  "draft_policy": { "credentials": ["uptime_kuma_*"], "methods": ["GET"], "approval": [], "create": [] },
   "credentials": [ { "name": "uptime_kuma_api", "type": "login", "placeholder": "{{vault:uptime_kuma_api}}", "bound_to": ["https://uptime.lan"] } ],
   "gained": [],
   "lost": ["grafana_token", "proxmox_api_token"],
@@ -557,9 +615,18 @@ Current operational status.
   "locked": false,
   "vault_backend": "native",
   "credential_count": 12,
-  "agent_key_count": 2
+  "agent_key_count": 2,
+  "managed_collection": {
+    "configured": true,
+    "usable": true,
+    "id": "6c0d7f0e-52d0-4b5b-8a39-0e8a7f6d5c4b",
+    "name": "Ferrowarden managed",
+    "items": 3
+  }
 }
 ```
+
+`managed_collection` says whether `vault.managed.collection` is set (`configured`) and whether it can be written to now (`usable`), with its `name`, `id` and the number of readable `items` in it when it can. When it cannot, `setting` is what the operator configured and `reason` says why (`not_found`, `read_only`, `hides_passwords`, `ambiguous_name`, `no_organization_key`, or `vault_locked`), with a `message`. No secrets. See [managed-credentials.md](managed-credentials.md).
 
 `vault_backend` is always `native` (`vault.backend`, [native-vault.md](native-vault.md)); the field stays so that dashboards and SIEM rules keep working.
 
