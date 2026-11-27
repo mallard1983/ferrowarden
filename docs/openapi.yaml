@@ -225,7 +225,7 @@ paths:
                     code: credential_create_out_of_scope
                 disabled:
                   value:
-                    error: "Creating credentials is switched off: no managed collection is configured (vault.managed.collection)"
+                    error: "Creating and rotating credentials is switched off: no managed collection is configured (vault.managed.collection)"
                     code: credential_create_disabled
                 approvalPending:
                   summary: Waiting for a human; retry the identical request after they approve
@@ -277,7 +277,7 @@ paths:
               examples:
                 writeFailed:
                   value:
-                    error: The credential could not be written to the vault; nothing was created. Try again later.
+                    error: The credential could not be written to the vault; nothing was created or changed. Try again later.
                     code: vault_write_failed
         "503":
           description: |
@@ -298,6 +298,321 @@ paths:
                     error: "The managed collection cannot be written to right now: the account has only view access to the managed collection (it needs Can edit)"
                     code: managed_collection_unavailable
                     reason: read_only
+  /v1/credentials/{name}/rotate:
+    parameters:
+      - $ref: "#/components/parameters/CredentialNamePath"
+    post:
+      operationId: rotateCredential
+      tags: [agent]
+      summary: Start rotating a credential's password
+      description: |
+        Starts a **two-phase rotation** of the password of a credential that is in the operator's **managed collection**. Ferrowarden generates a new password from the operating system's random generator and stores it on the item as a **pending** value; the current password is not touched. `{{vault:name}}` is still the current password and `{{vault:name:next}}` is the new one. **No value is ever returned**: use the placeholders in forward requests, for example to call the service's own change-password endpoint, signing in with `{{vault:name}}` and sending `{{vault:name:next}}`. Then finish with `commitCredentialRotation`, or throw the pending value away with `abortCredentialRotation`. See `docs/managed-credentials.md`.
+
+        `{name}` is the credential's name, URL-encoded: every character that is not a letter, a digit or one of `-` `_` `.` `~` is written as `%XX`, so a space is `%20` and a `/` is `%2F`.
+
+        The key needs a `rotate` pattern that matches the name, and the name must be in the key's `credentials` scope. That permission is separate from `create`, `credentials` and `methods`. Only a **login** that has a password, no master password re-prompt and a name that is unique in the vault, **in the managed collection**, can be rotated. Items need not have been created by Ferrowarden: a person can move an existing item into the managed collection to put it under agent maintenance.
+
+        Checks run in this order, each before the next, and **nothing is generated or written until a human has approved**: the key is valid (`401`); the body is strict JSON, or left out (`400`); the key's `rotate` patterns match the name (`403` `credential_rotate_out_of_scope`); rotating is switched on (`403` `credential_create_disabled`) and the managed collection can be written to (`503` `managed_collection_unavailable`); a fresh sync finds the item (`403` `credential_not_managed`, the same answer whether the name exists elsewhere in the vault or not at all, and for a name outside the key's `credentials` scope; `409` when two items share the name; `422` `credential_not_rotatable` for anything but a login with a password and no re-prompt); no rotation is pending on it already (`409` `rotation_in_progress`); a human approves this one operation (below); then the value is generated, encrypted and written.
+
+        **Approval.** Every start needs a human's approval of exactly this operation (key, item, name, generation options). The request is held for up to the operator's `approval.wait_secs` (60 seconds by default). If a person approves, the rotation starts and the answer is `202`. If they deny, the answer is `403` with `code` `approval_denied`: stop, and tell your human. If nobody has decided when the wait ends, the answer is `403` with `code` `approval_pending` and an `approval_id`: ask your human to approve it, then **retry the identical request**. An approval covers one start once; committing or aborting needs no second approval. A client of this operation needs a read timeout above the operator's `approval.wait_secs`, up to 300 seconds.
+
+        **Conflicts.** Every write names the revision of the item that was read. If a person changed the item in the meantime, the answer is `409` `vault_conflict`, and **nothing is overwritten**: read the credential again and retry.
+      security:
+        - agentKey: []
+      requestBody:
+        required: false
+        description: Optional. Leave it out (or send `{}`) for the defaults.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RotateCredentialRequest"
+            examples:
+              defaults:
+                summary: A new 32-character alphanumeric password
+                value: {}
+              options:
+                summary: Choose the length and the characters
+                value:
+                  generate:
+                    length: 24
+                    charset: ascii
+      responses:
+        "202":
+          description: The rotation started. The new password is pending on the item. The body has the placeholders, never a value.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RotateStarted"
+              examples:
+                started:
+                  value:
+                    name: agent_keycloak_svc
+                    current: "{{vault:agent_keycloak_svc}}"
+                    next: "{{vault:agent_keycloak_svc:next}}"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            Refused. `code` says why: `credential_rotate_out_of_scope` (the key has no `rotate` pattern for this name), `credential_not_managed` (the item is not in the managed collection, or does not exist, or is outside the key's `credentials` scope), `credential_create_disabled` (the operator has not set `vault.managed.collection`), `approval_denied` (a human said no: stop and tell them) or `approval_pending` (not decided yet: retry the identical request after your human approves, quoting `approval_id`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                outOfScope:
+                  value:
+                    error: This agent key may not rotate a credential called agent_keycloak_svc
+                    code: credential_rotate_out_of_scope
+                notManaged:
+                  value:
+                    error: There is no credential called other_name in the managed collection, so it cannot be rotated
+                    code: credential_not_managed
+                approvalPending:
+                  summary: Waiting for a human; retry the identical request after they approve
+                  value:
+                    error: "Approval required: a human has to approve this request. Ask your human to approve approval 2m3x8Qk0Zr1YtV5pUa9bLw, then retry the same request."
+                    code: approval_pending
+                    approval_id: 2m3x8Qk0Zr1YtV5pUa9bLw
+        "409":
+          description: |
+            `rotation_in_progress` (a rotation is already pending on the item: commit or abort it first), `vault_conflict` (a person changed the item while it was being rotated, or it needs a person to fix it: nothing was overwritten) or, without a `code`, two vault items share the name.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                inProgress:
+                  value:
+                    error: "A rotation of agent_keycloak_svc is already in progress: commit it or abort it first"
+                    code: rotation_in_progress
+        "422":
+          description: "`credential_not_rotatable`: the item is not a login, has no password, or has master password re-prompt turned on."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: |
+            Either the per-IP rate limit was exceeded (a plain-text body, with a `Retry-After` header), or this agent key has too many open or recent approval requests (`code` `approval_limit_reached`, a JSON body).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: Rate limit exceeded. See the Retry-After header.
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: The vault refused or failed the write (`code` `vault_write_failed`). Nothing was changed. The generated value is gone; a retry needs a new approval.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: |
+            The vault is locked or Vaultwarden cannot be reached, or the managed collection cannot be written to (`code` `managed_collection_unavailable`, with a `reason`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/credentials/{name}/rotate/commit:
+    parameters:
+      - $ref: "#/components/parameters/CredentialNamePath"
+    post:
+      operationId: commitCredentialRotation
+      tags: [agent]
+      summary: Make the pending password the password
+      description: |
+        Finishes a rotation: the pending new password becomes the password, the old password goes to the item's **password history** (newest first, at most five entries are kept), the item's password-changed date is set, and the pending value is removed. Do this after the new password has been set at the service. **No second approval**: the approval of the start covered the rotation. The body is empty (or `{}`).
+
+        The same policy and item checks as the start apply (`403` `credential_rotate_out_of_scope`, `403` `credential_not_managed`, `422` `credential_not_rotatable`). `409` `no_rotation_pending` when none was started. If a person changed the item since the rotation started, the answer is `409` `vault_conflict`, and **nothing is overwritten**: read the credential again and retry; the pending value is still there. A pending value that cannot be read back fails closed the same way (a person has to fix the item, or abort the rotation).
+      security:
+        - agentKey: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: The new password is now the password. The body has the name and its placeholder, never a value.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RotateFinished"
+              examples:
+                committed:
+                  value:
+                    name: agent_keycloak_svc
+                    placeholder: "{{vault:agent_keycloak_svc}}"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "`credential_rotate_out_of_scope`, `credential_not_managed` or `credential_create_disabled`."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: |
+            `no_rotation_pending`, `vault_conflict` (someone changed the item: nothing was overwritten), or, without a `code`, two vault items share the name.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                noRotation:
+                  value:
+                    error: "No rotation of agent_keycloak_svc is pending: start one first"
+                    code: no_rotation_pending
+                conflict:
+                  value:
+                    error: "Someone changed the item in the vault while it was being rotated, or it needs a person to fix it. Nothing was overwritten: re-read the credential and try again."
+                    code: vault_conflict
+        "422":
+          description: "`credential_not_rotatable`."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          description: The vault refused or failed the write (`code` `vault_write_failed`). Nothing was changed.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The vault is locked or unreachable, or the managed collection cannot be written to (`code` `managed_collection_unavailable`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/credentials/{name}/rotate/abort:
+    parameters:
+      - $ref: "#/components/parameters/CredentialNamePath"
+    post:
+      operationId: abortCredentialRotation
+      tags: [agent]
+      summary: Throw the pending password away
+      description: |
+        Aborts a rotation: the pending new password is removed and **nothing else changes**; the password is the one it was. Use it when changing the password at the service failed. **No approval.** The body is empty (or `{}`). The same checks and answers as `commitCredentialRotation` apply.
+      security:
+        - agentKey: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: The pending password was removed.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RotateFinished"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "`credential_rotate_out_of_scope`, `credential_not_managed` or `credential_create_disabled`."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: "`no_rotation_pending`, `vault_conflict`, or, without a `code`, two vault items share the name."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "`credential_not_rotatable`."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          description: The vault refused or failed the write (`code` `vault_write_failed`). Nothing was changed.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The vault is locked or unreachable, or the managed collection cannot be written to (`code` `managed_collection_unavailable`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/forward:
     post:
       operationId: forwardRequest
@@ -1051,7 +1366,7 @@ paths:
 
         A `forward` approval takes `{ "minutes": N }` (1 to `approval.max_grant_minutes`). The grant covers the approval's agent key, its credentials and its target origin until it ends. Requests held on the approval proceed at once, and a request retried within the grant passes.
 
-        A `create` approval takes **no body** (an empty body, or `{}`): it has no duration. It allows exactly one operation, the one it was opened for. The request held on it proceeds at once, or, if none is held any more, the agent's identical retry within `approval.pending_ttl_secs` uses it up. It never becomes a grant. A body with `minutes` is a `400`.
+        A `create` or `rotate` approval takes **no body** (an empty body, or `{}`): it has no duration. It allows exactly one operation, the one it was opened for. The request held on it proceeds at once, or, if none is held any more, the agent's identical retry within `approval.pending_ttl_secs` uses it up. It never becomes a grant. A body with `minutes` is a `400`.
 
         The approver is recorded as `admin_api`. An agent key cannot call this: it is refused like any request without the admin key. An approval that is no longer pending (decided, expired or cleared) is `409` and nothing changes.
       security:
@@ -1159,6 +1474,98 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429":
           $ref: "#/components/responses/RateLimited"
+  /v1/admin/credentials/{name}/rotate/abort:
+    parameters:
+      - $ref: "#/components/parameters/CredentialNamePath"
+    post:
+      operationId: adminAbortCredentialRotation
+      tags: [admin]
+      summary: Clear a stuck rotation
+      description: |
+        Removes the pending new password of a credential in the managed collection, for an operator: a rotation that an agent started and never committed or aborted. The current password is unchanged. Only the managed collection is checked (an operator is not an agent key, so there is no `rotate` pattern to match). The body is empty (or `{}`). `409` `vault_conflict` if someone changed the item since the rotation started (nothing is overwritten: try again). `{name}` is URL-encoded like `rotateCredential`'s.
+      security:
+        - adminKey: []
+        - adminBearer: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: The pending password was removed.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, name]
+                properties:
+                  status:
+                    type: string
+                    const: aborted
+                  name:
+                    type: string
+              examples:
+                aborted:
+                  value:
+                    status: aborted
+                    name: agent_keycloak_svc
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "`credential_not_managed`: the credential is not in the managed collection, or does not exist."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: "`no_rotation_pending`, `vault_conflict`, or, without a `code`, two vault items share the name."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "`credential_not_rotatable`."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          description: The vault refused or failed the write (`code` `vault_write_failed`). Nothing was changed.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The vault is locked or unreachable, or the managed collection cannot be written to.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
   securitySchemes:
     agentKey:
@@ -1201,6 +1608,15 @@ components:
       description: The id of a grant, as returned by `listApprovals` and `approveApproval`.
       schema:
         type: string
+    CredentialNamePath:
+      name: name
+      in: path
+      required: true
+      description: The credential's name, URL-encoded (every character other than a letter, a digit or `-` `_` `.` `~` as `%XX`; a space is `%20`, a `/` is `%2F`).
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
     KeyId:
       name: id
       in: path
@@ -1311,7 +1727,7 @@ components:
           description: A human-readable description.
         code:
           type: string
-          description: A stable code, present on the answers about a human's approval and on the answers of `createCredential`. Match on this, not on the message.
+          description: A stable code, present on the answers about a human's approval and on the answers of `createCredential` and the rotation operations. Match on this, not on the message.
           enum:
             - approval_pending
             - approval_denied
@@ -1321,6 +1737,12 @@ components:
             - credential_exists
             - managed_collection_unavailable
             - vault_write_failed
+            - credential_rotate_out_of_scope
+            - credential_not_managed
+            - credential_not_rotatable
+            - rotation_in_progress
+            - no_rotation_pending
+            - vault_conflict
         approval_id:
           type: string
           description: With `approval_pending`, the id of the approval the human has to decide. Quote it when you ask them.
@@ -1371,6 +1793,12 @@ components:
         placeholder:
           type: string
           description: Placeholder for the item's password.
+        next:
+          type: string
+          description: Placeholder for the pending new password of a rotation that was started and has not been committed or aborted. Present only then; use it to set the new password at the service.
+        rotation_pending:
+          type: boolean
+          description: "`true` (present only then) when a rotation of this credential was started and is waiting to be committed or aborted."
         username:
           type: string
           description: Placeholder for the login username.
@@ -1637,6 +2065,65 @@ components:
         cache_refreshed:
           type: boolean
           description: "`false` when the item was written but the credential cache could not be refreshed afterwards: the placeholder works once the next refresh has run."
+    RotatePatterns:
+      type: array
+      maxItems: 256
+      description: |
+        Credential name patterns this key may ask Ferrowarden to **rotate** in the managed collection, with the same syntax, limits and matching as `credentials`. `["*"]` allows any name and `[]` allows none (the default, and what a key from before rotating existed has). It is its own permission: it is independent of `create`, `credentials` and `methods`, and it only ever applies to items in the managed collection. `null` is rejected. Adding or broadening a pattern gives the key more access, so the admin UI asks for confirmation.
+      items:
+        type: string
+        minLength: 1
+        maxLength: 256
+        description: A pattern, without control characters.
+    RotateCredentialRequest:
+      type: object
+      additionalProperties: false
+      description: The optional body of `rotateCredential`. `null` is rejected.
+      properties:
+        generate:
+          $ref: "#/components/schemas/GenerateOptions"
+    RotateStarted:
+      type: object
+      required: [name, current, next]
+      description: A rotation was started. There is no value in it.
+      properties:
+        name:
+          type: string
+        current:
+          type: string
+          description: The placeholder for the current password, which is unchanged until the rotation is committed.
+        next:
+          type: string
+          description: The placeholder for the new, pending password. It works only while the rotation is pending.
+    RotateFinished:
+      type: object
+      required: [name, placeholder]
+      description: A rotation was committed or aborted. There is no value in it.
+      properties:
+        name:
+          type: string
+        placeholder:
+          type: string
+          description: The placeholder for the password (the new one after a commit).
+    RotateApproval:
+      type: object
+      required: [name, generate, collection]
+      description: What a `rotate` approval is for. Present on `rotate` approvals only.
+      properties:
+        name:
+          type: string
+        generate:
+          type: object
+          required: [charset, length]
+          properties:
+            charset:
+              type: string
+              enum: [alphanumeric, ascii, hex, base64url]
+            length:
+              type: integer
+        collection:
+          type: string
+          description: The name of the managed collection the item is in.
     MethodList:
       type: array
       maxItems: 256
@@ -1649,7 +2136,7 @@ components:
       type: object
       description: |
         What an agent key may do. A policy has no default: a key must be given both lists, and a key without a policy (created with 0.1.0) is deny-all until one is set. `["*"]` means everything and `[]` means nothing in both lists. `null` is never accepted.
-      required: [credentials, methods, approval, create]
+      required: [credentials, methods, approval, create, rotate]
       properties:
         credentials:
           $ref: "#/components/schemas/CredentialPatterns"
@@ -1659,11 +2146,13 @@ components:
           $ref: "#/components/schemas/ApprovalPatterns"
         create:
           $ref: "#/components/schemas/CreatePatterns"
+        rotate:
+          $ref: "#/components/schemas/RotatePatterns"
     CreateKeyRequest:
       type: object
       additionalProperties: false
       required: [name, credentials, methods]
-      description: The body of `createKey`. `credentials` and `methods` are required; `approval` and `create` are optional and default to `[]`.
+      description: The body of `createKey`. `credentials` and `methods` are required; `approval`, `create` and `rotate` are optional and default to `[]`.
       properties:
         name:
           type: string
@@ -1678,9 +2167,11 @@ components:
           $ref: "#/components/schemas/ApprovalPatterns"
         create:
           $ref: "#/components/schemas/CreatePatterns"
+        rotate:
+          $ref: "#/components/schemas/RotatePatterns"
     CreateKeyResponse:
       type: object
-      required: [id, name, token, created_at, credentials, methods, approval, create, policy_set]
+      required: [id, name, token, created_at, credentials, methods, approval, create, rotate, policy_set]
       description: The new key. `token` appears here and nowhere else.
       properties:
         id:
@@ -1702,12 +2193,14 @@ components:
           $ref: "#/components/schemas/ApprovalPatterns"
         create:
           $ref: "#/components/schemas/CreatePatterns"
+        rotate:
+          $ref: "#/components/schemas/RotatePatterns"
         policy_set:
           type: boolean
           description: Always `true` for a key created through the API.
     KeySummary:
       type: object
-      required: [id, name, created_at, credentials, methods, approval, create, policy_set]
+      required: [id, name, created_at, credentials, methods, approval, create, rotate, policy_set]
       description: An agent key without its token.
       properties:
         id:
@@ -1725,6 +2218,8 @@ components:
           $ref: "#/components/schemas/ApprovalPatterns"
         create:
           $ref: "#/components/schemas/CreatePatterns"
+        rotate:
+          $ref: "#/components/schemas/RotatePatterns"
         policy_set:
           type: boolean
           description: "`false` for a key created with 0.1.0 that has no policy yet. It is deny-all (`[]` and `[]`) until a policy is set with `updateKeyPolicy`."
@@ -1742,6 +2237,8 @@ components:
           $ref: "#/components/schemas/ApprovalPatterns"
         create:
           $ref: "#/components/schemas/CreatePatterns"
+        rotate:
+          $ref: "#/components/schemas/RotatePatterns"
     PreviewRequest:
       type: object
       additionalProperties: false
@@ -1755,6 +2252,8 @@ components:
           $ref: "#/components/schemas/ApprovalPatterns"
         create:
           $ref: "#/components/schemas/CreatePatterns"
+        rotate:
+          $ref: "#/components/schemas/RotatePatterns"
         request:
           $ref: "#/components/schemas/ProxyRequest"
     ApprovalNeed:
@@ -1851,17 +2350,19 @@ components:
       type: object
       required: [id, kind, key, credentials, request_id, created_at, expires_at]
       description: |
-        An approval waiting for a decision. A `forward` approval shows the request as the agent sent it (placeholders, never values), has `method`, `origin` and `url`, and approving it gives a grant. A `create` approval shows what the agent asked to have created, in `create`, has no method, origin or URL, and allows exactly one operation. There is never a value in either: a create's password has not been generated yet.
+        An approval waiting for a decision. A `forward` approval shows the request as the agent sent it (placeholders, never values), has `method`, `origin` and `url`, and approving it gives a grant. A `create` approval shows what the agent asked to have created, in `create`, has no method, origin or URL, and allows exactly one operation. A `rotate` approval shows which credential's password the agent asked to rotate, in `rotate`, and is the same kind of one-operation approval. There is never a value in any of them: a create's or a rotation's password has not been generated yet.
       properties:
         id:
           type: string
           description: "An unguessable id. It is not a capability, so knowing it decides nothing: deciding needs the admin key here, or a signed-in session in the UI."
         kind:
           type: string
-          enum: [forward, create]
-          description: "`forward`: use credentials that need approval (approving gives a grant for a chosen duration). `create`: create a credential (approving allows that one operation, once, and has no duration)."
+          enum: [forward, create, rotate]
+          description: "`forward`: use credentials that need approval (approving gives a grant for a chosen duration). `create`: create a credential. `rotate`: rotate a credential's password. Approving a `create` or a `rotate` allows that one operation, once, and has no duration."
         create:
           $ref: "#/components/schemas/CreateApproval"
+        rotate:
+          $ref: "#/components/schemas/RotateApproval"
         key:
           type: object
           required: [id, name]
@@ -1991,7 +2492,7 @@ components:
       type: object
       additionalProperties: false
       required: [minutes]
-      description: The body of `approveApproval` for a `forward` approval. There is no default length. A `create` approval takes no body (an empty body or `{}`); a `minutes` there is a `400`.
+      description: The body of `approveApproval` for a `forward` approval. There is no default length. A `create` or `rotate` approval takes no body (an empty body or `{}`); a `minutes` there is a `400`.
       properties:
         minutes:
           type: integer
@@ -2000,14 +2501,14 @@ components:
     ApproveResponse:
       type: object
       required: [status, kind]
-      description: The answer of `approveApproval`. A `forward` approval answers with its grant; a `create` approval has none.
+      description: The answer of `approveApproval`. A `forward` approval answers with its grant; a `create` or `rotate` approval has none.
       properties:
         status:
           type: string
           const: approved
         kind:
           type: string
-          enum: [forward, create]
+          enum: [forward, create, rotate]
         grant:
           $ref: "#/components/schemas/ApprovalGrant"
     DecisionResponse:

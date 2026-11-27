@@ -301,7 +301,7 @@ pub struct Created {
 /// Sync with the vault, so that what is checked next is not stale. A sync that
 /// fails is an error here (unlike a background refresh, which falls back to
 /// its cached copy): a name must not be checked against a copy that may be old.
-async fn fresh(state: &AppState) -> FerroResult<()> {
+pub(crate) async fn fresh(state: &AppState) -> FerroResult<()> {
     match state.vault.sync().await {
         Ok(()) => {}
         Err(FerroError::VaultLocked) => return Err(FerroError::VaultLocked),

@@ -79,6 +79,8 @@ pub struct CreateKeyResponse {
     pub approval: Vec<String>,
     /// Credential name patterns the key may create in the managed collection.
     pub create: Vec<String>,
+    /// Credential name patterns the key may rotate in the managed collection.
+    pub rotate: Vec<String>,
     pub policy_set: bool,
 }
 
@@ -97,6 +99,9 @@ pub struct KeySummary {
     /// Credential name patterns the key may create in the managed collection
     /// (`["*"]` = any name, `[]` = none).
     pub create: Vec<String>,
+    /// Credential name patterns the key may rotate in the managed collection
+    /// (`["*"]` = any name, `[]` = none).
+    pub rotate: Vec<String>,
     /// False for a key created with 0.1.0 that has no policy yet: it is
     /// deny-all until one is set with PATCH.
     pub policy_set: bool,
@@ -112,6 +117,7 @@ impl KeySummary {
             methods: k.policy.methods.clone(),
             approval: k.policy.approval.clone(),
             create: k.policy.create.clone(),
+            rotate: k.policy.rotate.clone(),
             policy_set: k.policy_set,
         }
     }
@@ -204,6 +210,7 @@ impl Preview {
 // ── Create ────────────────────────────────────────────────────────────────────
 
 /// Create a key. Emits `key_create`. The returned token is the only copy.
+#[allow(clippy::too_many_arguments)] // the caller, the name or id and the five policy lists
 pub async fn create_key(
     state: &Arc<AppState>,
     caller: Caller<'_>,
@@ -212,8 +219,9 @@ pub async fn create_key(
     methods: Vec<String>,
     approval: Vec<String>,
     create: Vec<String>,
+    rotate: Vec<String>,
 ) -> FerroResult<CreateKeyResponse> {
-    match create_key_inner(state, name, credentials, methods, approval, create).await {
+    match create_key_inner(state, name, credentials, methods, approval, create, rotate).await {
         Ok(created) => {
             // The token itself never leaves the response: only id + name.
             state.events.emit(
@@ -225,7 +233,8 @@ pub async fn create_key(
                     .detail("credentials", created.credentials.clone())
                     .detail("methods", created.methods.clone())
                     .detail("approval", created.approval.clone())
-                    .detail("create", created.create.clone()),
+                    .detail("create", created.create.clone())
+                    .detail("rotate", created.rotate.clone()),
             );
             Ok(created)
         }
@@ -248,6 +257,7 @@ async fn create_key_inner(
     methods: Vec<String>,
     approval: Vec<String>,
     create: Vec<String>,
+    rotate: Vec<String>,
 ) -> FerroResult<CreateKeyResponse> {
     let id = Uuid::new_v4().to_string();
     let token = generate_token();
@@ -261,7 +271,7 @@ async fn create_key_inner(
         ));
     }
 
-    let policy = KeyPolicy::from_raw(credentials, methods, approval, create)?;
+    let policy = KeyPolicy::from_raw(credentials, methods, approval, create, rotate)?;
 
     // Serialize key-file updates: without this, two concurrent creates (or a
     // create and a revoke) can each read the old file and drop the other's change.
@@ -307,6 +317,7 @@ async fn create_key_inner(
         methods: policy.methods,
         approval: policy.approval,
         create: policy.create,
+        rotate: policy.rotate,
         policy_set: true,
     })
 }
@@ -410,6 +421,7 @@ async fn revoke_key_inner(state: &Arc<AppState>, id: &str) -> FerroResult<String
 
 /// Replace the policy fields that are present; fields left out are unchanged.
 /// Emits `key_policy_change`.
+#[allow(clippy::too_many_arguments)] // the caller, the name or id and the five policy lists
 pub async fn patch_key(
     state: &Arc<AppState>,
     caller: Caller<'_>,
@@ -418,8 +430,9 @@ pub async fn patch_key(
     methods: Patch<Vec<String>>,
     approval: Patch<Vec<String>>,
     create: Patch<Vec<String>>,
+    rotate: Patch<Vec<String>>,
 ) -> FerroResult<PolicyChange> {
-    match patch_key_inner(state, id, credentials, methods, approval, create).await {
+    match patch_key_inner(state, id, credentials, methods, approval, create, rotate).await {
         Ok(change) => {
             state.events.emit(
                 caller
@@ -452,11 +465,16 @@ async fn patch_key_inner(
     methods: Patch<Vec<String>>,
     approval: Patch<Vec<String>>,
     create: Patch<Vec<String>>,
+    rotate: Patch<Vec<String>>,
 ) -> FerroResult<PolicyChange> {
-    if credentials.is_absent() && methods.is_absent() && approval.is_absent() && create.is_absent()
+    if credentials.is_absent()
+        && methods.is_absent()
+        && approval.is_absent()
+        && create.is_absent()
+        && rotate.is_absent()
     {
         return Err(FerroError::InvalidRequest(
-            "nothing to change: send `credentials`, `methods`, `approval` and/or `create`"
+            "nothing to change: send `credentials`, `methods`, `approval`, `create` and/or `rotate`"
                 .to_string(),
         ));
     }
@@ -472,7 +490,7 @@ async fn patch_key_inner(
         .map(|k| (k.name.clone(), k.policy.clone()))
         .ok_or(FerroError::AgentKeyNotFound)?;
     // Absent fields keep the current value; on a legacy key that is deny-all.
-    let after = before.patched(credentials, methods, approval, create)?;
+    let after = before.patched(credentials, methods, approval, create, rotate)?;
 
     // Persist first, so a failed write leaves memory and disk consistent. The
     // entry is saved with both fields explicit, which also marks a legacy key
@@ -523,7 +541,7 @@ async fn patch_key_inner(
 
 /// Show what a draft policy would allow, without saving anything, reading any
 /// credential value or sending anything. Emits `policy_preview`.
-#[allow(clippy::too_many_arguments)] // the id, the four policy lists and the request
+#[allow(clippy::too_many_arguments)] // the id, the five policy lists and the request
 pub async fn preview_key(
     state: &Arc<AppState>,
     caller: Caller<'_>,
@@ -532,9 +550,21 @@ pub async fn preview_key(
     methods: Patch<Vec<String>>,
     approval: Patch<Vec<String>>,
     create: Patch<Vec<String>>,
+    rotate: Patch<Vec<String>>,
     request: Option<&ProxyRequest>,
 ) -> FerroResult<Preview> {
-    match compute_preview(state, id, credentials, methods, approval, create, request).await {
+    match compute_preview(
+        state,
+        id,
+        credentials,
+        methods,
+        approval,
+        create,
+        rotate,
+        request,
+    )
+    .await
+    {
         Ok(preview) => {
             state.events.emit(
                 caller
@@ -561,6 +591,7 @@ pub async fn preview_key(
 
 /// [`preview_key`] without the event: for callers that need the diff as a
 /// step of another operation (the UI's "confirm a widening save" page).
+#[allow(clippy::too_many_arguments)] // the caller, the name or id and the five policy lists
 pub async fn compute_preview(
     state: &Arc<AppState>,
     id: &str,
@@ -568,6 +599,7 @@ pub async fn compute_preview(
     methods: Patch<Vec<String>>,
     approval: Patch<Vec<String>>,
     create: Patch<Vec<String>>,
+    rotate: Patch<Vec<String>>,
     request: Option<&ProxyRequest>,
 ) -> FerroResult<Preview> {
     let key = state
@@ -580,7 +612,7 @@ pub async fn compute_preview(
         .ok_or(FerroError::AgentKeyNotFound)?;
     let saved = key.policy.clone();
     // Absent fields fall back to the saved value.
-    let draft = saved.patched(credentials, methods, approval, create)?;
+    let draft = saved.patched(credentials, methods, approval, create, rotate)?;
 
     // Like GET /v1/credentials, but a locked vault is fine while a credential
     // cache exists: only names and metadata are used, never values.

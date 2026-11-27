@@ -4,7 +4,7 @@
 {% block content %}
 <h1>Approvals</h1>
 {% if let Some(message) = notice %}<p class="alert ok" role="status">{{ message }}</p>{% endif %}
-<p class="muted">An agent that uses a credential marked as needing approval, or asks to create one, waits here for a decision. Deciding needs a sign-in within the last 10 minutes.</p>
+<p class="muted">An agent that uses a credential marked as needing approval, or asks to create or rotate one, waits here for a decision. Deciding needs a sign-in within the last 10 minutes.</p>
 <h2>Waiting for a decision ({{ pending.len() }})</h2>
 {% if pending.is_empty() %}
 <p class="muted">Nothing is waiting.</p>
@@ -20,10 +20,38 @@
 <th scope="row">{{ p.key_name }}</th>
 <td data-label="Kind"><code>{{ p.kind }}</code></td>
 <td data-label="Credentials">{% for c in p.credentials %}<code>{{ c.name }}</code> {% endfor %}</td>
-<td data-label="Request">{% if p.is_create %}Create in <code>{{ p.collection }}</code>{% else %}<code>{{ p.method }}</code> {{ p.target }}<code>{{ p.path }}</code>{% endif %}</td>
+<td data-label="Request">{% if p.is_create %}Create in <code>{{ p.collection }}</code>{% else if p.is_rotate %}Rotate the password, in <code>{{ p.collection }}</code>{% else %}<code>{{ p.method }}</code> {{ p.target }}<code>{{ p.path }}</code>{% endif %}</td>
 <td data-label="Asked">{{ p.created }}</td>
 <td data-label="Open until">{{ p.expires }}</td>
 <td data-label="Actions"><span class="links"><a href="/ui/approvals/{{ p.id }}">Review</a></span></td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
+
+<h2>Rotations in progress ({{ rotations.len() }})</h2>
+{% if rotations.is_empty() %}
+<p class="muted">No rotation is pending. A rotation is pending between an agent starting it and committing or aborting it; abort one here if it is stuck, for instance because the agent went away. Aborting removes the pending new password and leaves the current one in place.</p>
+{% else %}
+<p class="muted">A rotation was started and has not been committed or aborted. If the agent has gone away, abort it: the pending new password is removed and the current password stays.</p>
+<div class="scroll">
+<table class="stack">
+<thead>
+<tr><th scope="col">Credential</th><th scope="col">Actions</th></tr>
+</thead>
+<tbody>
+{% for r in rotations %}
+<tr class="card-row">
+<th scope="row"><code>{{ r.name }}</code></th>
+<td data-label="Actions">
+<form method="post" action="/ui/rotations/abort" class="inline">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="name" value="{{ r.name }}">
+<button type="submit" class="secondary">Abort rotation</button>
+</form>
+</td>
 </tr>
 {% endfor %}
 </tbody>

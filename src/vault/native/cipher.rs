@@ -29,8 +29,9 @@ use super::keys::unwrap_sym_key;
 use super::totp;
 use crate::error::{FerroError, FerroResult};
 use crate::vault::model::{
-    approval_field_valid, is_approval_field_name, match_type_is_binding, split_uris, Builtin,
-    CredentialEntry, FieldInfo, FieldKind, ItemKind, BINDINGS_FIELD, CREATED_BY_FIELD,
+    approval_field_valid, is_approval_field_name, is_next_field_name, match_type_is_binding,
+    split_uris, Builtin, CredentialEntry, FieldInfo, FieldKind, ItemKind, BINDINGS_FIELD,
+    CREATED_BY_FIELD, NEXT_FIELD,
 };
 
 /// Every key needed to read the vault. Wiped on drop; never printed.
@@ -162,6 +163,7 @@ pub fn build_metadata(
     let mut bindings_override = None;
     let mut approval_required = false;
     let mut approval_field_invalid = false;
+    let mut has_next = false;
     let mut fields = Vec::new();
     for f in c.fields.as_deref().unwrap_or_default() {
         let Some(enc_name) = f.name.as_deref().filter(|n| !n.is_empty()) else {
@@ -177,6 +179,12 @@ pub fn build_metadata(
         if field_name.as_str() == CREATED_BY_FIELD {
             // Written by Ferrowarden itself (the agent key that created the
             // item): not offered as a field.
+            continue;
+        }
+        if is_next_field_name(&field_name) {
+            // The pending password of a rotation: reached with
+            // `{{vault:NAME:next}}`, never offered as a field.
+            has_next = true;
             continue;
         }
         if is_approval_field_name(&field_name) {
@@ -239,6 +247,8 @@ pub fn build_metadata(
         reprompt: c.reprompt != 0,
         approval_required,
         approval_field_invalid,
+        has_next,
+        collection_ids: c.collection_ids.clone(),
     };
     Ok((name.as_str().to_string(), entry))
 }
@@ -268,6 +278,9 @@ pub fn builtin_value(
     label: &str,
 ) -> FerroResult<Zeroizing<String>> {
     let key = item_key(keys, c).map_err(unreadable)?;
+    if which == Builtin::Next {
+        return next_value(&key, c, label);
+    }
     // The ciphertext to read, or "not found" when the item has no such value.
     let login = if c.item_type == 1 {
         c.login.as_ref()
@@ -275,6 +288,7 @@ pub fn builtin_value(
         None
     };
     let ciphertext: Option<&str> = match which {
+        Builtin::Next => None,
         Builtin::Password => login.and_then(|l| l.password.as_deref()),
         Builtin::Username => login.and_then(|l| l.username.as_deref()),
         Builtin::Totp => login.and_then(|l| l.totp.as_deref()),
@@ -294,6 +308,34 @@ pub fn builtin_value(
         return totp::code(&plain, unix_time).ok_or_else(|| not_found(label));
     }
     Ok(plain)
+}
+
+/// The pending new password of a rotation: the value of the reserved
+/// `ferrowarden_next` field of a login. More than one such field is ambiguous
+/// (a person has to fix the item), exactly like a duplicated custom field.
+fn next_value(key: &SymKey, c: &RawCipher, label: &str) -> FerroResult<Zeroizing<String>> {
+    if c.item_type != 1 {
+        return Err(not_found(label));
+    }
+    let mut found: Option<&RawField> = None;
+    for f in c.fields.as_deref().unwrap_or_default() {
+        let Some(enc_name) = f.name.as_deref().filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        if is_next_field_name(&dec_value(key, enc_name)?) && found.replace(f).is_some() {
+            return Err(FerroError::AmbiguousField {
+                item: label.to_string(),
+                field: NEXT_FIELD.to_string(),
+            });
+        }
+    }
+    match found
+        .and_then(|f| f.value.as_deref())
+        .filter(|v| !v.is_empty())
+    {
+        Some(v) => dec_value(key, v),
+        None => Err(not_found(label)),
+    }
 }
 
 /// One custom field's value, by name. Linked fields resolve to the login

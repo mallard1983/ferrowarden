@@ -29,6 +29,13 @@ pub struct CredentialDetail {
     /// Placeholder for the password.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
+    /// Placeholder for the pending new password of a rotation that has been
+    /// started and not yet committed or aborted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+    /// A rotation has been started on this credential and is pending.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rotation_pending: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,6 +74,8 @@ fn detail(name: &str, entries: &[CredentialEntry]) -> CredentialDetail {
         name: name.to_string(),
         kind: None,
         placeholder: None,
+        next: None,
+        rotation_pending: false,
         username: None,
         totp: None,
         notes: None,
@@ -105,6 +114,10 @@ fn detail(name: &str, entries: &[CredentialEntry]) -> CredentialDetail {
     let login = entry.kind == ItemKind::Login;
     if login && entry.has_password {
         d.placeholder = Some(render(Selector::Password));
+    }
+    if login && entry.has_next {
+        d.next = Some(render(Selector::Next));
+        d.rotation_pending = true;
     }
     if login && entry.has_username {
         d.username = Some(render(Selector::Username));

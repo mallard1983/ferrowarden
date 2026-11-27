@@ -160,6 +160,21 @@ struct Mock {
     create_reject_once: bool,
     /// The `Authorization` headers of the create calls.
     create_auth: Vec<String>,
+    /// The ids `GET /api/ciphers/{id}` was asked for, in order.
+    gets: Vec<String>,
+    /// The (id, body) of every `PUT /api/ciphers/{id}` that was applied.
+    puts: Vec<(String, Value)>,
+    /// How many `PUT` calls arrived (applied or not).
+    put_calls: usize,
+    /// Answer the next `PUT` with this status instead of applying it.
+    put_status: Option<u16>,
+    /// Answer the next `PUT` with 401.
+    put_reject_once: bool,
+    /// Answer the next `PUT` with "the client copy is out of date" (as
+    /// if someone had edited the item between the read and the write).
+    put_stale_once: bool,
+    /// Counts the revisions the server gives an item.
+    item_revisions: u64,
 }
 
 type Shared = Arc<Mutex<Mock>>;
@@ -263,6 +278,75 @@ async fn create_cipher(
     Json(json!({"id": format!("new-{}", m.created.len()), "object": "cipher"})).into_response()
 }
 
+async fn get_cipher(
+    AxState(m): AxState<Shared>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let mut m = m.lock().unwrap();
+    if let Some(r) = authorized(&mut m, &headers) {
+        return r;
+    }
+    m.gets.push(id.clone());
+    match m.ciphers.iter().find(|c| c["id"] == id.as_str()) {
+        Some(c) => {
+            let mut c = c.clone();
+            c["object"] = json!("cipherDetails");
+            if c.get("revisionDate").is_none() {
+                c["revisionDate"] = json!("2026-11-26T10:00:00.000000Z");
+            }
+            Json(c).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn put_cipher(
+    AxState(m): AxState<Shared>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut m = m.lock().unwrap();
+    m.put_calls += 1;
+    if let Some(r) = authorized(&mut m, &headers) {
+        return r;
+    }
+    if std::mem::take(&mut m.put_reject_once) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(status) = m.put_status {
+        return StatusCode::from_u16(status).unwrap().into_response();
+    }
+    let stale = std::mem::take(&mut m.put_stale_once);
+    let Some(i) = m.ciphers.iter().position(|c| c["id"] == id.as_str()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let current = m.ciphers[i]
+        .get("revisionDate")
+        .and_then(Value::as_str)
+        .unwrap_or("2026-11-26T10:00:00.000000Z")
+        .to_string();
+    if stale || body["lastKnownRevisionDate"].as_str() != Some(current.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"message": "The client copy of this cipher is out of date. Resync the client and try again."})),
+        )
+            .into_response();
+    }
+    m.item_revisions += 1;
+    let revision = format!("2026-11-26T11:00:{:02}.000000Z", m.item_revisions);
+    for (k, v) in body.as_object().unwrap() {
+        if k != "lastKnownRevisionDate" {
+            m.ciphers[i][k] = v.clone();
+        }
+    }
+    m.ciphers[i]["revisionDate"] = json!(revision);
+    m.revision += 1;
+    m.puts.push((id, body));
+    Json(m.ciphers[i].clone()).into_response()
+}
+
 async fn profile(AxState(m): AxState<Shared>, headers: HeaderMap) -> Response {
     let mut m = m.lock().unwrap();
     if let Some(r) = authorized(&mut m, &headers) {
@@ -311,6 +395,7 @@ async fn harness_full(
         .route("/api/accounts/revision-date", get(revision_date))
         .route("/api/sync", get(sync))
         .route("/api/ciphers/create", post(create_cipher))
+        .route("/api/ciphers/{id}", get(get_cipher).put(put_cipher))
         .route("/api/accounts/profile", get(profile))
         .with_state(mock.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1698,3 +1783,5 @@ async fn the_sync_reads_collections_and_collection_ids_of_the_real_shape() {
     .unwrap();
     assert!(none.collections.is_empty());
 }
+
+mod rotation;

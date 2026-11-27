@@ -32,6 +32,20 @@ pub fn approval_field_valid(value: &str) -> bool {
 /// Ferrowarden creates an item; shown like any other field.
 pub const CREATED_BY_FIELD: &str = "ferrowarden_created_by";
 
+/// Name of the reserved **hidden** custom field that holds the pending new
+/// password of a rotation that has started and not yet been committed or
+/// aborted (docs/managed-credentials.md). Written and removed only by
+/// Ferrowarden's rotation; never offered as a `field:` placeholder (the
+/// pending value is reached with `{{vault:NAME:next}}`) and never listed.
+pub const NEXT_FIELD: &str = "ferrowarden_next";
+
+/// Is `name` the reserved pending-rotation field? Compared trimmed and
+/// case-insensitively, like [`APPROVAL_FIELD`], so a hand-typed variant is
+/// still recognised (and not offered as an ordinary field).
+pub fn is_next_field_name(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case(NEXT_FIELD)
+}
+
 /// Kind of vault item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
@@ -99,6 +113,9 @@ pub fn match_type_is_binding(match_type: Option<u8>) -> bool {
 /// A built-in value of an item that can be fetched on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
+    /// The pending new password of a rotation (`{{vault:NAME:next}}`): the
+    /// value of the reserved `ferrowarden_next` field.
+    Next,
     Password,
     Username,
     /// The current one-time code, not the stored secret.
@@ -144,6 +161,12 @@ pub struct CredentialEntry {
     /// The field's value is not `required`: it still means required, and the
     /// sync reports it as a warning so the operator can fix the spelling.
     pub approval_field_invalid: bool,
+    /// A rotation has started and is waiting to be committed or aborted: the
+    /// item has a `ferrowarden_next` field.
+    pub has_next: bool,
+    /// The collections the item is in (organisation items), as the sync lists
+    /// them. A rotation is only ever done to an item in the managed one.
+    pub collection_ids: Vec<String>,
 }
 
 impl CredentialEntry {
@@ -162,6 +185,8 @@ impl CredentialEntry {
             reprompt: false,
             approval_required: false,
             approval_field_invalid: false,
+            has_next: false,
+            collection_ids: Vec::new(),
         }
     }
 

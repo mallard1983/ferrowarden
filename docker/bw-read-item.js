@@ -2,11 +2,11 @@
 /**
  * bw-read-item.js
  *
- * The independent reader of the credential-create tests (docs/native-vault.md,
- * "How the write path is verified"). It logs in to Vaultwarden as the test
- * account with the master password, finds the item named ITEM_NAME in
- * /api/sync, decrypts it with Node's `crypto` (bw-lib.js: no Ferrowarden code,
- * no Rust), and prints ONE line of JSON:
+ * The independent reader of the credential-create and rotation tests
+ * (docs/native-vault.md, "How the write path is verified"). It logs in to
+ * Vaultwarden as the test account with the master password, finds the item
+ * named ITEM_NAME in /api/sync, decrypts it with Node's `crypto` (bw-lib.js: no
+ * Ferrowarden code, no Rust), and prints ONE line of JSON:
  *
  *   {
  *     "found": true, "count": 1,
@@ -19,20 +19,38 @@
  *     "createdBy": "<value of ferrowarden_created_by>",
  *     "approvalField": "required" | null,
  *     "organizationId": "...", "collections": ["Ferrowarden managed"],
- *     "type": 1, "hasItemKey": true, "totp": null, "notes": null
+ *     "type": 1, "hasItemKey": true, "totp": null, "notes": null,
+ *     // The rotation tests (docs/managed-credentials.md):
+ *     "hasNextField": false,        // the reserved ferrowarden_next field is there
+ *     "nextMatches": false,         // its value equals the third line of stdin
+ *     "passwordHistoryCount": 1,
+ *     "historyFirstMatches": true,  // the newest history entry equals the second line of stdin
+ *     "passwordRevisionDate": "2026-11-26T12:30:00.000Z" | null,
+ *     "revisionDate": "..."         // the item's revision, to see that it moved
  *   }
  *
- * The password itself is never printed. The test writes the value the target
- * received to stdin, and the reader says only whether the stored password is
- * the same (a constant-time comparison). Test fixtures only: this logs in with
- * the master password of the throwaway test account.
+ * No password is ever printed. The test writes the values it expects to stdin
+ * (one per line: the password, the previous password, the pending value), and
+ * the reader says only whether the stored ones are the same (a constant-time
+ * comparison). Test fixtures only: this logs in with the master password of the
+ * throwaway test account.
+ *
+ * Editor mode: when EDIT_NOTES is set, the reader also plays "a person who
+ * edits the item in the vault": it reads the item as the server holds it, sets
+ * its notes to that text (encrypted with the item's key) and saves it with a
+ * correct PUT (the revision it read as lastKnownRevisionDate), then prints its
+ * line (with "edited": true; "notes" then shows the new text). The conflict
+ * test of a rotation uses it.
  *
  * Environment:
  *   BW_SERVER_URL          Vaultwarden base URL
  *   SETUP_EMAIL            the test account
  *   SETUP_MASTER_PASSWORD  its master password (or SETUP_MASTER_PASSWORD_FILE: a file with it)
  *   ITEM_NAME              the item to read (exact name)
- * stdin: the expected password (may be empty: passwordMatches is then false)
+ *   EDIT_NOTES             (optional) set the item's notes to this text first
+ * stdin: line 1 the expected password (may be empty: passwordMatches is then
+ *        false); line 2 the expected previous password; line 3 the expected
+ *        pending value
  */
 
 const crypto = require('crypto');
@@ -48,12 +66,21 @@ const password  = process.env.SETUP_MASTER_PASSWORD ||
     ? fs.readFileSync(process.env.SETUP_MASTER_PASSWORD_FILE, 'utf8').trim()
     : undefined);
 const itemName  = process.env.ITEM_NAME;
-// What the test expects the password to be, from stdin (never printed).
+const editNotes = process.env.EDIT_NOTES;
+// What the test expects, from stdin (never printed).
 let expected = '';
-try { expected = fs.readFileSync(0, 'utf8'); } catch (_) { expected = ''; }
+let expectedPrevious = '';
+let expectedNext = '';
+try {
+  const lines = fs.readFileSync(0, 'utf8').split('\n');
+  expected = lines[0] || '';
+  expectedPrevious = lines[1] || '';
+  expectedNext = lines[2] || '';
+} catch (_) { /* nothing on stdin */ }
 
 /** Constant-time equality of two strings, without printing or hashing them. */
 function sameText(a, b) {
+  if (a === null || a === undefined) return false;
   const x = Buffer.from(a, 'utf8');
   const y = Buffer.from(b, 'utf8');
   return x.length === y.length && x.length > 0 && crypto.timingSafeEqual(x, y);
@@ -67,6 +94,34 @@ if (!serverUrl || !email || !password || !itemName) {
 
 const { request } = lib.makeClient(serverUrl);
 const dec = (key, s) => (s ? lib.decryptCipherString(key, s).toString('utf8') : null);
+const JSON_HEADERS = { 'Content-Type': 'application/json' };
+
+// The members of an item's JSON that are the server's own: not sent back.
+const RESPONSE_ONLY = [
+  'object', 'id', 'creationDate', 'revisionDate', 'deletedDate', 'archivedDate',
+  'attachments', 'collectionIds', 'edit', 'viewPassword', 'permissions',
+  'organizationUseTotp', 'data',
+];
+
+/**
+ * Save the item with new notes, as a person editing it in a client would:
+ * read it as the server holds it now, change the notes, send it back with the
+ * revision that was read as lastKnownRevisionDate.
+ */
+async function editItemNotes(token, id, key, text, userId) {
+  const auth = { Authorization: `Bearer ${token}`, ...CLIENT_HEADERS };
+  const got = await request('GET', `/api/ciphers/${id}`, null, auth);
+  if (got.status !== 200) throw new Error(`could not read the item to edit it (${got.status})`);
+  const item = JSON.parse(got.body);
+  const body = { ...item };
+  for (const m of RESPONSE_ONLY) delete body[m];
+  body.notes = lib.encryptCipherString(key, Buffer.from(text, 'utf8'));
+  // Vaultwarden 1.37 refuses a PUT without it (clients send their own id).
+  body.encryptedFor = userId;
+  body.lastKnownRevisionDate = item.revisionDate;
+  const put = await request('PUT', `/api/ciphers/${id}`, JSON.stringify(body), { ...auth, ...JSON_HEADERS });
+  if (put.status !== 200) throw new Error(`could not save the edit (${put.status})`);
+}
 
 async function main() {
   const login = await lib.loginWithPassword({ request }, email, password, 'ferrowarden-reader');
@@ -108,16 +163,29 @@ async function main() {
     } catch (_) { continue; }
     if (name !== itemName) continue;
 
-    const l = c.login || {};
+    let edited = false;
+    let current = c;
+    if (editNotes !== undefined) {
+      await editItemNotes(token, c.id, key, editNotes, sync.profile.id);
+      edited = true;
+      // Read the item again: the line below shows what is stored now.
+      const again = await request('GET', `/api/ciphers/${c.id}`, null,
+        { Authorization: `Bearer ${token}`, ...CLIENT_HEADERS });
+      if (again.status !== 200) throw new Error(`could not read the item again (${again.status})`);
+      current = JSON.parse(again.body);
+    }
+
+    const l = current.login || {};
     const password_ = dec(key, l.password);
     const uris = (l.uris || []).filter((u) => u.uri).map((u) => ({
       uri: dec(key, u.uri),
       checksum: u.uriChecksum ? dec(key, u.uriChecksum) : null,
     }));
-    const fields = (c.fields || []).map((f) => ({ name: dec(key, f.name), value: dec(key, f.value) }));
+    const fields = (current.fields || []).map((f) => ({ name: dec(key, f.name), value: dec(key, f.value) }));
     const field = (n) => (fields.find((f) => f.name === n) || {}).value ?? null;
+    const history = (current.passwordHistory || []).map((h) => dec(key, h.password));
     found.push({
-      passwordMatches: password_ !== null && sameText(password_, expected),
+      passwordMatches: sameText(password_, expected),
       passwordLength: password_ === null ? null : [...password_].length,
       username: dec(key, l.username),
       uris: uris.map((u) => u.uri),
@@ -126,12 +194,19 @@ async function main() {
       fieldNames: fields.map((f) => f.name),
       createdBy: field('ferrowarden_created_by'),
       approvalField: field('ferrowarden_approval'),
-      organizationId: c.organizationId || null,
-      collections: (c.collectionIds || []).map((id) => collectionNames.get(id) || id),
-      type: c.type,
-      hasItemKey: !!c.key,
+      organizationId: current.organizationId || null,
+      collections: (current.collectionIds || []).map((id) => collectionNames.get(id) || id),
+      type: current.type,
+      hasItemKey: !!current.key,
       totp: dec(key, l.totp),
-      notes: dec(key, c.notes),
+      notes: dec(key, current.notes),
+      hasNextField: fields.some((f) => f.name === 'ferrowarden_next'),
+      nextMatches: sameText(field('ferrowarden_next'), expectedNext),
+      passwordHistoryCount: history.length,
+      historyFirstMatches: history.length > 0 && sameText(history[0], expectedPrevious),
+      passwordRevisionDate: l.passwordRevisionDate || null,
+      revisionDate: current.revisionDate || null,
+      edited,
     });
   }
   const out = found.length === 1

@@ -32,6 +32,13 @@
 //!   matches it (the one that is waiting, or the first retry within
 //!   `approval.pending_ttl_secs`); it never becomes a timed grant.
 //!
+//! * `rotate`: a request to **rotate** a credential's password
+//!   (`POST /v1/credentials/{name}/rotate`). Exactly like `create`: one
+//!   operation, identified by a fingerprint of the key, the item, its name and
+//!   the generation options, consumed by the first request that matches. It
+//!   covers starting the rotation; committing or aborting it needs no second
+//!   approval.
+//!
 //! Decisions (approve, deny, revoke a grant) are made by
 //! `api::approval_service`, which only the admin API and the admin UI call.
 //! No agent route reaches them.
@@ -170,15 +177,42 @@ pub enum ApprovalKind {
     Forward,
     /// Creating a credential; approving allows exactly one operation.
     Create,
+    /// Starting the rotation of a credential's password; approving allows
+    /// exactly one operation.
+    Rotate,
 }
 
 impl ApprovalKind {
-    /// The value of `kind` in events and the admin API: `forward`, `create`.
+    /// The value of `kind` in events and the admin API: `forward`, `create`,
+    /// `rotate`.
     pub fn as_str(self) -> &'static str {
         match self {
             ApprovalKind::Forward => "forward",
             ApprovalKind::Create => "create",
+            ApprovalKind::Rotate => "rotate",
         }
+    }
+}
+
+/// What a `rotate` approval is asked for: everything the human decides on.
+/// There is no value, because none has been generated yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RotateDetail {
+    pub name: String,
+    /// The managed collection the item is in (its name).
+    pub collection: String,
+    /// `alphanumeric`, `ascii`, `hex` or `base64url`.
+    pub charset: String,
+    pub length: u32,
+}
+
+impl RotateDetail {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "name": self.name,
+            "collection": self.collection,
+            "generate": { "charset": self.charset, "length": self.length },
+        })
     }
 }
 
@@ -233,8 +267,10 @@ pub struct PendingView {
     pub key_name: String,
     /// For a `create`: the one credential name.
     pub items: Vec<ApprovalNeed>,
-    /// What a `create` approval is for (`None` for a forward).
+    /// What a `create` approval is for (`None` otherwise).
     pub create: Option<CreateDetail>,
+    /// What a `rotate` approval is for (`None` otherwise).
+    pub rotate: Option<RotateDetail>,
     pub method: String,
     pub scheme: String,
     /// Host, with `:port` when it is not the scheme's default.
@@ -268,11 +304,12 @@ impl PendingView {
             "created_at": rfc3339(self.created),
             "expires_at": rfc3339(self.expires),
         });
-        match &self.create {
-            // A create has no method, origin or URL: it is not a request to
-            // a target.
-            Some(create) => body["create"] = create.to_json(),
-            None => {
+        match (&self.create, &self.rotate) {
+            // A create or a rotation has no method, origin or URL: it is not
+            // a request to a target.
+            (Some(create), _) => body["create"] = create.to_json(),
+            (None, Some(rotate)) => body["rotate"] = rotate.to_json(),
+            (None, None) => {
                 body["method"] = json!(self.method);
                 body["origin"] =
                     json!({ "scheme": self.scheme, "host": self.host, "port": self.port });
@@ -424,6 +461,28 @@ pub struct CreateAsk<'a> {
     pub detail: &'a CreateDetail,
 }
 
+/// The rotate request an approval is asked for.
+pub struct RotateAsk<'a> {
+    pub key_id: &'a str,
+    pub key_name: &'a str,
+    pub request_id: &'a str,
+    /// Identifies this one operation (see `rotate::RotateRequest::fingerprint`).
+    pub fingerprint: &'a str,
+    pub detail: &'a RotateDetail,
+}
+
+/// What either one-shot kind (create, rotate) is asked for.
+struct OneShot<'a> {
+    key_id: &'a str,
+    key_name: &'a str,
+    request_id: &'a str,
+    fingerprint: &'a str,
+    kind: ApprovalKind,
+    name: &'a str,
+    create: Option<CreateDetail>,
+    rotate: Option<RotateDetail>,
+}
+
 /// A held request counts against its key's `max_waiters_per_key` until this
 /// is dropped (the answer, a timeout, or the client going away).
 pub struct WaiterGuard {
@@ -564,6 +623,7 @@ impl ApprovalStore {
                         })
                         .collect(),
                     create: None,
+                    rotate: None,
                     method: truncate(ask.method, MAX_METHOD_CHARS),
                     scheme: ask.origin.scheme().to_string(),
                     host: ask.origin.host_label(),
@@ -596,6 +656,46 @@ impl ApprovalStore {
     pub fn check_create(
         self: &Arc<Self>,
         ask: &CreateAsk<'_>,
+        cfg: &ApprovalConfig,
+        now: DateTime<Utc>,
+    ) -> FerroResult<Check> {
+        let one = OneShot {
+            key_id: ask.key_id,
+            key_name: ask.key_name,
+            request_id: ask.request_id,
+            fingerprint: ask.fingerprint,
+            kind: ApprovalKind::Create,
+            name: &ask.detail.name,
+            create: Some(ask.detail.clone()),
+            rotate: None,
+        };
+        self.check_one_shot(&one, cfg, now)
+    }
+
+    /// The same for a **rotation** (starting it): the same one-shot approval,
+    /// the same limits and the same denial cooldown.
+    pub fn check_rotate(
+        self: &Arc<Self>,
+        ask: &RotateAsk<'_>,
+        cfg: &ApprovalConfig,
+        now: DateTime<Utc>,
+    ) -> FerroResult<Check> {
+        let one = OneShot {
+            key_id: ask.key_id,
+            key_name: ask.key_name,
+            request_id: ask.request_id,
+            fingerprint: ask.fingerprint,
+            kind: ApprovalKind::Rotate,
+            name: &ask.detail.name,
+            create: None,
+            rotate: Some(ask.detail.clone()),
+        };
+        self.check_one_shot(&one, cfg, now)
+    }
+
+    fn check_one_shot(
+        self: &Arc<Self>,
+        ask: &OneShot<'_>,
         cfg: &ApprovalConfig,
         now: DateTime<Utc>,
     ) -> FerroResult<Check> {
@@ -638,14 +738,15 @@ impl ApprovalStore {
                 let ttl = ChronoDuration::seconds(i64::try_from(cfg.pending_ttl_secs).unwrap_or(0));
                 let view = PendingView {
                     id: id.clone(),
-                    kind: ApprovalKind::Create,
+                    kind: ask.kind,
                     key_id: ask.key_id.to_string(),
                     key_name: ask.key_name.to_string(),
                     items: vec![ApprovalNeed {
-                        item: ask.detail.name.clone(),
+                        item: ask.name.to_string(),
                         reasons: Reasons::default(),
                     }],
-                    create: Some(ask.detail.clone()),
+                    create: ask.create.clone(),
+                    rotate: ask.rotate.clone(),
                     method: String::new(),
                     scheme: String::new(),
                     host: String::new(),
@@ -780,7 +881,7 @@ impl ApprovalStore {
         Ok((pending.view, grant))
     }
 
-    /// Approve the create approval `id`: **one** operation, the one it was
+    /// Approve the create or rotate approval `id`: **one** operation, the one it was
     /// opened for, may now proceed. It replaces any denial of it, wakes the
     /// held requests, and is kept for `ttl` for a retry to use; the first
     /// request that matches uses it up. It never becomes a grant.
@@ -792,7 +893,9 @@ impl ApprovalStore {
     ) -> Result<PendingView, NotPending> {
         let mut inner = self.lock();
         if !inner.pending.get(id).is_some_and(|p| {
-            p.view.expires > now && p.view.kind == ApprovalKind::Create && p.fingerprint.is_some()
+            p.view.expires > now
+                && matches!(p.view.kind, ApprovalKind::Create | ApprovalKind::Rotate)
+                && p.fingerprint.is_some()
         }) {
             return Err(NotPending);
         }
@@ -1216,8 +1319,6 @@ pub async fn gate_create(
     fingerprint: &str,
     detail: &CreateDetail,
 ) -> FerroResult<()> {
-    let cfg = &state.config.approval;
-    let store = &state.approvals;
     let ask = CreateAsk {
         key_id: &agent.id,
         key_name: &agent.name,
@@ -1225,7 +1326,47 @@ pub async fn gate_create(
         fingerprint,
         detail,
     };
-    match store.check_create(&ask, cfg, Utc::now())? {
+    let check = state
+        .approvals
+        .check_create(&ask, &state.config.approval, Utc::now())?;
+    gate_one_shot(state, agent, ctx, fingerprint, check).await
+}
+
+/// The approval gate of `POST /v1/credentials/{name}/rotate`: the same as
+/// [`gate_create`], for starting a rotation. Runs before anything is
+/// generated or written. Committing and aborting do not come here: the
+/// approval of the start covered the rotation.
+pub async fn gate_rotate(
+    state: &Arc<AppState>,
+    agent: &AgentKey,
+    ctx: &RequestContext,
+    fingerprint: &str,
+    detail: &RotateDetail,
+) -> FerroResult<()> {
+    let ask = RotateAsk {
+        key_id: &agent.id,
+        key_name: &agent.name,
+        request_id: &ctx.request_id,
+        fingerprint,
+        detail,
+    };
+    let check = state
+        .approvals
+        .check_rotate(&ask, &state.config.approval, Utc::now())?;
+    gate_one_shot(state, agent, ctx, fingerprint, check).await
+}
+
+/// What happens after the store has decided for a one-shot operation.
+async fn gate_one_shot(
+    state: &Arc<AppState>,
+    agent: &AgentKey,
+    ctx: &RequestContext,
+    fingerprint: &str,
+    check: Check,
+) -> FerroResult<()> {
+    let cfg = &state.config.approval;
+    let store = &state.approvals;
+    match check {
         Check::Granted => Ok(()),
         Check::Denied => Err(FerroError::ApprovalDenied),
         Check::LimitReached => Err(FerroError::ApprovalLimitReached),
@@ -1311,10 +1452,11 @@ pub fn requested_event(
         .detail("kind", v.kind.as_str())
         .detail("approval_id", v.id.as_str())
         .detail("expires_at", rfc3339(v.expires));
-    event = match &v.create {
+    event = match (&v.create, &v.rotate) {
         // A create asks about what will be made: no request to a target.
-        Some(create) => event.detail("create", create.to_json()),
-        None => event
+        (Some(create), _) => event.detail("create", create.to_json()),
+        (None, Some(rotate)) => event.detail("rotate", rotate.to_json()),
+        (None, None) => event
             .method(&v.method)
             .url(&v.url)
             .detail("reasons", reasons_json(&v.items))

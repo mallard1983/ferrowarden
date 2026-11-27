@@ -6,6 +6,7 @@ fn pol(c: &[&str], m: &[&str]) -> KeyPolicy {
         m.iter().map(|s| s.to_string()).collect(),
         Vec::new(),
         vec![],
+        vec![],
     )
     .unwrap()
 }
@@ -217,13 +218,13 @@ fn default_policy_is_deny_all() {
     }
     assert_eq!(
         p.to_json(),
-        json!({"credentials": [], "methods": [], "approval": [], "create": []})
+        json!({"credentials": [], "methods": [], "approval": [], "create": [], "rotate": []})
     );
 }
 
 #[test]
 fn star_star_is_unrestricted_but_only_for_known_methods() {
-    let p = KeyPolicy::from_raw(s(&["*"]), s(&["*"]), vec![], vec![]).unwrap();
+    let p = KeyPolicy::from_raw(s(&["*"]), s(&["*"]), vec![], vec![], vec![]).unwrap();
     assert!(p.allows_credential("anything"));
     for m in METHODS {
         assert!(p.allows_method(m));
@@ -231,25 +232,25 @@ fn star_star_is_unrestricted_but_only_for_known_methods() {
     assert!(!p.allows_method("TRACE"));
     assert_eq!(
         p.to_json(),
-        json!({"credentials": ["*"], "methods": ["*"], "approval": [], "create": []})
+        json!({"credentials": ["*"], "methods": ["*"], "approval": [], "create": [], "rotate": []})
     );
 }
 
 #[test]
 fn empty_lists_allow_nothing() {
-    let p = KeyPolicy::from_raw(vec![], vec![], vec![], vec![]).unwrap();
+    let p = KeyPolicy::from_raw(vec![], vec![], vec![], vec![], vec![]).unwrap();
     assert!(!p.allows_credential("x"));
     assert!(!p.allows_method("GET"));
     // A request with no placeholders still passes the scope check; only
     // the method matters then.
-    let open = KeyPolicy::from_raw(vec![], s(&["*"]), vec![], vec![]).unwrap();
+    let open = KeyPolicy::from_raw(vec![], s(&["*"]), vec![], vec![], vec![]).unwrap();
     assert!(open.check_request("GET", &set(&[])).is_ok());
     assert!(open.check_request("GET", &set(&["x"])).is_err());
 }
 
 #[test]
 fn method_is_checked_before_scope() {
-    let p = KeyPolicy::from_raw(s(&["a"]), s(&["GET"]), vec![], vec![]).unwrap();
+    let p = KeyPolicy::from_raw(s(&["a"]), s(&["GET"]), vec![], vec![], vec![]).unwrap();
     assert!(matches!(
         p.check_request("POST", &set(&["not_a"])),
         Err(FerroError::MethodNotAllowed(m)) if m == "POST"
@@ -265,7 +266,7 @@ fn method_is_checked_before_scope() {
 fn out_of_scope_error_does_not_depend_on_the_vault() {
     // The check takes only the policy and the placeholder names, so an
     // existing and a nonexistent out-of-scope name are indistinguishable.
-    let p = KeyPolicy::from_raw(s(&["lab_*"]), s(&["*"]), vec![], vec![]).unwrap();
+    let p = KeyPolicy::from_raw(s(&["lab_*"]), s(&["*"]), vec![], vec![], vec![]).unwrap();
     let a = p.check_request("GET", &set(&["prod_db"])).unwrap_err();
     let b = p
         .check_request("GET", &set(&["does_not_exist_anywhere"]))
@@ -290,7 +291,7 @@ fn out_of_scope_error_does_not_depend_on_the_vault() {
 
 #[test]
 fn scope_uses_the_unquoted_item_name_but_reports_the_label() {
-    let p = KeyPolicy::from_raw(s(&["Proxmox (*)"]), s(&["*"]), vec![], vec![]).unwrap();
+    let p = KeyPolicy::from_raw(s(&["Proxmox (*)"]), s(&["*"]), vec![], vec![], vec![]).unwrap();
     let quoted = Placeholder {
         item: "Proxmox (prod)".into(),
         selector: crate::proxy::placeholder::Selector::Username,
@@ -317,6 +318,7 @@ fn patching_a_deny_all_policy_leaves_the_other_field_denied() {
             Patch::Absent,
             Patch::Absent,
             Patch::Absent,
+            Patch::Absent,
         )
         .unwrap();
     assert_eq!(p.credentials, s(&["a"]));
@@ -326,10 +328,11 @@ fn patching_a_deny_all_policy_leaves_the_other_field_denied() {
 
 #[test]
 fn patched_replaces_only_present_fields() {
-    let base = KeyPolicy::from_raw(s(&["a"]), s(&["GET"]), vec![], vec![]).unwrap();
+    let base = KeyPolicy::from_raw(s(&["a"]), s(&["GET"]), vec![], vec![], vec![]).unwrap();
     let p = base
         .patched(
             Patch::Value(s(&["b_*"])),
+            Patch::Absent,
             Patch::Absent,
             Patch::Absent,
             Patch::Absent,
@@ -343,6 +346,7 @@ fn patched_replaces_only_present_fields() {
             Patch::Value(s(&["*"])),
             Patch::Absent,
             Patch::Absent,
+            Patch::Absent,
         )
         .unwrap();
     assert_eq!(p.credentials, s(&["a"]));
@@ -354,16 +358,18 @@ fn patched_replaces_only_present_fields() {
             Patch::Value(s(&["*"])),
             Patch::Absent,
             Patch::Absent,
+            Patch::Absent,
         )
         .unwrap();
     assert_eq!(
         p,
-        KeyPolicy::from_raw(s(&["*"]), s(&["*"]), vec![], vec![]).unwrap()
+        KeyPolicy::from_raw(s(&["*"]), s(&["*"]), vec![], vec![], vec![]).unwrap()
     );
     // Invalid values are rejected and leave `base` untouched.
     assert!(base
         .patched(
             Patch::Value(s(&[""])),
+            Patch::Absent,
             Patch::Absent,
             Patch::Absent,
             Patch::Absent
@@ -373,6 +379,7 @@ fn patched_replaces_only_present_fields() {
         .patched(
             Patch::Absent,
             Patch::Value(s(&["TRACE"])),
+            Patch::Absent,
             Patch::Absent,
             Patch::Absent
         )
@@ -487,7 +494,7 @@ fn optional_object_rejects_null() {
 // ── approval patterns ─────────────────────────────────────────────────────
 
 fn pol_a(c: &[&str], a: &[&str]) -> KeyPolicy {
-    KeyPolicy::from_raw(s(c), s(&["GET"]), s(a), vec![]).unwrap()
+    KeyPolicy::from_raw(s(c), s(&["GET"]), s(a), vec![], vec![]).unwrap()
 }
 
 #[test]
@@ -510,15 +517,15 @@ fn approval_patterns_match_like_credential_patterns_and_default_to_none() {
 
 #[test]
 fn approval_patterns_are_validated_like_credential_patterns() {
-    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), s(&[""]), vec![]).is_err());
-    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), s(&["a\nb"]), vec![]).is_err());
+    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), s(&[""]), vec![], vec![]).is_err());
+    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), s(&["a\nb"]), vec![], vec![]).is_err());
     let long = "x".repeat(MAX_PATTERN_CHARS + 1);
-    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![long], vec![]).is_err());
+    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![long], vec![], vec![]).is_err());
     let many: Vec<String> = (0..=MAX_PATTERNS).map(|i| format!("p{i}")).collect();
-    let e = KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), many, vec![]).unwrap_err();
+    let e = KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), many, vec![], vec![]).unwrap_err();
     assert!(e.to_string().contains("approval may have at most"), "{e}");
     // The message names the field it is about.
-    let e = KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), s(&[""]), vec![]).unwrap_err();
+    let e = KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), s(&[""]), vec![], vec![]).unwrap_err();
     assert!(e.to_string().contains("approval[0]"), "{e}");
 }
 
@@ -532,6 +539,7 @@ fn approval_follows_the_patch_rules_and_never_accepts_null() {
             Patch::Absent,
             Patch::Absent,
             Patch::Absent,
+            Patch::Absent,
         )
         .unwrap();
     assert_eq!(kept.approval, ["x"]);
@@ -540,6 +548,7 @@ fn approval_follows_the_patch_rules_and_never_accepts_null() {
             Patch::Absent,
             Patch::Absent,
             Patch::Value(s(&["y*"])),
+            Patch::Absent,
             Patch::Absent,
         )
         .unwrap();
@@ -551,6 +560,7 @@ fn approval_follows_the_patch_rules_and_never_accepts_null() {
             Patch::Absent,
             Patch::Value(vec![]),
             Patch::Absent,
+            Patch::Absent,
         )
         .unwrap();
     assert!(cleared.approval.is_empty());
@@ -559,6 +569,7 @@ fn approval_follows_the_patch_rules_and_never_accepts_null() {
             Patch::Absent,
             Patch::Absent,
             Patch::Value(s(&[""])),
+            Patch::Absent,
             Patch::Absent
         )
         .is_err());
@@ -613,11 +624,11 @@ fn removing_or_narrowing_approval_patterns_is_a_widening() {
     assert!(!none.is_widened_by(&none));
     // It combines with the other two reasons.
     assert!(saved.is_widened_by(
-        &KeyPolicy::from_raw(s(&["*"]), s(&["GET", "POST"]), s(&["*"]), vec![]).unwrap()
+        &KeyPolicy::from_raw(s(&["*"]), s(&["GET", "POST"]), s(&["*"]), vec![], vec![]).unwrap()
     ));
-    assert!(
-        !none.is_widened_by(&KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), s(&[]), vec![]).unwrap())
-    );
+    assert!(!none.is_widened_by(
+        &KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), s(&[]), vec![], vec![]).unwrap()
+    ));
 }
 
 #[test]
@@ -625,14 +636,14 @@ fn the_policy_json_lists_the_approval_patterns() {
     let p = pol_a(&["a"], &["b"]);
     assert_eq!(
         p.to_json(),
-        json!({"credentials": ["a"], "methods": ["GET"], "approval": ["b"], "create": []})
+        json!({"credentials": ["a"], "methods": ["GET"], "approval": ["b"], "create": [], "rotate": []})
     );
 }
 
 // ── create patterns ───────────────────────────────────────────────────────────
 
 fn pol_c(c: &[&str], create: &[&str]) -> KeyPolicy {
-    KeyPolicy::from_raw(s(c), s(&["GET"]), vec![], s(create)).unwrap()
+    KeyPolicy::from_raw(s(c), s(&["GET"]), vec![], s(create), vec![]).unwrap()
 }
 
 #[test]
@@ -651,7 +662,7 @@ fn create_patterns_match_like_credential_patterns_and_default_to_none() {
     assert!(!KeyPolicy::default().allows_create("anything"));
     assert!(pol_c(&["*"], &[]).create.is_empty());
     assert!(!pol_c(&["*"], &[]).allows_create("agent_x"));
-    let only_create = KeyPolicy::from_raw(vec![], vec![], vec![], s(&["agent_*"])).unwrap();
+    let only_create = KeyPolicy::from_raw(vec![], vec![], vec![], s(&["agent_*"]), vec![]).unwrap();
     assert!(only_create.allows_create("agent_x") && !only_create.allows_credential("agent_x"));
     assert!(!only_create.allows_method("GET"));
     // And creating does not follow from the credential list.
@@ -665,15 +676,15 @@ fn create_patterns_match_like_credential_patterns_and_default_to_none() {
 
 #[test]
 fn create_patterns_are_validated_like_credential_patterns() {
-    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], s(&[""])).is_err());
-    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], s(&["a\nb"])).is_err());
+    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], s(&[""]), vec![]).is_err());
+    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], s(&["a\nb"]), vec![]).is_err());
     let many: Vec<String> = (0..=MAX_PATTERNS).map(|i| format!("p{i}")).collect();
-    let e = KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], many).unwrap_err();
+    let e = KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], many, vec![]).unwrap_err();
     assert!(e.to_string().contains("create may have at most"), "{e}");
-    let e = KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], s(&[""])).unwrap_err();
+    let e = KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], s(&[""]), vec![]).unwrap_err();
     assert!(e.to_string().contains("create[0]"), "{e}");
     let long = "x".repeat(MAX_PATTERN_CHARS + 1);
-    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], vec![long]).is_err());
+    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], vec![long], vec![]).is_err());
 }
 
 #[test]
@@ -682,6 +693,7 @@ fn create_follows_the_patch_rules_and_never_accepts_null() {
     let kept = base
         .patched(
             Patch::Value(s(&["b"])),
+            Patch::Absent,
             Patch::Absent,
             Patch::Absent,
             Patch::Absent,
@@ -694,6 +706,7 @@ fn create_follows_the_patch_rules_and_never_accepts_null() {
             Patch::Absent,
             Patch::Absent,
             Patch::Value(s(&["y*"])),
+            Patch::Absent,
         )
         .unwrap();
     assert_eq!(replaced.create, ["y*"]);
@@ -704,6 +717,7 @@ fn create_follows_the_patch_rules_and_never_accepts_null() {
             Patch::Absent,
             Patch::Absent,
             Patch::Value(vec![]),
+            Patch::Absent,
         )
         .unwrap();
     assert!(cleared.create.is_empty());
@@ -712,7 +726,8 @@ fn create_follows_the_patch_rules_and_never_accepts_null() {
             Patch::Absent,
             Patch::Absent,
             Patch::Absent,
-            Patch::Value(s(&[""]))
+            Patch::Value(s(&[""])),
+            Patch::Absent
         )
         .is_err());
 
@@ -778,7 +793,7 @@ fn adding_or_broadening_a_create_pattern_is_a_widening() {
     assert!(!star.is_widened_by(&star));
     // And the other lists still widen on their own.
     assert!(none.is_widened_by(
-        &KeyPolicy::from_raw(s(&["*"]), s(&["GET", "POST"]), vec![], vec![]).unwrap()
+        &KeyPolicy::from_raw(s(&["*"]), s(&["GET", "POST"]), vec![], vec![], vec![]).unwrap()
     ));
 }
 
@@ -787,6 +802,125 @@ fn the_policy_json_lists_the_create_patterns() {
     let p = pol_c(&["a"], &["agent_*"]);
     assert_eq!(
         p.to_json(),
-        json!({"credentials": ["a"], "methods": ["GET"], "approval": [], "create": ["agent_*"]})
+        json!({"credentials": ["a"], "methods": ["GET"], "approval": [], "create": ["agent_*"], "rotate": []})
+    );
+}
+
+// ── The rotate list ───────────────────────────────────────────────────────────
+
+fn pol_r(c: &[&str], rotate: &[&str]) -> KeyPolicy {
+    KeyPolicy::from_raw(s(c), s(&["GET"]), vec![], vec![], s(rotate)).unwrap()
+}
+
+#[test]
+fn rotate_patterns_match_like_credential_patterns_and_are_their_own_permission() {
+    let p = pol_r(&["*"], &["agent_*", "Service (prod)", "exact"]);
+    assert!(p.allows_rotate("agent_keycloak"));
+    assert!(p.allows_rotate("Service (prod)"));
+    assert!(p.allows_rotate("exact"));
+    assert!(!p.allows_rotate("exact2"));
+    assert!(!p.allows_rotate("Agent_x"), "case-sensitive");
+    assert!(!p.allows_rotate(""));
+    // Nothing by default, and independent of every other list.
+    assert!(!KeyPolicy::default().allows_rotate("anything"));
+    assert!(!pol_r(&["*"], &[]).allows_rotate("agent_x"));
+    let only = KeyPolicy::from_raw(vec![], vec![], vec![], vec![], s(&["agent_*"])).unwrap();
+    assert!(only.allows_rotate("agent_x") && !only.allows_credential("agent_x"));
+    assert!(!only.allows_create("agent_x"), "rotating is not creating");
+    let create_only =
+        KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], s(&["*"]), vec![]).unwrap();
+    assert!(
+        !create_only.allows_rotate("agent_x"),
+        "creating is not rotating"
+    );
+    // `*` collapses the list, duplicates go.
+    assert_eq!(pol_r(&["*"], &["a", "*", "b"]).rotate, ["*"]);
+    assert_eq!(pol_r(&["*"], &["a", "a", "b"]).rotate, ["a", "b"]);
+}
+
+#[test]
+fn rotate_patterns_are_validated_like_credential_patterns() {
+    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], vec![], s(&[""])).is_err());
+    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], vec![], s(&["a\nb"])).is_err());
+    let many: Vec<String> = (0..=MAX_PATTERNS).map(|i| format!("p{i}")).collect();
+    let e = KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], vec![], many).unwrap_err();
+    assert!(e.to_string().contains("rotate may have at most"), "{e}");
+    let long = "x".repeat(MAX_PATTERN_CHARS + 1);
+    assert!(KeyPolicy::from_raw(s(&["*"]), s(&["GET"]), vec![], vec![], vec![long]).is_err());
+}
+
+#[test]
+fn rotate_follows_the_patch_rules_and_never_accepts_null() {
+    let base = pol_r(&["a"], &["x_*"]);
+    let p = |rotate| {
+        base.patched(
+            Patch::Absent,
+            Patch::Absent,
+            Patch::Absent,
+            Patch::Absent,
+            rotate,
+        )
+    };
+    assert_eq!(
+        p(Patch::Absent).unwrap().rotate,
+        ["x_*"],
+        "absent: unchanged"
+    );
+    assert_eq!(p(Patch::Value(s(&["y*"]))).unwrap().rotate, ["y*"]);
+    assert!(p(Patch::Value(vec![])).unwrap().rotate.is_empty());
+    assert!(p(Patch::Value(s(&[""]))).is_err());
+    // The other lists keep theirs when only `rotate` changes.
+    assert_eq!(p(Patch::Value(s(&["y*"]))).unwrap().credentials, ["a"]);
+
+    #[derive(Deserialize)]
+    struct Body {
+        #[serde(default, deserialize_with = "patch_rotate")]
+        rotate: Patch<Vec<String>>,
+    }
+    #[derive(Deserialize, Debug)]
+    struct Required {
+        #[allow(dead_code)]
+        #[serde(default, deserialize_with = "required_rotate")]
+        rotate: Vec<String>,
+    }
+    assert!(serde_json::from_str::<Body>("{}")
+        .unwrap()
+        .rotate
+        .is_absent());
+    let e = serde_json::from_str::<Body>(r#"{"rotate":null}"#)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        e.contains("`rotate`") && e.contains("null") && e.contains("cannot rotate"),
+        "{e}"
+    );
+    let e = serde_json::from_str::<Required>(r#"{"rotate":null}"#)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(e.contains("`rotate`") && e.contains("null"), "{e}");
+    assert!(serde_json::from_str::<Required>(r#"{"rotate":["a"]}"#).is_ok());
+    assert!(serde_json::from_str::<Required>(r#"{"rotate":"a"}"#).is_err());
+}
+
+#[test]
+fn adding_or_broadening_a_rotate_pattern_is_a_widening_and_narrowing_is_not() {
+    let saved = pol_r(&["*"], &["agent_*"]);
+    assert!(!saved.is_widened_by(&saved));
+    assert!(!saved.is_widened_by(&pol_r(&["*"], &["agent_a*"])));
+    assert!(!saved.is_widened_by(&pol_r(&["*"], &[])));
+    assert!(saved.is_widened_by(&pol_r(&["*"], &["agent_*", "other"])));
+    assert!(saved.is_widened_by(&pol_r(&["*"], &["*"])));
+    assert!(saved.is_widened_by(&pol_r(&["*"], &["age*"])));
+    assert!(KeyPolicy::default().is_widened_by(&pol_r(&[], &["x"])));
+}
+
+#[test]
+fn the_policy_json_lists_the_rotate_patterns() {
+    let p = pol_r(&["a"], &["agent_*"]);
+    assert_eq!(
+        p.to_json(),
+        json!({"credentials": ["a"], "methods": ["GET"], "approval": [], "create": [], "rotate": ["agent_*"]})
     );
 }

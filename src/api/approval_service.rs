@@ -106,11 +106,11 @@ fn approve_inner(
         .map_err(|_| FerroError::ApprovalNotPending)
 }
 
-/// Approve the pending **create** approval `id`: exactly one operation, the
-/// one it was opened for, may proceed. There is no duration and no grant: the
+/// Approve the pending **create** or **rotate** approval `id`: exactly one
+/// operation, the one it was opened for, may proceed. There is no duration and no grant: the
 /// approval is used up by the first request that matches it (the held one, or
 /// a retry within `approval.pending_ttl_secs`). Wakes the held requests and
-/// emits `approval_granted` with `kind` `create`.
+/// emits `approval_granted` with `kind` `create` or `rotate`.
 pub fn approve_create(
     state: &AppState,
     caller: Caller<'_>,
@@ -289,9 +289,10 @@ pub async fn list_approvals(
 /// * `forward`: `{ "minutes": N }`. Creates a grant for `minutes`; held
 ///   requests proceed at once, and a request retried within the grant passes.
 ///   The answer is `{ "status": "approved", "kind": "forward", "grant": {...} }`.
-/// * `create`: **no body** (an empty body or `{}`). Allows exactly one
-///   operation, once; there is no duration, and a `minutes` is refused
-///   (`400`). The answer is `{ "status": "approved", "kind": "create" }`.
+/// * `create` and `rotate`: **no body** (an empty body or `{}`). Allows
+///   exactly one operation, once; there is no duration, and a `minutes` is
+///   refused (`400`). The answer is `{ "status": "approved", "kind": "create" }`
+///   (or `"rotate"`).
 ///
 /// Admin auth required.
 pub async fn approve_approval(
@@ -319,10 +320,12 @@ pub async fn approve_approval(
         e
     };
     match kind {
-        Some(approvals::ApprovalKind::Create) => {
+        Some(one_shot @ (approvals::ApprovalKind::Create | approvals::ApprovalKind::Rotate)) => {
             check_create_body(&headers, &body).map_err(reject)?;
             approve_create(&state, caller, &id, API_APPROVER)?;
-            Ok(Json(json!({ "status": "approved", "kind": "create" })))
+            Ok(Json(
+                json!({ "status": "approved", "kind": one_shot.as_str() }),
+            ))
         }
         Some(approvals::ApprovalKind::Forward) | None => {
             let minutes = if kind.is_some() {

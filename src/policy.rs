@@ -23,6 +23,11 @@
 //!   its own permission: it is independent of `credentials` (reading and
 //!   using credentials) and of `methods` (forwarding). Adding or broadening a
 //!   pattern widens what the key can do.
+//! * `rotate` is the same kind of list for **rotating** the password of an
+//!   item that is already in the managed collection
+//!   (`POST /v1/credentials/{name}/rotate`). Its own permission, independent of
+//!   `create`, `credentials` and `methods`; adding or broadening a pattern
+//!   widens what the key can do.
 //! * `["*"]` is unrestricted, spelled out. `[]` means nothing is allowed.
 //!   There is no "unset means everything" state anywhere: a key must be given
 //!   both lists when it is created, and a legacy key without them is
@@ -64,6 +69,10 @@ pub struct KeyPolicy {
     /// Credential name patterns this key may ask to have created in the
     /// managed collection; `["*"]` = any name, `[]` = none.
     pub create: Vec<String>,
+    /// Credential name patterns this key may ask to have **rotated**
+    /// (`POST /v1/credentials/{name}/rotate`): only items in the managed
+    /// collection, whatever the pattern. `["*"]` = any name, `[]` = none.
+    pub rotate: Vec<String>,
 }
 
 impl KeyPolicy {
@@ -73,12 +82,14 @@ impl KeyPolicy {
         methods: Vec<String>,
         approval: Vec<String>,
         create: Vec<String>,
+        rotate: Vec<String>,
     ) -> FerroResult<Self> {
         Ok(Self {
             credentials: validate_credentials(credentials)?,
             methods: validate_methods(methods)?,
             approval: validate_approval(approval)?,
             create: validate_create(create)?,
+            rotate: validate_rotate(rotate)?,
         })
     }
 
@@ -90,6 +101,7 @@ impl KeyPolicy {
         methods: Patch<Vec<String>>,
         approval: Patch<Vec<String>>,
         create: Patch<Vec<String>>,
+        rotate: Patch<Vec<String>>,
     ) -> FerroResult<Self> {
         let mut out = self.clone();
         if let Patch::Value(list) = credentials {
@@ -104,6 +116,9 @@ impl KeyPolicy {
         if let Patch::Value(list) = create {
             out.create = validate_create(list)?;
         }
+        if let Patch::Value(list) = rotate {
+            out.rotate = validate_rotate(list)?;
+        }
         Ok(out)
     }
 
@@ -117,6 +132,12 @@ impl KeyPolicy {
     /// created?
     pub fn allows_create(&self, name: &str) -> bool {
         self.create.iter().any(|p| wildcard_match(p, name))
+    }
+
+    /// Does the policy let the key ask for the credential called `name` to be
+    /// rotated?
+    pub fn allows_rotate(&self, name: &str) -> bool {
+        self.rotate.iter().any(|p| wildcard_match(p, name))
     }
 
     /// Does the policy let the key reference a credential called `name`?
@@ -172,7 +193,8 @@ impl KeyPolicy {
         let patterns_wider = draft.credentials.iter().any(|p| !self.allows_credential(p));
         let approval_weaker = self.approval.iter().any(|p| !draft.requires_approval(p));
         let create_wider = draft.create.iter().any(|p| !self.allows_create(p));
-        methods_wider || patterns_wider || approval_weaker || create_wider
+        let rotate_wider = draft.rotate.iter().any(|p| !self.allows_rotate(p));
+        methods_wider || patterns_wider || approval_weaker || create_wider || rotate_wider
     }
 
     /// `{ "credentials": [...], "methods": [...], "approval": [...], "create": [...] }`, as
@@ -183,6 +205,7 @@ impl KeyPolicy {
             "methods": self.methods,
             "approval": self.approval,
             "create": self.create,
+            "rotate": self.rotate,
         })
     }
 }
@@ -248,6 +271,11 @@ pub fn validate_approval(patterns: Vec<String>) -> FerroResult<Vec<String>> {
 /// Validate the create patterns: the same rules as the credential patterns.
 pub fn validate_create(patterns: Vec<String>) -> FerroResult<Vec<String>> {
     validate_patterns("create", patterns)
+}
+
+/// Validate the rotate patterns: the same rules as the credential patterns.
+pub fn validate_rotate(patterns: Vec<String>) -> FerroResult<Vec<String>> {
+    validate_patterns("rotate", patterns)
 }
 
 fn validate_patterns(field: &str, patterns: Vec<String>) -> FerroResult<Vec<String>> {
@@ -371,6 +399,8 @@ impl<'de> Visitor<'de> for ListVisitor {
     fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
         let hint = if self.0 == "approval" {
             "leave it out for no extra approval requirement, or send [\"*\"] to require approval for every credential"
+        } else if self.0 == "rotate" {
+            "leave it out so the key cannot rotate credentials, or send [\"*\"] to let it rotate any name in the managed collection"
         } else if self.0 == "create" {
             "leave it out so the key cannot create credentials, or send [\"*\"] to let it create any name"
         } else {
@@ -450,6 +480,7 @@ list_fields!(
     "approval"
 );
 list_fields!(patch_create, required_create, stored_create, "create");
+list_fields!(patch_rotate, required_rotate, stored_rotate, "rotate");
 
 /// For an optional nested object (`request`): absent is `None`, `null` is an
 /// error rather than another way of saying "absent".

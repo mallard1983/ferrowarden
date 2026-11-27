@@ -96,7 +96,7 @@ fn approve(s: &Arc<ApprovalStore>, id: &str, minutes: u32, now: DateTime<Utc>) -
 #[test]
 fn either_source_requires_approval_and_neither_can_exempt_the_other() {
     let mut policy =
-        KeyPolicy::from_raw(vec!["*".into()], vec!["*".into()], vec![], vec![]).unwrap();
+        KeyPolicy::from_raw(vec!["*".into()], vec!["*".into()], vec![], vec![], vec![]).unwrap();
     let flags: BTreeMap<String, bool> = [
         ("plain".to_string(), false),
         ("field".to_string(), true),
@@ -886,4 +886,116 @@ fn the_views_say_what_a_create_asks_for_and_never_a_value() {
     assert_eq!(fv.to_json()["method"], "GET");
     let e = serde_json::to_value(requested_event(&ctx, &fv, None)).unwrap();
     assert_eq!(e["ferrowarden"]["details"]["kind"], "forward");
+}
+
+// ── Rotate approvals: the same one-shot approval ──────────────────────────────
+
+fn rotate_detail(name: &str) -> RotateDetail {
+    RotateDetail {
+        name: name.to_string(),
+        collection: "Ferrowarden managed".to_string(),
+        charset: "alphanumeric".to_string(),
+        length: 32,
+    }
+}
+
+fn check_rotate(
+    s: &Arc<ApprovalStore>,
+    key: &str,
+    fp: &str,
+    cfg: &ApprovalConfig,
+    now: DateTime<Utc>,
+) -> Check {
+    let d = rotate_detail("agent_keycloak_svc");
+    let ask = RotateAsk {
+        key_id: key,
+        key_name: "agent",
+        request_id: "req-9",
+        fingerprint: fp,
+        detail: &d,
+    };
+    s.check_rotate(&ask, cfg, now).unwrap()
+}
+
+#[test]
+fn a_rotation_opens_an_approval_of_the_rotate_kind_and_a_repeat_reuses_it() {
+    let s = store();
+    let (id, created, _g) = pending_id(check_rotate(&s, "k1", "fp-a", &cfg(), t0()));
+    assert!(created);
+    let view = s.get(&id, t0()).unwrap();
+    assert_eq!(view.kind, ApprovalKind::Rotate);
+    assert_eq!(view.kind.as_str(), "rotate");
+    assert!(view.create.is_none());
+    assert_eq!(view.rotate.as_ref().unwrap().name, "agent_keycloak_svc");
+    assert_eq!(view.items[0].item, "agent_keycloak_svc");
+    assert_eq!(s.kind_of(&id, t0()), Some(ApprovalKind::Rotate));
+    let json = view.to_json();
+    assert_eq!(json["kind"], "rotate");
+    assert_eq!(json["rotate"]["name"], "agent_keycloak_svc");
+    assert_eq!(json["rotate"]["generate"]["length"], 32);
+    assert!(json.get("origin").is_none() && json.get("method").is_none());
+
+    let (again, created, _g2) = pending_id(check_rotate(&s, "k1", "fp-a", &cfg(), t0()));
+    assert_eq!((again.as_str(), created), (id.as_str(), false));
+    let (other, created, _g3) = pending_id(check_rotate(&s, "k1", "fp-b", &cfg(), t0()));
+    assert!(created && other != id);
+    let (other_key, created, _g4) = pending_id(check_rotate(&s, "k2", "fp-a", &cfg(), t0()));
+    assert!(created && other_key != id);
+}
+
+#[test]
+fn an_approved_rotation_is_used_up_once_and_is_never_a_grant() {
+    let s = store();
+    let (id, _, _g) = pending_id(check_rotate(&s, "k1", "fp-a", &cfg(), t0()));
+    let view = approve_create(&s, &id, t0() + secs(5));
+    assert_eq!(view.kind, ApprovalKind::Rotate);
+    assert_eq!(s.counts(t0() + secs(5)), (0, 0), "no grant");
+    assert!(!s.consume_create("k2", "fp-a", t0() + secs(6)));
+    assert!(matches!(
+        check_rotate(&s, "k1", "fp-a", &cfg(), t0() + secs(7)),
+        Check::Granted
+    ));
+    let (_, created, _g) = pending_id(check_rotate(&s, "k1", "fp-a", &cfg(), t0() + secs(8)));
+    assert!(created, "used up: the next one asks again");
+}
+
+#[test]
+fn a_forward_approval_cannot_be_approved_as_a_rotation_and_the_reverse() {
+    let s = store();
+    let a = Ask::new("k1", "https://pve.example.com:8006/x");
+    let (fwd, _, _g) = pending_id(a.check(&s, &["item"], &cfg(), t0()));
+    assert!(s
+        .approve_create(&fwd, Duration::from_secs(60), t0())
+        .is_err());
+    let (rot, _, _g2) = pending_id(check_rotate(&s, "k1", "fp-a", &cfg(), t0()));
+    assert!(s.approve(&rot, "g1".into(), 5, "x", t0()).is_err());
+}
+
+#[test]
+fn a_denied_rotation_stands_for_that_operation_only() {
+    let s = store();
+    let (id, _, _g) = pending_id(check_rotate(&s, "k1", "fp-a", &cfg(), t0()));
+    s.deny(&id, Duration::from_secs(300), t0()).unwrap();
+    assert!(matches!(
+        check_rotate(&s, "k1", "fp-a", &cfg(), t0() + secs(10)),
+        Check::Denied
+    ));
+    let (_, created, _g) = pending_id(check_rotate(&s, "k1", "fp-b", &cfg(), t0() + secs(10)));
+    assert!(created, "another operation is asked about");
+    // After the cooldown the same operation asks again.
+    let (_, created, _g) = pending_id(check_rotate(&s, "k1", "fp-a", &cfg(), t0() + secs(400)));
+    assert!(created);
+}
+
+#[test]
+fn rotate_approvals_count_towards_the_same_limits_as_the_other_kinds() {
+    let s = store();
+    let mut c = cfg();
+    c.max_pending_per_key = 2;
+    let _a = pending_id(check_rotate(&s, "k1", "fp-1", &c, t0()));
+    let _b = pending_id(check_create(&s, "k1", "fp-2", &c, t0()));
+    assert!(matches!(
+        check_rotate(&s, "k1", "fp-3", &c, t0()),
+        Check::LimitReached
+    ));
 }

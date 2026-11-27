@@ -63,6 +63,9 @@ fn all_actions_are_listed() {
             Action::GrantRevoked => 34,
             Action::GrantExpired => 35,
             Action::CredentialCreate => 36,
+            Action::CredentialRotateStart => 37,
+            Action::CredentialRotateCommit => 38,
+            Action::CredentialRotateAbort => 39,
         }
     }
     for (i, a) in Action::ALL.into_iter().enumerate() {
@@ -369,6 +372,15 @@ fn reason_codes_are_the_documented_snake_case_list() {
             "credential_create_out_of_scope",
         ),
         (Reason::VaultWriteFailed, "vault_write_failed"),
+        (
+            Reason::CredentialRotateOutOfScope,
+            "credential_rotate_out_of_scope",
+        ),
+        (Reason::CredentialNotManaged, "credential_not_managed"),
+        (Reason::CredentialNotRotatable, "credential_not_rotatable"),
+        (Reason::RotationInProgress, "rotation_in_progress"),
+        (Reason::NoRotationPending, "no_rotation_pending"),
+        (Reason::VaultConflict, "vault_conflict"),
     ];
     assert_eq!(all.len(), Reason::ALL.len());
     for ((reason, code), listed) in all.into_iter().zip(Reason::ALL) {

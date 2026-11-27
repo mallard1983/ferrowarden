@@ -168,6 +168,7 @@ fn every_family_is_registered_with_the_right_type() {
         ("ferrowarden_approval_requests", "counter"),
         ("ferrowarden_forward_approval", "counter"),
         ("ferrowarden_credential_creates", "counter"),
+        ("ferrowarden_credential_rotations", "counter"),
         ("ferrowarden_approvals_pending", "gauge"),
         ("ferrowarden_approval_grants_active", "gauge"),
         ("ferrowarden_forward_credential_uses", "counter"),
@@ -1057,4 +1058,84 @@ fn credential_creates_are_counted_by_a_fixed_outcome() {
         ["outcome"]
     );
     assert!(!text.contains("agent_keycloak_admin"));
+}
+
+// ── Credential rotations ──────────────────────────────────────────────────────
+
+fn rotate_event(action: Action, failure: Option<Reason>) -> SecurityEvent {
+    let e = SecurityEvent::new(action)
+        .request(&ctx())
+        .key(&key("agent-a"))
+        .credentials(["agent_keycloak_svc"])
+        .detail("by", "agent");
+    match failure {
+        Some(reason) => e.outcome(Outcome::Failure).reason(reason),
+        None => e,
+    }
+}
+
+#[test]
+fn credential_rotations_are_counted_by_stage_and_a_fixed_outcome() {
+    let m = metrics(false);
+    let mut c = Consumer::new(m.clone());
+
+    // Every stage and outcome is there from the start, at zero.
+    let text = render(&m);
+    for stage in ROTATE_STAGES {
+        for outcome in ROTATE_OUTCOMES {
+            let series = format!(
+                "ferrowarden_credential_rotations_total{{stage=\"{stage}\",outcome=\"{outcome}\"}}"
+            );
+            assert_eq!(value(&text, &series), Some(0.0), "{series}");
+        }
+    }
+
+    c.process(&rotate_event(Action::CredentialRotateStart, None));
+    c.process(&rotate_event(Action::CredentialRotateStart, None));
+    c.process(&rotate_event(Action::CredentialRotateCommit, None));
+    c.process(&rotate_event(Action::CredentialRotateAbort, None));
+    for reason in [
+        Reason::ApprovalDenied,
+        Reason::ApprovalPending,
+        Reason::ApprovalLimitReached,
+        Reason::CredentialRotateOutOfScope,
+        Reason::CredentialNotManaged,
+        Reason::CredentialNotRotatable,
+        Reason::RotationInProgress,
+        Reason::NoRotationPending,
+        Reason::VaultConflict,
+        Reason::VaultWriteFailed,
+        Reason::ManagedCollectionUnavailable,
+        Reason::CredentialCreateDisabled,
+        // Anything else is `other`, never a new label.
+        Reason::TargetBlocked,
+        Reason::VaultLocked,
+    ] {
+        c.process(&rotate_event(Action::CredentialRotateCommit, Some(reason)));
+    }
+    let text = render(&m);
+    let series = |stage: &str, outcome: &str| {
+        format!("ferrowarden_credential_rotations_total{{stage=\"{stage}\",outcome=\"{outcome}\"}}")
+    };
+    assert_eq!(value(&text, &series("start", "success")), Some(2.0));
+    assert_eq!(value(&text, &series("commit", "success")), Some(1.0));
+    assert_eq!(value(&text, &series("abort", "success")), Some(1.0));
+    for outcome in ROTATE_OUTCOMES {
+        let want = match outcome {
+            "success" => 1.0,
+            "other" => 2.0,
+            _ => 1.0,
+        };
+        assert_eq!(
+            value(&text, &series("commit", outcome)),
+            Some(want),
+            "{outcome}"
+        );
+    }
+    // Only the stage and the outcome are labels: no name, key or id.
+    assert_eq!(
+        label_names(&text, "ferrowarden_credential_rotations_total"),
+        ["outcome", "stage"]
+    );
+    assert!(!text.contains("agent_keycloak_svc"));
 }

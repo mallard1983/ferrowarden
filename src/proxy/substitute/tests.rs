@@ -349,3 +349,83 @@ fn check_phase_needs_no_vault_and_matches_resolve_errors() {
     )
     .is_ok());
 }
+
+#[test]
+fn next_resolves_only_while_a_rotation_is_pending_and_is_scrubbed_like_the_password() {
+    let mut e = CredentialEntry::login("1", &["https://a.example"]);
+    // No rotation pending: the ordinary unknown-placeholder error.
+    assert!(matches!(
+        plan(&ph("svc", Selector::Next), &e),
+        Err(FerroError::UnknownPlaceholder(_))
+    ));
+    e.has_next = true;
+    let (fetch, scrub) = plan(&ph("svc", Selector::Next), &e).unwrap();
+    assert!(matches!(fetch, Fetch::Builtin(Builtin::Next)));
+    assert!(scrub, "scrubbed from responses");
+    // The password is still the password.
+    assert!(matches!(
+        plan(&ph("svc", Selector::Password), &e).unwrap().0,
+        Fetch::Builtin(Builtin::Password)
+    ));
+    // The reserved field is not offered as a custom field.
+    assert!(matches!(
+        plan(&ph("svc", Selector::Field("ferrowarden_next".into())), &e),
+        Err(FerroError::UnknownPlaceholder(_))
+    ));
+    // Not on a secure note.
+    e.kind = ItemKind::SecureNote;
+    assert!(plan(&ph("svc", Selector::Next), &e).is_err());
+}
+
+#[test]
+fn next_has_the_host_binding_and_the_reprompt_rule_of_the_item() {
+    let mut e = CredentialEntry::login("1", &["https://a.example"]);
+    e.has_next = true;
+    let creds: CredentialMap = [("svc".to_string(), vec![e.clone()])].into();
+    let set: BTreeSet<Placeholder> = [ph("svc", Selector::Next)].into();
+    assert!(check_credentials(&set, &creds, &url("https://a.example/x"), true).is_ok());
+    let err = check_credentials(&set, &creds, &url("https://evil.example/x"), true).unwrap_err();
+    assert!(matches!(err, FerroError::CredentialHostNotAllowed { .. }));
+    e.reprompt = true;
+    let creds: CredentialMap = [("svc".to_string(), vec![e])].into();
+    assert!(matches!(
+        check_credentials(&set, &creds, &url("https://a.example/x"), true),
+        Err(FerroError::RepromptRequired(_))
+    ));
+}
+
+#[test]
+fn an_item_that_needs_approval_needs_it_for_next_too() {
+    let mut e = CredentialEntry::login("1", &["https://a.example"]);
+    e.has_next = true;
+    e.approval_required = true;
+    let creds: CredentialMap = [("svc".to_string(), vec![e])].into();
+    let set: BTreeSet<Placeholder> = [ph("svc", Selector::Next)].into();
+    let plan = check_credentials(&set, &creds, &url("https://a.example/x"), true).unwrap();
+    assert_eq!(plan.approval_fields().get("svc"), Some(&true));
+}
+
+#[tokio::test]
+async fn next_is_substituted_with_its_own_value_and_the_password_with_its() {
+    let vault = crate::vault::fake::FakeVault::default();
+    let e = {
+        let mut e = CredentialEntry::login("id-1", &["https://a.example"]);
+        e.has_next = true;
+        e
+    };
+    vault.set_password("id-1", "CURRENT");
+    vault.set_next("id-1", "PENDING");
+    let creds: CredentialMap = [("svc".to_string(), vec![e])].into();
+    let set: BTreeSet<Placeholder> =
+        [ph("svc", Selector::Password), ph("svc", Selector::Next)].into();
+    let values = resolve_credentials(&set, &creds, &url("https://a.example/"), true, &vault)
+        .await
+        .unwrap();
+    let out = substitute_str(
+        "old={{vault:svc}} new={{vault:svc:next}}",
+        &values,
+        &SessionValues::new(),
+    );
+    assert_eq!(out.as_str(), "old=CURRENT new=PENDING");
+    assert!(values.values().all(|r| r.scrub));
+}

@@ -5,7 +5,7 @@ Ferrowarden reads the vault itself: it speaks the Bitwarden client protocol to V
 - No extra containers: no Bitwarden CLI and no Node.js.
 - Secrets are decrypted in Ferrowarden, one value at a time, on request. Nothing decrypted crosses a network.
 - The vault is held in memory as ciphertext. Only metadata (names, URIs, field names) is decrypted.
-- It can also **write**, in one place only: a login item in the [managed collection](#the-write-path-and-the-managed-collection), when an agent asks for a credential and a human approves ([managed-credentials.md](managed-credentials.md)). Everything else it does is read-only.
+- It can also **write**, in one place only: the [managed collection](#the-write-path-and-the-managed-collection). It creates a login there when an agent asks for a credential, and it [edits](#editing-an-item-the-rotation) one that is there to rotate its password, each time after a human approves ([managed-credentials.md](managed-credentials.md)). Everything else it does is read-only.
 
 The code that reads the vault sits behind an internal `Vault` interface, and everything else (placeholders, host binding, policy, scrubbing, events, the admin UI) uses only that. The interface stays so that another backend can be added later; the native one is its only implementation.
 
@@ -58,17 +58,18 @@ Starting 0.3.0 with `vault.backend = "bw-serve"` set fails with an error that po
 
 ## Reserved custom fields
 
-Three custom fields are Ferrowarden's own, not offered as fields (a placeholder cannot name them, and they are not in the credential listing):
+Four custom fields are Ferrowarden's own, not offered as fields (a placeholder cannot name them, and they are not in the credential listing):
 
 | Field | Value | Effect |
 |---|---|---|
 | `ferrowarden_uris` | URIs, comma- or newline-separated | The item's host bindings; overrides a login's URIs and gives secure notes a binding |
 | `ferrowarden_approval` | `required` | A person has to approve use of the item ([approvals.md](approvals.md)). **Any other value, empty included, also means required**: a typo can only make the item stricter. Items whose value is not `required` are counted in the `vault_sync` event (`warnings.approval_field_invalid`) |
 | `ferrowarden_created_by` | the name of an agent key | Written by Ferrowarden on an item it created ([managed-credentials.md](managed-credentials.md)): which key asked for it. A plain text field. Ferrowarden never reads it as a setting; it is reserved so that nobody names a field of their own that way |
+| `ferrowarden_next` | the pending new password of a rotation | Written by Ferrowarden when a rotation starts, and removed when it is committed or aborted: a **hidden** field. It is reached only as `{{vault:NAME:next}}`, with the host binding, scope, approval rules and scrubbing of the item's password. Matched by name trimmed and in any letter case. More than one is a `vault_conflict`. See [editing an item](#editing-an-item-the-rotation) |
 
 ## The write path and the managed collection
 
-Ferrowarden writes in exactly one situation: an agent key asked to **create a credential** and a human approved that one operation ([managed-credentials.md](managed-credentials.md)). The code is small and kept apart (`src/vault/native/write.rs`, with the encryption in `enc.rs`); nothing else in the backend writes, rotates, edits or deletes.
+Ferrowarden writes in two situations, both for an agent key and both after a human approved that one operation ([managed-credentials.md](managed-credentials.md)): it **creates a credential** (this section), and it **rotates** the password of one that is in the managed collection ([editing an item](#editing-an-item-the-rotation)). The code is small and kept apart (`src/vault/native/write.rs` and `rotate.rs`, with the encryption in `enc.rs`); nothing else in the backend writes, moves or deletes.
 
 **Where.** `vault.managed.collection` names one organisation collection. On every unlock and sync Ferrowarden reads the account's `collections` from `/api/sync` (id, organisation, name, and the account's own `readOnly` and `hidePasswords` flags; each item's `collectionIds` are read too, to count the items in it) and decides whether the collection is **usable**: it exists, `readOnly` is `false`, `hidePasswords` is `false` (a flag the server did not send counts against it) and the organisation key is available. Names are decrypted with the organisation key; a name that matches more than one collection is an error (use the id). The request for a write takes its target from this evaluated state and from nothing the agent sent, so it cannot name another collection. When the collection is not usable, nothing is written: no fallback to another collection or to the personal vault.
 
@@ -84,6 +85,41 @@ Ferrowarden writes in exactly one situation: an agent key asked to **create a cr
 - **Provenance.** Written from the item format and the primitives, as the reading side is. No Bitwarden SDK or client code is used or copied; `docker/bw-seed.js`, a Node writer of the same format for the test stack, was read to understand the wire format and the Rust was written independently.
 
 **Trust.** The write path asks for one thing it did not need before: the Ferrowarden account has **edit rights on the managed collection** (an organisation owner or admin, or a member with "Can edit" on it). See [security.md](security.md#22-generated-credentials-and-the-managed-collection).
+
+## Editing an item: the rotation
+
+Rotating a password ([managed-credentials.md](managed-credentials.md#rotating-a-credential)) is the one time Ferrowarden **edits an item that already exists**, and it is the riskiest thing the write path does: the item may hold things Ferrowarden knows nothing about (notes a person wrote, a TOTP secret, passkeys, fields of a future version of Vaultwarden), and a careless write would silently erase them. So the edit is built as a **round-trip** that changes as little as possible. The code is `src/vault/native/rotate.rs` (the pure JSON edits, with their tests) and `NativeVault::rotate` (the calls).
+
+**The sequence** for each of start, commit and abort:
+
+1. Ferrowarden checks, from its own state, that the item is in the managed collection of the managed organisation. Nothing else is ever read or written.
+2. It reads the item as the server holds it **now**: `GET /api/ciphers/{id}` (one item, bounded to 1 MiB, never logged).
+3. It checks the item it just read (not only its cached copy): the organisation is the managed one, the managed collection is among its `collectionIds`, it is a login with a password.
+4. It makes the new item as a `serde_json::Value` (below), and sends it with `PUT /api/ciphers/{id}`, naming the revision it read in `lastKnownRevisionDate`. A `401` is retried once with a fresh login; nothing else is retried, because a request that timed out may have been applied.
+
+**The round-trip.** The item is read as JSON and **only the members named below are changed**; every other member, unknown ones included, is sent back as it came. Which members of the answer are sent back (checked against Vaultwarden 1.36.0 and 1.37.5, and recorded in `rotate.rs`):
+
+| Member | In the `PUT` |
+|---|---|
+| `object`, `id`, `creationDate`, `revisionDate`, `deletedDate`, `archivedDate`, `attachments`, `collectionIds`, `edit`, `viewPassword`, `permissions`, `organizationUseTotp`, `data` | **dropped**: the server's own bookkeeping. `id` is in the URL, `revisionDate` becomes `lastKnownRevisionDate`, an edit does not change collections or attachments, and `data` is a legacy copy of the type's members |
+| `encryptedFor` | **added**: the account's own id, as a create sends it. Vaultwarden 1.37 refuses a `PUT` without it (`missing field`), and a read does not return it |
+| `type`, `name`, `notes`, `key`, `organizationId`, `folderId`, `favorite`, `reprompt`, `secureNote`, `card`, `identity`, `sshKey`, `login` (URIs and checksums, TOTP, passkeys, unknown members), `fields`, `passwordHistory` and anything else | **sent back as it was** (the same ciphertext), except what an operation changes |
+
+The operations change exactly this, and a unit test compares the item before and after, member by member:
+
+- **Start** appends a **hidden** (type 1) custom field `ferrowarden_next` whose value is the new password, encrypted with the item's key. Nothing else changes.
+- **Commit**, in one `PUT`: `login.password` becomes the pending field's ciphertext **as it is** (it is the same key, so nothing is decrypted and encrypted again for it; before it is used it is checked to decrypt under the item's key, and the commit fails closed if it does not); the old `login.password` ciphertext goes to the **front** of `passwordHistory` as `{ "password": <old ciphertext>, "lastUsedDate": <now> }` (newest first; at most five entries are kept, the oldest is dropped, the way the Bitwarden clients keep it); `login.passwordRevisionDate` is set to now; the `ferrowarden_next` field is removed.
+- **Abort** removes the `ferrowarden_next` field. Nothing else changes.
+
+**The item's key** is its own key (`key`, unwrapped with the organisation key) if it has one, otherwise the organisation key. Fields Ferrowarden does not change keep their ciphertext; only the new values are encrypted.
+
+**Never overwriting a person.** `lastKnownRevisionDate` is the item's `revisionDate` as it was read, so Vaultwarden refuses a write that finds the item changed since (a `400` whose message says the client copy is out of date; Ferrowarden recognises that message, reads it only for that phrase and never logs it, and treats a `409` the same way). That is `409 vault_conflict` to the agent. Vaultwarden compares the dates with a tolerance of a second, so Ferrowarden also keeps, in memory, the revision the item had right after **its own** start: a commit or abort that finds another revision refuses before sending anything. (A restart forgets it, and the server's own check still applies.) A conflict, or a pending field that is duplicated or does not decrypt, is never "fixed" by guessing: the answer asks for a person.
+
+**The reserved field.** `ferrowarden_next` is matched by name, trimmed and in any letter case. It is never offered as a `field:` placeholder, is not in the listing's fields, and is read only through `{{vault:NAME:next}}`. An item that has more than one is a `vault_conflict`.
+
+**How it is verified.** The edits are unit-tested on JSON fixtures with and without an item key: the exact set of members that differ before and after, unknown members and a person's notes kept, the history order and its cap of five, the password date, a pending value under the wrong key failing closed, a duplicated field. `NativeVault` is tested against a mock Vaultwarden that answers a stale `PUT` the way the real one does. In CI, against Vaultwarden 1.37.5 and 1.36.0, the integration suite rotates an item through Ferrowarden and the **independent reader** (`docker/bw-read-item.js`) decrypts the result with Node: the stored password is the new one, the old one is the newest entry of the history, the pending field is gone and the other members are as they were. In its editor mode the same script saves a change to the item's notes as a person would, between the start and the commit, to show that the commit is refused and the change is intact.
+
+**Trust.** The same as for creating: the account's edit rights on the managed collection. Rotating adds no permission, but it does make Ferrowarden able to *change* an item that was not created by it, which is why the item must be in the managed collection, why a person must have approved the start, and why a change by a person always wins.
 
 ## Fail closed, per item
 

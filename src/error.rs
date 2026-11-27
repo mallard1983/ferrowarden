@@ -111,7 +111,7 @@ pub enum FerroError {
 
     // Creating credentials (docs/managed-credentials.md). Each has a stable
     // `code` in the response body.
-    #[error("Creating credentials is switched off: no managed collection is configured (vault.managed.collection)")]
+    #[error("Creating and rotating credentials is switched off: no managed collection is configured (vault.managed.collection)")]
     CredentialCreateDisabled,
 
     #[error("This agent key may not create a credential called {0}")]
@@ -124,9 +124,33 @@ pub enum FerroError {
     ManagedCollectionUnavailable(ManagedProblem),
 
     #[error(
-        "The credential could not be written to the vault; nothing was created. Try again later."
+        "The credential could not be written to the vault; nothing was created or changed. Try again later."
     )]
     VaultWriteFailed,
+
+    // Rotating credentials (docs/managed-credentials.md). Each has a stable
+    // `code` in the response body.
+    #[error("This agent key may not rotate a credential called {0}")]
+    CredentialRotateOutOfScope(String),
+
+    // One answer for "exists elsewhere" and "does not exist", so that it is
+    // not an existence oracle for names outside the key's scope.
+    #[error(
+        "There is no credential called {0} in the managed collection, so it cannot be rotated"
+    )]
+    CredentialNotManaged(String),
+
+    #[error("The credential {0} cannot be rotated: only a login with a password and without master password re-prompt can")]
+    CredentialNotRotatable(String),
+
+    #[error("A rotation of {0} is already in progress: commit it or abort it first")]
+    RotationInProgress(String),
+
+    #[error("No rotation of {0} is pending: start one first")]
+    NoRotationPending(String),
+
+    #[error("Someone changed the item in the vault while it was being rotated, or it needs a person to fix it. Nothing was overwritten: re-read the credential and try again.")]
+    VaultConflict,
 
     // Config errors
     #[error("Configuration error: {0}")]
@@ -164,8 +188,8 @@ impl FerroError {
         }
     }
 
-    /// The stable code of the errors of creating a credential (`None` for
-    /// every other error).
+    /// The stable code of the errors of creating and rotating a credential
+    /// (`None` for every other error).
     pub fn create_code(&self) -> Option<&'static str> {
         match self {
             FerroError::CredentialCreateDisabled => Some("credential_create_disabled"),
@@ -173,6 +197,12 @@ impl FerroError {
             FerroError::CredentialExists(_) => Some("credential_exists"),
             FerroError::ManagedCollectionUnavailable(_) => Some("managed_collection_unavailable"),
             FerroError::VaultWriteFailed => Some("vault_write_failed"),
+            FerroError::CredentialRotateOutOfScope(_) => Some("credential_rotate_out_of_scope"),
+            FerroError::CredentialNotManaged(_) => Some("credential_not_managed"),
+            FerroError::CredentialNotRotatable(_) => Some("credential_not_rotatable"),
+            FerroError::RotationInProgress(_) => Some("rotation_in_progress"),
+            FerroError::NoRotationPending(_) => Some("no_rotation_pending"),
+            FerroError::VaultConflict => Some("vault_conflict"),
             _ => None,
         }
     }
@@ -221,6 +251,15 @@ impl FerroError {
                 (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
             }
             FerroError::VaultWriteFailed => (StatusCode::BAD_GATEWAY, self.to_string()),
+            FerroError::CredentialRotateOutOfScope(_) | FerroError::CredentialNotManaged(_) => {
+                (StatusCode::FORBIDDEN, self.to_string())
+            }
+            FerroError::CredentialNotRotatable(_) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
+            }
+            FerroError::RotationInProgress(_)
+            | FerroError::NoRotationPending(_)
+            | FerroError::VaultConflict => (StatusCode::CONFLICT, self.to_string()),
             FerroError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             FerroError::UnlockEndpointDisabled => (StatusCode::NOT_FOUND, self.to_string()),
             FerroError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),

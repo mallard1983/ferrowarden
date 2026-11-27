@@ -23,6 +23,9 @@
 #     (docs/managed-credentials.md) and then sent to the mock's setup API
 #     (kind `created_password` in /__issued__): generated inside Ferrowarden,
 #     it must never have reached a log, an event, a metric or any response
+#   - every password a rotation generated and the agent set at the mock's
+#     rotating service (kind `rotating_password`, the first password included):
+#     the same promise for rotated credentials
 # then greps (fixed-string) for each of them in
 #   - `docker compose -f docker-compose.test.yml logs <service>`
 #   - the event file(s) copied out of the container with `docker compose cp`
@@ -201,6 +204,9 @@ PY
     created_n="$(grep -c '^issued_created_password' "$secrets" || true)"
     [ "$created_n" -ge 1 ] || fail "the mock API received no generated password; run the credential-create integration tests first (nothing meaningful to check)"
     echo "Including $created_n generated-password form(s) from the mock API."
+    rotating_n="$(grep -c '^issued_rotating_password' "$secrets" || true)"
+    [ "$rotating_n" -ge 1 ] || fail "the mock API received no rotated password; run the credential-rotation integration tests first (nothing meaningful to check)"
+    echo "Including $rotating_n rotated-password form(s) from the mock API."
 fi
 
 count="$(wc -l < "$secrets" | tr -d ' ')"

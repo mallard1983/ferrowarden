@@ -91,6 +91,12 @@ struct OutcomeLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct RotationLabels {
+    stage: &'static str,
+    outcome: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct ResultLabels {
     result: &'static str,
 }
@@ -147,6 +153,27 @@ const CREATE_OUTCOMES: [&str; 10] = [
     "vault_write_failed",
     "other",
 ];
+/// The `stage` values of `ferrowarden_credential_rotations_total`.
+const ROTATE_STAGES: [&str; 3] = ["start", "commit", "abort"];
+/// The `outcome` values of `ferrowarden_credential_rotations_total`:
+/// `success`, or the reason a rotation request was refused or failed (`other`:
+/// any other reason).
+const ROTATE_OUTCOMES: [&str; 14] = [
+    "success",
+    "approval_denied",
+    "approval_pending",
+    "approval_limit_reached",
+    "credential_rotate_out_of_scope",
+    "credential_not_managed",
+    "credential_not_rotatable",
+    "rotation_in_progress",
+    "no_rotation_pending",
+    "vault_conflict",
+    "vault_write_failed",
+    "managed_collection_unavailable",
+    "credential_create_disabled",
+    "other",
+];
 /// The values of `ferrowarden_forward_approval_total{result}`: how a request
 /// that needed approval ended at the gate.
 const FORWARD_APPROVAL_RESULTS: [&str; 4] = [
@@ -186,6 +213,7 @@ pub struct Metrics {
     approval_requests: Family<OutcomeLabels, Counter>,
     forward_approval: Family<ResultLabels, Counter>,
     credential_creates: Family<OutcomeLabels, Counter>,
+    credential_rotations: Family<RotationLabels, Counter>,
     approvals_pending: Gauge,
     approval_grants_active: Gauge,
     /// Only with `metrics.credential_labels = true`.
@@ -237,6 +265,7 @@ impl Metrics {
             approval_requests: Family::default(),
             forward_approval: Family::default(),
             credential_creates: Family::default(),
+            credential_rotations: Family::default(),
             approvals_pending: Gauge::default(),
             approval_grants_active: Gauge::default(),
             credential_uses: credential_labels.then(Family::default),
@@ -352,6 +381,11 @@ impl Metrics {
             m.credential_creates.clone(),
         );
         registry.register(
+            "credential_rotations",
+            "Requests to rotate a credential's password, by stage (start, commit, abort) and outcome (success, or the reason it was refused or failed; the generated value is never exported)",
+            m.credential_rotations.clone(),
+        );
+        registry.register(
             "approvals_pending",
             "Approvals waiting for a human's decision now (names and ids are never exported)",
             m.approvals_pending.clone(),
@@ -406,6 +440,13 @@ impl Metrics {
             let _ = m
                 .credential_creates
                 .get_or_create(&OutcomeLabels { outcome });
+        }
+        for stage in ROTATE_STAGES {
+            for outcome in ROTATE_OUTCOMES {
+                let _ = m
+                    .credential_rotations
+                    .get_or_create(&RotationLabels { stage, outcome });
+            }
         }
 
         Arc::new(Self { registry, ..m })
@@ -665,6 +706,27 @@ impl Consumer {
                 self.m
                     .credential_creates
                     .get_or_create(&OutcomeLabels { outcome })
+                    .inc();
+            }
+            Action::CredentialRotateStart
+            | Action::CredentialRotateCommit
+            | Action::CredentialRotateAbort => {
+                let stage = match e.event.action {
+                    Action::CredentialRotateStart => "start",
+                    Action::CredentialRotateCommit => "commit",
+                    _ => "abort",
+                };
+                let outcome = if failed {
+                    ROTATE_OUTCOMES
+                        .into_iter()
+                        .find(|o| *o != "success" && !reason.is_empty() && *o == reason)
+                        .unwrap_or("other")
+                } else {
+                    "success"
+                };
+                self.m
+                    .credential_rotations
+                    .get_or_create(&RotationLabels { stage, outcome })
                     .inc();
             }
             // `metrics_auth` failures are counted where they happen

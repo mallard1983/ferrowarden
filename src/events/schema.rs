@@ -82,12 +82,15 @@ pub enum Action {
     GrantRevoked,
     GrantExpired,
     CredentialCreate,
+    CredentialRotateStart,
+    CredentialRotateCommit,
+    CredentialRotateAbort,
 }
 
 impl Action {
     /// Every action, in the order the audit view lists them. Keep in step
     /// with the enum: the `all_actions_are_listed` test counts the variants.
-    pub const ALL: [Action; 37] = [
+    pub const ALL: [Action; 40] = [
         Action::Forward,
         Action::CredentialsList,
         Action::AgentAuth,
@@ -125,6 +128,9 @@ impl Action {
         Action::GrantRevoked,
         Action::GrantExpired,
         Action::CredentialCreate,
+        Action::CredentialRotateStart,
+        Action::CredentialRotateCommit,
+        Action::CredentialRotateAbort,
     ];
 
     /// The action whose wire name (`as_str`) is `name`.
@@ -171,6 +177,9 @@ impl Action {
             Action::GrantRevoked => "grant_revoked",
             Action::GrantExpired => "grant_expired",
             Action::CredentialCreate => "credential_create",
+            Action::CredentialRotateStart => "credential_rotate_start",
+            Action::CredentialRotateCommit => "credential_rotate_commit",
+            Action::CredentialRotateAbort => "credential_rotate_abort",
         }
     }
 
@@ -207,7 +216,10 @@ impl Action {
             | Action::ApprovalExpired
             | Action::GrantRevoked
             | Action::GrantExpired
-            | Action::CredentialCreate => "iam",
+            | Action::CredentialCreate
+            | Action::CredentialRotateStart
+            | Action::CredentialRotateCommit
+            | Action::CredentialRotateAbort => "iam",
             Action::VaultLock
             | Action::VaultSync
             | Action::Startup
@@ -268,6 +280,9 @@ impl Action {
             Action::GrantRevoked => "grant revocation",
             Action::GrantExpired => "grant expiry",
             Action::CredentialCreate => "credential creation",
+            Action::CredentialRotateStart => "credential rotation start",
+            Action::CredentialRotateCommit => "credential rotation commit",
+            Action::CredentialRotateAbort => "credential rotation abort",
         }
     }
 
@@ -311,6 +326,9 @@ impl Action {
             Action::GrantRevoked => "grant revoked",
             Action::GrantExpired => "grant expired",
             Action::CredentialCreate => "credential created",
+            Action::CredentialRotateStart => "credential rotation started",
+            Action::CredentialRotateCommit => "credential rotation committed",
+            Action::CredentialRotateAbort => "credential rotation aborted",
         }
     }
 }
@@ -389,12 +407,18 @@ pub enum Reason {
     CredentialCreateDisabled,
     CredentialCreateOutOfScope,
     VaultWriteFailed,
+    CredentialRotateOutOfScope,
+    CredentialNotManaged,
+    CredentialNotRotatable,
+    RotationInProgress,
+    NoRotationPending,
+    VaultConflict,
 }
 
 impl Reason {
     /// Every reason, in declaration order (tests and the notifier tables).
     #[cfg(test)]
-    pub const ALL: [Reason; 44] = [
+    pub const ALL: [Reason; 50] = [
         Reason::MissingKey,
         Reason::InvalidKey,
         Reason::MissingAdminKey,
@@ -439,6 +463,12 @@ impl Reason {
         Reason::CredentialCreateDisabled,
         Reason::CredentialCreateOutOfScope,
         Reason::VaultWriteFailed,
+        Reason::CredentialRotateOutOfScope,
+        Reason::CredentialNotManaged,
+        Reason::CredentialNotRotatable,
+        Reason::RotationInProgress,
+        Reason::NoRotationPending,
+        Reason::VaultConflict,
     ];
 
     /// The wire code (`event.reason`), the same text serde writes.
@@ -488,6 +518,12 @@ impl Reason {
             Reason::CredentialCreateDisabled => "credential_create_disabled",
             Reason::CredentialCreateOutOfScope => "credential_create_out_of_scope",
             Reason::VaultWriteFailed => "vault_write_failed",
+            Reason::CredentialRotateOutOfScope => "credential_rotate_out_of_scope",
+            Reason::CredentialNotManaged => "credential_not_managed",
+            Reason::CredentialNotRotatable => "credential_not_rotatable",
+            Reason::RotationInProgress => "rotation_in_progress",
+            Reason::NoRotationPending => "no_rotation_pending",
+            Reason::VaultConflict => "vault_conflict",
         }
     }
 
@@ -521,6 +557,8 @@ impl Reason {
                 | Reason::ApprovalLimitReached
                 | Reason::CredentialCreateDisabled
                 | Reason::CredentialCreateOutOfScope
+                | Reason::CredentialRotateOutOfScope
+                | Reason::CredentialNotManaged
         )
     }
 
@@ -571,6 +609,12 @@ impl Reason {
             Reason::CredentialCreateDisabled => "creating credentials is switched off",
             Reason::CredentialCreateOutOfScope => "this agent key may not create that credential",
             Reason::VaultWriteFailed => "the credential could not be written to the vault",
+            Reason::CredentialRotateOutOfScope => "this agent key may not rotate that credential",
+            Reason::CredentialNotManaged => "the credential is not in the managed collection",
+            Reason::CredentialNotRotatable => "the credential cannot be rotated",
+            Reason::RotationInProgress => "a rotation of the credential is already pending",
+            Reason::NoRotationPending => "no rotation of the credential is pending",
+            Reason::VaultConflict => "the item was changed in the vault by someone else",
         }
     }
 }
@@ -611,6 +655,12 @@ impl From<&FerroError> for Reason {
             FerroError::CredentialExists(_) => Reason::CredentialExists,
             FerroError::ManagedCollectionUnavailable(_) => Reason::ManagedCollectionUnavailable,
             FerroError::VaultWriteFailed => Reason::VaultWriteFailed,
+            FerroError::CredentialRotateOutOfScope(_) => Reason::CredentialRotateOutOfScope,
+            FerroError::CredentialNotManaged(_) => Reason::CredentialNotManaged,
+            FerroError::CredentialNotRotatable(_) => Reason::CredentialNotRotatable,
+            FerroError::RotationInProgress(_) => Reason::RotationInProgress,
+            FerroError::NoRotationPending(_) => Reason::NoRotationPending,
+            FerroError::VaultConflict => Reason::VaultConflict,
             FerroError::Config(_) => Reason::InternalError,
             FerroError::UnlockEndpointDisabled => Reason::InvalidRequest,
             FerroError::InvalidRequest(_) => Reason::InvalidRequest,
@@ -818,6 +868,9 @@ impl SecurityEvent {
             Action::KeyCreate | Action::SessionCapture | Action::CredentialCreate => {
                 vec!["creation"]
             }
+            Action::CredentialRotateStart
+            | Action::CredentialRotateCommit
+            | Action::CredentialRotateAbort => vec!["change"],
             Action::KeyRevoke | Action::SessionDelete => vec!["deletion"],
             Action::SessionUse => vec!["access"],
             Action::SessionExpire => vec!["end"],

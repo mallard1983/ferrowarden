@@ -82,6 +82,18 @@ Some credentials need a person's yes before you can use them. Your request is he
 - An approval covers your key, that credential and that host for the minutes the person chose. Do not try other credentials, hosts or methods to get around a pending approval.
 - Do not give these requests a short timeout: they can be held for a minute or more.
 
+## Rotating a credential's password
+
+To change the password of a credential in the managed collection, rotate it in two phases so the service is never locked out. You never see either password. Your key needs a `rotate` pattern for the name (`403` `credential_rotate_out_of_scope` or `credential_not_managed`: tell the user, do not try other names).
+
+1. `POST /v1/credentials/{name}/rotate` (name URL-encoded; body optional: `{ "generate": { "length": 32, "charset": "alphanumeric" } }`). A person approves. `202`: `{ "name", "current": "{{vault:name}}", "next": "{{vault:name:next}}" }`.
+2. Change it at the service through `POST /v1/forward`, signing in with `{{vault:name}}` and sending `{{vault:name:next}}`.
+3. If the service accepted it: `POST /v1/credentials/{name}/rotate/commit`. If not: `POST /v1/credentials/{name}/rotate/abort`. Neither needs another approval.
+
+- Held while the user decides: `403` `approval_pending` (with `approval_id`): ask the user to approve it in the Ferrowarden admin UI, quoting the id, then **retry the identical request**. `approval_denied`: stop, tell the user.
+- `409` `rotation_in_progress`: finish the pending one first. `409` `no_rotation_pending`: nothing to finish. `409` `vault_conflict`: someone changed the item; nothing was overwritten: read the credential again and retry, and tell the user if it persists. `422` `credential_not_rotatable`: tell the user.
+- `{{vault:name:next}}` exists only while a rotation is pending (the detailed listing shows `rotation_pending` and `next`).
+
 ## Creating a credential for a new service
 
 To set up a service that needs a new account, ask Ferrowarden to generate the credential. You get a placeholder, never the password. Your key needs a `create` pattern for the name (`403` `credential_create_out_of_scope` otherwise: tell the user), and a person approves each request.

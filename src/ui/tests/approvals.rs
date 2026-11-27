@@ -619,6 +619,7 @@ async fn key_with_approval(h: &Harness, name: &str, approval: &[&str]) -> (Strin
         vec!["GET".into()],
         approval.iter().map(|s| s.to_string()).collect(),
         vec![],
+        vec![],
     )
     .await
     .unwrap();
@@ -1136,5 +1137,383 @@ async fn widening_the_create_list_needs_confirmation_and_narrowing_does_not() {
     assert!(load(h.keys_path.as_ref().unwrap()).unwrap()[0]
         .policy()
         .create
+        .is_empty());
+}
+
+// ── Rotate approvals ──────────────────────────────────────────────────────────
+
+const MANAGED_ID: &str = "6c0d7f0e-52d0-4b5b-8a39-0e8a7f6d5c4b";
+
+/// Open a rotate approval as the gate does, without holding a request.
+fn open_rotate(h: &Harness, key: &str, name: &str) -> String {
+    let detail = crate::approvals::RotateDetail {
+        name: name.to_string(),
+        collection: "Ferrowarden managed".to_string(),
+        charset: "hex".to_string(),
+        length: 48,
+    };
+    let ask = crate::approvals::RotateAsk {
+        key_id: &format!("{key}-id"),
+        key_name: key,
+        request_id: "0193abcd-0000-7000-8000-000000000003",
+        fingerprint: &format!("fp-rotate-{name}"),
+        detail: &detail,
+    };
+    let cfg = crate::config::ApprovalConfig {
+        max_pending_per_key: 50,
+        max_requests_per_key_per_hour: 1000,
+        ..Default::default()
+    };
+    match h
+        .app
+        .approvals
+        .check_rotate(&ask, &cfg, chrono::Utc::now())
+        .unwrap()
+    {
+        Check::Wait { view, .. } | Check::Pending { view, .. } => view.id,
+        _ => panic!("not opened"),
+    }
+}
+
+#[tokio::test]
+async fn a_rotate_approval_is_listed_with_its_kind_and_shown_in_full() {
+    let h = harness(full_opts()).await;
+    let id = open_rotate(&h, "agent-a", "agent_keycloak_svc");
+    let mut b = signed_in(&h).await;
+
+    let r = b.get(&h, "/ui/approvals").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("Waiting for a decision (1)"));
+    assert!(r.body.contains("<code>rotate</code>"));
+    assert!(r.body.contains("agent_keycloak_svc"));
+    assert!(r
+        .body
+        .contains("Rotate the password, in <code>Ferrowarden managed</code>"));
+
+    let r = b.get(&h, &format!("/ui/approvals/{id}")).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_security_headers(&r);
+    for want in [
+        "Rotate this password?",
+        "agent-a",
+        "agent_keycloak_svc",
+        "48 characters, <code>hex</code>",
+        "Ferrowarden managed",
+        "never sees either password",
+        "this one rotation",
+        "Approve and start the rotation",
+    ] {
+        assert!(r.body.contains(want), "missing {want:?}");
+    }
+    for absent in [
+        "name=\"preset\"",
+        "name=\"minutes\"",
+        "How long",
+        "Create this",
+    ] {
+        assert!(!r.body.contains(absent), "unexpected {absent:?}");
+    }
+}
+
+#[tokio::test]
+async fn approving_a_rotation_in_the_ui_allows_one_operation_and_gives_no_grant() {
+    let h = harness(full_opts()).await;
+    let id = open_rotate(&h, "agent-a", "agent_one");
+    let mut b = signed_in(&h).await;
+    let csrf = detail_csrf(&mut b, &h, &id).await;
+    // A duration is not part of this approval.
+    let r = b
+        .post(
+            &h,
+            &format!("/ui/approvals/{id}/approve"),
+            &[("csrf", &csrf), ("minutes", "30")],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert!(r.body.contains("has no duration"));
+    assert_eq!(counts(&h).0, 1, "still open");
+
+    let r = b
+        .post(
+            &h,
+            &format!("/ui/approvals/{id}/approve"),
+            &[("csrf", &csrf)],
+        )
+        .await;
+    assert_eq!(
+        r.location(),
+        "/ui/approvals?m=approved_rotate",
+        "{}",
+        r.body
+    );
+    assert_eq!(counts(&h), (0, 0), "no open approval and no grant");
+    let r = b.get(&h, "/ui/approvals?m=approved_rotate").await;
+    assert!(r.body.contains("covers that one rotation only"));
+    assert!(h.app.approvals.consume_create(
+        "agent-a-id",
+        "fp-rotate-agent_one",
+        chrono::Utc::now()
+    ));
+    let granted = h.events_of("approval_granted");
+    let d = &granted[0]["ferrowarden"]["details"];
+    assert_eq!(d["kind"], "rotate");
+    assert_eq!(d["via"], "ui");
+    assert!(d.get("grant_id").is_none() && d.get("minutes").is_none());
+}
+
+#[tokio::test]
+async fn a_rotation_can_be_denied_in_the_ui() {
+    let h = harness(full_opts()).await;
+    let id = open_rotate(&h, "agent-a", "agent_two");
+    let mut b = signed_in(&h).await;
+    let csrf = detail_csrf(&mut b, &h, &id).await;
+    let r = b
+        .post(&h, &format!("/ui/approvals/{id}/deny"), &[("csrf", &csrf)])
+        .await;
+    assert_eq!(r.location(), "/ui/approvals?m=denied", "{}", r.body);
+    assert!(!h.app.approvals.consume_create(
+        "agent-a-id",
+        "fp-rotate-agent_two",
+        chrono::Utc::now()
+    ));
+}
+
+#[tokio::test]
+async fn a_hostile_rotate_request_is_escaped_on_the_pages() {
+    let h = harness(full_opts()).await;
+    let id = open_rotate(&h, "agent-a", "<script>alert(1)</script>");
+    let mut b = signed_in(&h).await;
+    for path in ["/ui/approvals".to_string(), format!("/ui/approvals/{id}")] {
+        let r = b.get(&h, &path).await;
+        assert!(!r.body.contains("<script>alert"), "{path}");
+    }
+}
+
+// ── Rotations in progress, and the operator's abort ───────────────────────────
+
+/// A managed item with a rotation pending, as the credential cache shows it.
+async fn pending_rotation(h: &Harness, name: &str) -> String {
+    let fake = fake_vault(&h.app);
+    fake.set_managed(crate::vault::model::ManagedState::Usable(
+        crate::vault::model::ManagedCollection {
+            id: MANAGED_ID.to_string(),
+            organization_id: "org-1".to_string(),
+            name: "Ferrowarden managed".to_string(),
+            items: 0,
+        },
+    ));
+    let id = fake.add_managed_item(name, &["https://svc.example.com"], "OLD-PASSWORD-VALUE");
+    fake.set_next(&id, "NEXT-PASSWORD-VALUE");
+    fake.edit_item(&id, |e| e.has_next = true);
+    crate::vault::refresh::refresh_credentials(&h.app)
+        .await
+        .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn the_approvals_page_lists_pending_rotations_and_aborts_one_after_a_sign_in() {
+    let h = harness(full_opts()).await;
+    let item = pending_rotation(&h, "agent_stuck").await;
+    let mut b = signed_in(&h).await;
+
+    let r = b.get(&h, "/ui/approvals").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("Rotations in progress (1)"), "{}", r.body);
+    assert!(r.body.contains("agent_stuck"));
+    assert!(r.body.contains("Abort rotation"));
+    assert!(r.body.contains("action=\"/ui/rotations/abort\""));
+    assert!(!r.body.contains("NEXT-PASSWORD-VALUE") && !r.body.contains("OLD-PASSWORD-VALUE"));
+    let csrf = r.csrf();
+
+    // No CSRF token: refused, nothing changed.
+    let r = b
+        .post(&h, "/ui/rotations/abort", &[("name", "agent_stuck")])
+        .await;
+    assert_ne!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert!(fake_vault(&h.app).next_of(&item).is_some());
+
+    let r = b
+        .post(
+            &h,
+            "/ui/rotations/abort",
+            &[("csrf", &csrf), ("name", "agent_stuck")],
+        )
+        .await;
+    assert_eq!(
+        r.location(),
+        "/ui/approvals?m=rotation_aborted",
+        "{}",
+        r.body
+    );
+    assert_eq!(fake_vault(&h.app).next_of(&item), None);
+    assert_eq!(
+        fake_vault(&h.app).password_of(&item).as_deref(),
+        Some("OLD-PASSWORD-VALUE")
+    );
+    let ev = h.events_of("credential_rotate_abort");
+    assert_eq!(ev.len(), 1);
+    let d = &ev[0]["ferrowarden"]["details"];
+    assert_eq!(
+        (d["by"].as_str(), d["via"].as_str()),
+        (Some("admin"), Some("ui"))
+    );
+    assert_eq!(d["approver"], EMAIL);
+    let r = b.get(&h, "/ui/approvals?m=rotation_aborted").await;
+    assert!(r.body.contains("Rotations in progress (0)"));
+    assert!(r.body.contains("Rotation aborted"));
+
+    // Again: nothing is pending any more.
+    let r = b
+        .post(
+            &h,
+            "/ui/rotations/abort",
+            &[("csrf", &csrf), ("name", "agent_stuck")],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    // And a name that is not in the managed collection.
+    let r = b
+        .post(
+            &h,
+            "/ui/rotations/abort",
+            &[("csrf", &csrf), ("name", "not_there")],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+}
+
+#[tokio::test]
+async fn aborting_a_rotation_needs_a_recent_sign_in_and_a_session() {
+    let h = harness(full_opts()).await;
+    let item = pending_rotation(&h, "agent_stuck").await;
+    // Nobody signed in: nothing happens.
+    let mut nobody = Browser::new();
+    let r = nobody
+        .post(
+            &h,
+            "/ui/rotations/abort",
+            &[("csrf", "x"), ("name", "agent_stuck")],
+        )
+        .await;
+    assert_ne!(r.location(), "/ui/approvals?m=rotation_aborted");
+    assert!(fake_vault(&h.app).next_of(&item).is_some());
+    // The page is not shown to a visitor either.
+    let r = nobody.get(&h, "/ui/approvals").await;
+    assert!(!r.body.contains("agent_stuck"));
+
+    // A sign-in that is no longer recent is sent to sign in again, and
+    // nothing is aborted until then.
+    let mut b = signed_in(&h).await;
+    let csrf = b.get(&h, "/ui/approvals").await.csrf();
+    h.ui.advance(Duration::from_secs(10 * 60 + 1));
+    let r = b
+        .post(
+            &h,
+            "/ui/rotations/abort",
+            &[("csrf", &csrf), ("name", "agent_stuck")],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert!(r.location().contains("/ui/login"), "{}", r.location());
+    assert!(fake_vault(&h.app).next_of(&item).is_some());
+    assert!(h.events_of("credential_rotate_abort").is_empty());
+}
+
+// ── The rotate patterns in the key forms ──────────────────────────────────────
+
+#[tokio::test]
+async fn the_key_forms_take_and_show_the_rotate_patterns() {
+    let h = harness(full_opts()).await;
+    let mut b = signed_in(&h).await;
+    let r = b.get(&h, "/ui/keys/new").await;
+    assert!(r.body.contains("name=\"rotate\""));
+    assert!(r.body.contains("Credentials this key may rotate"));
+    let csrf = r.csrf();
+    let form_id = r.form_id();
+    let r = b
+        .post(
+            &h,
+            "/ui/keys/new",
+            &[
+                ("csrf", &csrf),
+                ("form_id", &form_id),
+                ("name", "rotator"),
+                ("credentials", "*"),
+                ("m_GET", "1"),
+                ("rotate", "agent_*\nsvc_*"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("May rotate"));
+    assert!(r.body.contains("agent_*") && r.body.contains("svc_*"));
+    let stored = load(h.keys_path.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        stored[0].rotate.as_deref(),
+        Some(&["agent_*".to_string(), "svc_*".to_string()][..])
+    );
+    assert!(stored[0].policy().allows_rotate("agent_x"));
+    assert!(!stored[0].policy().allows_create("agent_x"));
+
+    let id = stored[0].id.clone();
+    let r = b.get(&h, &format!("/ui/keys/{id}")).await;
+    assert!(r.body.contains("May rotate:"));
+    assert!(r.body.contains("name=\"rotate\""));
+}
+
+async fn save_rotate(
+    b: &mut Browser,
+    h: &Harness,
+    id: &str,
+    csrf: &str,
+    rotate: &str,
+    confirm: bool,
+) -> Resp {
+    let mut fields = vec![
+        ("csrf", csrf),
+        ("op", "save"),
+        ("credentials", "*"),
+        ("m_GET", "1"),
+        ("rotate", rotate),
+    ];
+    if confirm {
+        fields.push(("confirm", "1"));
+    }
+    b.post(h, &format!("/ui/keys/{id}"), &fields).await
+}
+
+#[tokio::test]
+async fn widening_the_rotate_list_needs_confirmation_and_narrowing_does_not() {
+    let h = harness(full_opts()).await;
+    let (id, _) = key_with_approval(&h, "rotator", &[]).await;
+    let mut b = signed_in(&h).await;
+    let csrf = b.get(&h, &format!("/ui/keys/{id}")).await.csrf();
+
+    let r = save_rotate(&mut b, &h, &id, &csrf, "agent_*", false).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("Confirm save"));
+    assert!(load(h.keys_path.as_ref().unwrap()).unwrap()[0]
+        .policy()
+        .rotate
+        .is_empty());
+    assert!(r.body.contains("name=\"rotate\" value=\"agent_*\""));
+
+    let r = save_rotate(&mut b, &h, &id, &csrf, "agent_*", true).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(
+        load(h.keys_path.as_ref().unwrap()).unwrap()[0]
+            .policy()
+            .rotate,
+        ["agent_*"]
+    );
+
+    let r = save_rotate(&mut b, &h, &id, &csrf, "agent_a*", false).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    let r = save_rotate(&mut b, &h, &id, &csrf, "", false).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert!(load(h.keys_path.as_ref().unwrap()).unwrap()[0]
+        .policy()
+        .rotate
         .is_empty());
 }

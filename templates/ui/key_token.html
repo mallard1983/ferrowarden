@@ -18,6 +18,8 @@
 <dd>{% if approval.is_empty() %}None (beyond what vault items ask for){% else %}{% for p in approval %}<code>{{ p }}</code> {% endfor %}{% endif %}</dd>
 <dt>May create</dt>
 <dd>{% if create.is_empty() %}Nothing{% else %}{% for p in create %}<code>{{ p }}</code> {% endfor %}{% endif %}</dd>
+<dt>May rotate</dt>
+<dd>{% if rotate.is_empty() %}Nothing{% else %}{% for p in rotate %}<code>{{ p }}</code> {% endfor %}{% endif %}</dd>
 </dl>
 <p>Select the token text and copy it. This page is not stored by the browser cache and the token is in no URL; reloading or going back will not show it again.</p>
 <p class="actions"><a class="button secondary" href="/ui/keys">Back to keys</a></p>

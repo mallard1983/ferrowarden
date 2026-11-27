@@ -76,6 +76,29 @@ pub trait Vault: Send + Sync {
     /// the managed collection is not usable: it never falls back to another
     /// collection or the personal vault. The caller syncs afterwards.
     async fn create_login(&self, new: NewLogin) -> FerroResult<String>;
+
+    /// Start rotating the password of item `id` (in the managed collection):
+    /// store `next` on the item as its pending value, in the reserved hidden
+    /// field `ferrowarden_next`, and change nothing else. Refuses (without
+    /// writing) when the vault is locked, the managed collection is not
+    /// usable, the item is not in it, or a rotation is already pending
+    /// (`RotationInProgress`). A change made to the item by someone else in
+    /// the meantime is `VaultConflict`: it is never overwritten. The caller
+    /// syncs afterwards. `label` (the credential's name) is only used in error
+    /// messages.
+    async fn rotate_start(&self, id: &str, label: &str, next: Zeroizing<String>)
+        -> FerroResult<()>;
+
+    /// Make the pending value the password: the old password goes to the
+    /// item's password history and the pending field is removed. Refuses like
+    /// [`rotate_start`](Self::rotate_start); `NoRotationPending` when there is
+    /// none.
+    async fn rotate_commit(&self, id: &str, label: &str) -> FerroResult<()>;
+
+    /// Throw the pending value away (remove the field) and change nothing
+    /// else. Refuses like [`rotate_start`](Self::rotate_start);
+    /// `NoRotationPending` when there is none.
+    async fn rotate_abort(&self, id: &str, label: &str) -> FerroResult<()>;
 }
 
 /// The backend chosen at startup by `vault.backend`.
@@ -169,5 +192,22 @@ impl Vault for ActiveVault {
 
     async fn create_login(&self, new: NewLogin) -> FerroResult<String> {
         delegate!(self, v => Vault::create_login(v, new).await)
+    }
+
+    async fn rotate_start(
+        &self,
+        id: &str,
+        label: &str,
+        next: Zeroizing<String>,
+    ) -> FerroResult<()> {
+        delegate!(self, v => Vault::rotate_start(v, id, label, next).await)
+    }
+
+    async fn rotate_commit(&self, id: &str, label: &str) -> FerroResult<()> {
+        delegate!(self, v => Vault::rotate_commit(v, id, label).await)
+    }
+
+    async fn rotate_abort(&self, id: &str, label: &str) -> FerroResult<()> {
+        delegate!(self, v => Vault::rotate_abort(v, id, label).await)
     }
 }

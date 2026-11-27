@@ -7,6 +7,8 @@
 //! {{vault:NAME:totp}}             current TOTP code
 //! {{vault:NAME:notes}}            item notes
 //! {{vault:NAME:field:FIELD}}      custom field
+//! {{vault:NAME:next}}             the pending new password of a rotation
+//!                                 (only while one is pending)
 //!
 //! NAME / FIELD := plain word [A-Za-z0-9_.-]+
 //!               | 'single-quoted string'   (escapes: \' and \\)
@@ -40,6 +42,9 @@ pub enum Selector {
     Totp,
     Notes,
     Field(String),
+    /// The pending new password of a rotation that has started
+    /// (docs/managed-credentials.md). An error for an item with none.
+    Next,
 }
 
 /// One parsed placeholder: an item name plus a selector.
@@ -104,6 +109,7 @@ impl Placeholder {
             Selector::Username => format!("{item}:username"),
             Selector::Totp => format!("{item}:totp"),
             Selector::Notes => format!("{item}:notes"),
+            Selector::Next => format!("{item}:next"),
             Selector::Field(f) => format!("{item}:field:{}", quote_if_needed(f)),
         }
     }
@@ -226,6 +232,7 @@ impl<'a> Parser<'a> {
                 "username" => Selector::Username,
                 "totp" => Selector::Totp,
                 "notes" => Selector::Notes,
+                "next" => Selector::Next,
                 "field" => {
                     if !self.eat(":") {
                         return Err("expected ':' and a field name after 'field'".to_string());
@@ -235,7 +242,7 @@ impl<'a> Parser<'a> {
                 "" => return Err("expected a selector after ':'".to_string()),
                 other => {
                     return Err(format!(
-                        "unknown selector '{other}' (use password, username, totp, notes or field:NAME)"
+                        "unknown selector '{other}' (use password, username, totp, notes, next or field:NAME)"
                     ))
                 }
             }

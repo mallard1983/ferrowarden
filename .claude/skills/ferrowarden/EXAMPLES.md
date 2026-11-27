@@ -252,3 +252,42 @@ POST /v1/forward
 ```
 
 You never saw the password. If the user needs it, it is in Vaultwarden in the managed collection.
+
+## Rotate a service account's password without seeing it
+
+The user asks you to change the password of `agent_keycloak_svc`. Start a rotation:
+
+```
+POST /v1/credentials/agent_keycloak_svc/rotate
+```
+
+After a minute with no decision:
+
+```
+403 { "error": "Approval required: ...", "code": "approval_pending", "approval_id": "2m3x8Qk0Zr1YtV5pUa9bLw" }
+```
+
+Tell the user: "Please approve request 2m3x8Qk0Zr1YtV5pUa9bLw (rotating agent_keycloak_svc) in the Ferrowarden admin UI." When they say it is done, send the **identical** request again:
+
+```
+202 { "name": "agent_keycloak_svc", "current": "{{vault:agent_keycloak_svc}}", "next": "{{vault:agent_keycloak_svc:next}}" }
+```
+
+Change the password at the service, signing in with the current one and sending the new one:
+
+```
+POST /v1/forward
+{ "request": { "method": "POST", "url": "https://keycloak.example.com/account/credentials/password",
+    "body": { "username": "{{vault:agent_keycloak_svc:username}}",
+              "currentPassword": "{{vault:agent_keycloak_svc}}",
+              "newPassword": "{{vault:agent_keycloak_svc:next}}" } } }
+```
+
+If the service answers success, commit:
+
+```
+POST /v1/credentials/agent_keycloak_svc/rotate/commit
+200 { "name": "agent_keycloak_svc", "placeholder": "{{vault:agent_keycloak_svc}}" }
+```
+
+If it refused the change, abort instead (`POST /v1/credentials/agent_keycloak_svc/rotate/abort`) and tell the user. If the commit answers `409` with `"code": "vault_conflict"`, someone edited the item meanwhile: nothing was overwritten, so read the credential again and retry. You never saw either password.

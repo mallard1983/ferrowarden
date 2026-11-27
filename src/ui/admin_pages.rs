@@ -74,13 +74,14 @@ const NOTICE_DRAFT_EXPIRED: &str =
 const NOTICE_DRAFT_EXPIRED_NEW: &str = "The unsaved form could not be restored: it expired, was \
 already restored, or was made from another address. Fill in the form again.";
 
-const NEW_FIELDS: [&str; 14] = [
+const NEW_FIELDS: [&str; 15] = [
     "csrf",
     "form_id",
     "name",
     "credentials",
     "approval",
     "create",
+    "rotate",
     "m_GET",
     "m_HEAD",
     "m_POST",
@@ -91,13 +92,14 @@ const NEW_FIELDS: [&str; 14] = [
     "m_all",
 ];
 
-const EDIT_FIELDS: [&str; 18] = [
+const EDIT_FIELDS: [&str; 19] = [
     "csrf",
     "op",
     "confirm",
     "credentials",
     "approval",
     "create",
+    "rotate",
     "m_GET",
     "m_HEAD",
     "m_POST",
@@ -295,6 +297,8 @@ struct Draft {
     approval: Vec<String>,
     /// Credential name patterns the key may create in the managed collection.
     create: Vec<String>,
+    /// Credential name patterns the key may rotate in the managed collection.
+    rotate: Vec<String>,
     /// Upper-case method names, plus `*` when "all methods" is ticked.
     methods: Vec<String>,
     checked: Vec<bool>,
@@ -322,6 +326,12 @@ impl Draft {
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
         );
+        let rotate = split_patterns(
+            &form
+                .take("rotate")
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
         let mut methods = Vec::new();
         let mut checked = Vec::new();
         for m in METHODS {
@@ -339,6 +349,7 @@ impl Draft {
             patterns,
             approval,
             create,
+            rotate,
             methods,
             checked,
             all,
@@ -347,15 +358,16 @@ impl Draft {
 
     /// The draft for a key's saved policy (empty for a key without one).
     fn from_key(key: &KeySummary) -> Self {
-        let (patterns, methods, approval, create) = if key.policy_set {
+        let (patterns, methods, approval, create, rotate) = if key.policy_set {
             (
                 key.credentials.clone(),
                 key.methods.clone(),
                 key.approval.clone(),
                 key.create.clone(),
+                key.rotate.clone(),
             )
         } else {
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
         };
         let all = methods.iter().any(|m| m == "*");
         let checked = METHODS
@@ -366,6 +378,7 @@ impl Draft {
             patterns,
             approval,
             create,
+            rotate,
             methods,
             checked,
             all,
@@ -378,6 +391,7 @@ impl Draft {
             patterns: Vec::new(),
             approval: Vec::new(),
             create: Vec::new(),
+            rotate: Vec::new(),
             methods: Vec::new(),
             checked: vec![false; METHODS.len()],
             all: false,
@@ -401,6 +415,7 @@ impl Draft {
             patterns: saved.patterns.clone(),
             approval: saved.approval.clone(),
             create: saved.create.clone(),
+            rotate: saved.rotate.clone(),
             methods,
             checked,
             all: saved.all_methods,
@@ -420,6 +435,7 @@ impl Draft {
             patterns: self.patterns.clone(),
             approval: self.approval.clone(),
             create: self.create.clone(),
+            rotate: self.rotate.clone(),
             checked: self.checked.clone(),
             all_methods: self.all,
             request: request.map(|r| RequestDraft {
@@ -453,6 +469,10 @@ impl Draft {
 
     fn create_text(&self) -> String {
         self.create.join("\n")
+    }
+
+    fn rotate_text(&self) -> String {
+        self.rotate.join("\n")
     }
 }
 
@@ -641,6 +661,7 @@ fn new_form_page(ui: &UiState, view: &SessionView, email: &str, form: NewForm<'_
             patterns: &form.draft.patterns_text(),
             approval: &form.draft.approval_text(),
             create: &form.draft.create_text(),
+            rotate: &form.draft.rotate_text(),
             methods: form.draft.method_boxes(),
             all_methods: form.draft.all,
         }
@@ -823,6 +844,7 @@ pub async fn key_new_post(
         draft.methods.clone(),
         draft.approval.clone(),
         draft.create.clone(),
+        draft.rotate.clone(),
     )
     .await;
     let email = ui.account_email().await.unwrap_or_default();
@@ -843,6 +865,7 @@ pub async fn key_new_post(
                     methods: &methods_label(&created.methods),
                     approval: &created.approval,
                     create: &created.create,
+                    rotate: &created.rotate,
                 }
                 .render(),
             );
@@ -910,6 +933,7 @@ fn key_page(
                 methods: methods_label(&key.methods),
                 approval: key.approval.clone(),
                 create: key.create.clone(),
+                rotate: key.rotate.clone(),
             },
             notice: extras.notice,
             error: extras.error.as_deref(),
@@ -917,6 +941,7 @@ fn key_page(
                 patterns: draft.patterns_text(),
                 approval: draft.approval_text(),
                 create: draft.create_text(),
+                rotate: draft.rotate_text(),
                 methods: draft.method_boxes(),
                 all_methods: draft.all,
                 req_methods: request.method_options(),
@@ -938,6 +963,7 @@ fn policy_view(p: &KeyPolicy) -> PolicyView {
         methods: methods_label(&p.methods),
         approval: p.approval.clone(),
         create: p.create.clone(),
+        rotate: p.rotate.clone(),
     }
 }
 
@@ -1171,6 +1197,7 @@ pub async fn key_post(
                 Patch::Value(draft.methods.clone()),
                 Patch::Value(draft.approval.clone()),
                 Patch::Value(draft.create.clone()),
+                Patch::Value(draft.rotate.clone()),
                 proxy_request.as_ref(),
             )
             .await;
@@ -1209,12 +1236,14 @@ pub async fn key_post(
                 methods: key.methods.clone(),
                 approval: key.approval.clone(),
                 create: key.create.clone(),
+                rotate: key.rotate.clone(),
             };
             let new_policy = match saved.patched(
                 Patch::Value(draft.patterns.clone()),
                 Patch::Value(draft.methods.clone()),
                 Patch::Value(draft.approval.clone()),
                 Patch::Value(draft.create.clone()),
+                Patch::Value(draft.rotate.clone()),
             ) {
                 Ok(p) => p,
                 Err(e) => {
@@ -1237,6 +1266,7 @@ pub async fn key_post(
                     Patch::Value(draft.methods.clone()),
                     Patch::Value(draft.approval.clone()),
                     Patch::Value(draft.create.clone()),
+                    Patch::Value(draft.rotate.clone()),
                     None,
                 )
                 .await
@@ -1259,6 +1289,7 @@ pub async fn key_post(
                 Patch::Value(draft.methods.clone()),
                 Patch::Value(draft.approval.clone()),
                 Patch::Value(draft.create.clone()),
+                Patch::Value(draft.rotate.clone()),
             )
             .await
             {

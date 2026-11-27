@@ -107,7 +107,8 @@ pub struct EventFields {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ApprovalFields {
     pub id: String,
-    /// `forward` (use a credential) or `create` (create one).
+    /// `forward` (use a credential), `create` (create one) or `rotate`
+    /// (rotate its password).
     pub kind: &'static str,
     /// Empty for a create.
     pub method: String,
@@ -121,6 +122,10 @@ pub struct ApprovalFields {
     /// value (there is none yet).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub create: Option<CreateFields>,
+    /// What a rotation asks for: the name, the collection and the generation
+    /// options, never a value (there is none yet).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotate: Option<RotateFields>,
     /// RFC 3339, UTC.
     pub expires_at: String,
     /// `<ui.public_url>/approvals/<id>`, when `ui.public_url` is set.
@@ -164,6 +169,28 @@ impl CreateFields {
     }
 }
 
+/// What a rotate prompt shows. Cleaned like every other field.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RotateFields {
+    pub name: String,
+    pub charset: String,
+    pub length: u64,
+    pub collection: String,
+}
+
+impl RotateFields {
+    fn from_detail(c: &Value) -> Option<Self> {
+        let text = |key: &str| c.get(key).and_then(Value::as_str);
+        let generate = c.get("generate")?;
+        Some(Self {
+            name: clean_name(text("name")?, MAX_NAME),
+            charset: clean_id(generate.get("charset")?.as_str()?, 16),
+            length: generate.get("length")?.as_u64()?,
+            collection: clean_name(text("collection")?, MAX_NAME),
+        })
+    }
+}
+
 /// A URI for display: printable ASCII only, cut to [`MAX_LINK`] characters.
 fn clean_uri(s: &str) -> String {
     s.chars()
@@ -187,6 +214,20 @@ impl ApprovalFields {
                 target: String::new(),
                 path: String::new(),
                 create: Some(CreateFields::from_detail(details.get("create")?)?),
+                rotate: None,
+                expires_at: clean_time(text("expires_at")?),
+                link: text("link").and_then(clean_link),
+            });
+        }
+        if text("kind") == Some("rotate") {
+            return Some(Self {
+                id: clean_token(text("approval_id")?, 64),
+                kind: "rotate",
+                method: String::new(),
+                target: String::new(),
+                path: String::new(),
+                create: None,
+                rotate: Some(RotateFields::from_detail(details.get("rotate")?)?),
                 expires_at: clean_time(text("expires_at")?),
                 link: text("link").and_then(clean_link),
             });
@@ -195,6 +236,7 @@ impl ApprovalFields {
             id: clean_token(text("approval_id")?, 64),
             kind: "forward",
             create: None,
+            rotate: None,
             method: clean_id(
                 &event
                     .http
@@ -391,6 +433,11 @@ pub enum Kind {
     ApprovalRequest,
     /// A credential was created (opt-in, `admin` category).
     CredentialCreated,
+    /// A rotation was committed: the new password is the password (opt-in,
+    /// `admin` category).
+    RotationCommitted,
+    /// A pending rotation was thrown away (opt-in, `admin` category).
+    RotationAborted,
 }
 
 impl Kind {
@@ -412,6 +459,8 @@ impl Kind {
             | Kind::KeyPolicyChanged
             | Kind::UiSignIn
             | Kind::CredentialCreated
+            | Kind::RotationCommitted
+            | Kind::RotationAborted
             | Kind::Test => Severity::Normal,
         }
     }
@@ -430,7 +479,9 @@ impl Kind {
             | Kind::KeyRevoked
             | Kind::KeyPolicyChanged
             | Kind::UiSignIn
-            | Kind::CredentialCreated => "key",
+            | Kind::CredentialCreated
+            | Kind::RotationCommitted
+            | Kind::RotationAborted => "key",
             Kind::ApprovalRequest => "key,hourglass_flowing_sand",
         }
     }
@@ -454,6 +505,8 @@ impl Kind {
             Kind::Test => "Ferrowarden: test notification",
             Kind::ApprovalRequest => "Ferrowarden: approval needed",
             Kind::CredentialCreated => "Ferrowarden: credential created",
+            Kind::RotationCommitted => "Ferrowarden: credential rotated",
+            Kind::RotationAborted => "Ferrowarden: rotation aborted",
         }
     }
 }
@@ -680,6 +733,23 @@ fn message(kind: &Kind, f: &EventFields) -> String {
         ),
         Kind::Test => "This is a test notification from Ferrowarden. If you can read it, this notifier is set up correctly.".to_string(),
         Kind::ApprovalRequest => approval_message(f),
+        Kind::RotationCommitted | Kind::RotationAborted => {
+            let what = if f.credentials.is_empty() {
+                "A credential".to_string()
+            } else {
+                list(&f.credentials)
+            };
+            let by = key_phrase(f, "an operator");
+            if matches!(kind, Kind::RotationCommitted) {
+                format!(
+                    "The password of {what} was rotated by {by}: the new password the agent set at the service is now the item's password, and the old one is in its password history. No one has seen either.{tail}"
+                )
+            } else {
+                format!(
+                    "The pending rotation of {what} was aborted by {by}: the item's password is unchanged.{tail}"
+                )
+            }
+        }
         Kind::CredentialCreated => {
             let what = if f.credentials.is_empty() {
                 "A credential".to_string()
@@ -708,6 +778,9 @@ fn approval_message(f: &EventFields) -> String {
     };
     if let Some(c) = &a.create {
         return create_message(&who, a, c);
+    }
+    if let Some(r) = &a.rotate {
+        return rotate_message(&who, a, r);
     }
     let expires = DateTime::parse_from_rfc3339(&a.expires_at)
         .map(|t| t.with_timezone(&Utc).format("%H:%M UTC").to_string())
@@ -754,6 +827,25 @@ fn create_message(who: &str, a: &ApprovalFields, c: &CreateFields) -> String {
         c.length,
         c.charset,
         a.id
+    )
+}
+
+/// The prompt for a request to rotate a credential's password: who, which
+/// credential, where it is and how the new one is generated. The value is
+/// generated only after the approval and is never shown to anyone.
+fn rotate_message(who: &str, a: &ApprovalFields, r: &RotateFields) -> String {
+    let expires = DateTime::parse_from_rfc3339(&a.expires_at)
+        .map(|t| t.with_timezone(&Utc).format("%H:%M UTC").to_string())
+        .unwrap_or_else(|_| a.expires_at.clone());
+    let decide = match &a.link {
+        Some(link) => format!("Approve or deny: {link}"),
+        None => {
+            "Open the Approvals page of the Ferrowarden admin UI to approve or deny.".to_string()
+        }
+    };
+    format!(
+        "{who} wants to rotate the password of the credential {} in the collection {}: Ferrowarden generates a new {}-character {} password that the agent never sees, and the current password stays until the agent commits. {decide} Approval {}, open until {expires}.",
+        r.name, r.collection, r.length, r.charset, a.id
     )
 }
 

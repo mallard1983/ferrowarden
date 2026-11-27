@@ -11,6 +11,7 @@ fn draft(target: DraftTarget, pattern: &str) -> SavedDraft {
         patterns: vec![pattern.to_string()],
         approval: Vec::new(),
         create: Vec::new(),
+        rotate: Vec::new(),
         checked: vec![true, false],
         all_methods: false,
         request: None,
