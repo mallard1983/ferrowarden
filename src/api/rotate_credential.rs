@@ -17,18 +17,17 @@
 //! it is compared with the vault's names.
 
 use axum::{
-    body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::api::admin::authenticate_admin;
 use crate::api::credentials::authenticate_agent;
 use crate::api::key_service::{Caller, Via};
-use crate::api::strict_json::parse_body;
+use crate::api::strict_json::{NoBody, OptionalStrictJson};
 use crate::create::MAX_NAME_CHARS;
 use crate::error::{FerroError, FerroResult};
 use crate::events::{emit_rejected, Action, SecurityEvent};
@@ -48,21 +47,6 @@ fn check_name(name: &str) -> FerroResult<()> {
         )));
     }
     Ok(())
-}
-
-/// The body of a commit or an abort: nothing, or an empty JSON object.
-fn check_empty_body(headers: &HeaderMap, body: &[u8]) -> FerroResult<()> {
-    if body.iter().all(u8::is_ascii_whitespace) {
-        return Ok(());
-    }
-    let fields: Map<String, Value> = parse_body(headers, body)?;
-    if fields.is_empty() {
-        Ok(())
-    } else {
-        Err(FerroError::InvalidRequest(
-            "this request takes no body (send none, or {})".to_string(),
-        ))
-    }
 }
 
 /// One event for the end of a rotation request.
@@ -120,19 +104,13 @@ pub async fn rotate_start(
     ctx: RequestContext,
     headers: HeaderMap,
     Path(name): Path<String>,
-    body: Bytes,
+    body: Result<OptionalStrictJson<RotatePayload>, FerroError>,
 ) -> FerroResult<(StatusCode, Json<Started>)> {
     const ENDPOINT: &str = "/v1/credentials/{name}/rotate";
     let agent = authenticate_agent(&state, &ctx, &headers, ENDPOINT).await?;
-    let req = (|| {
-        check_name(&name)?;
-        let payload: RotatePayload = if body.iter().all(u8::is_ascii_whitespace) {
-            RotatePayload::default()
-        } else {
-            parse_body(&headers, &body)?
-        };
-        payload.validate()
-    })();
+    let req = check_name(&name)
+        .and(body)
+        .and_then(|OptionalStrictJson(payload)| payload.validate());
     let req = match req {
         Ok(req) => req,
         Err(e) => {
@@ -160,7 +138,7 @@ async fn agent_finish(
     ctx: RequestContext,
     headers: HeaderMap,
     name: String,
-    body: Bytes,
+    body: Result<OptionalStrictJson<NoBody>, FerroError>,
     how: Finish,
 ) -> FerroResult<Json<Finished>> {
     let (endpoint, action) = match how {
@@ -174,7 +152,7 @@ async fn agent_finish(
         ),
     };
     let agent = authenticate_agent(&state, &ctx, &headers, endpoint).await?;
-    if let Err(e) = check_name(&name).and_then(|()| check_empty_body(&headers, &body)) {
+    if let Err(e) = check_name(&name).and(body.map(|_| ())) {
         emit_rejected(&state.events, &ctx, Some(&agent), endpoint, &e);
         return Err(e);
     }
@@ -198,7 +176,7 @@ pub async fn rotate_commit(
     ctx: RequestContext,
     headers: HeaderMap,
     Path(name): Path<String>,
-    body: Bytes,
+    body: Result<OptionalStrictJson<NoBody>, FerroError>,
 ) -> FerroResult<Json<Finished>> {
     agent_finish(state, ctx, headers, name, body, Finish::Commit).await
 }
@@ -212,7 +190,7 @@ pub async fn rotate_abort(
     ctx: RequestContext,
     headers: HeaderMap,
     Path(name): Path<String>,
-    body: Bytes,
+    body: Result<OptionalStrictJson<NoBody>, FerroError>,
 ) -> FerroResult<Json<Finished>> {
     agent_finish(state, ctx, headers, name, body, Finish::Abort).await
 }
@@ -252,11 +230,11 @@ pub async fn admin_abort_route(
     ctx: RequestContext,
     headers: HeaderMap,
     Path(name): Path<String>,
-    body: Bytes,
+    body: Result<OptionalStrictJson<NoBody>, FerroError>,
 ) -> FerroResult<Json<Value>> {
     const ENDPOINT: &str = "/v1/admin/credentials/{name}/rotate/abort";
     authenticate_admin(&state, &ctx, &headers, ENDPOINT)?;
-    if let Err(e) = check_empty_body(&headers, &body) {
+    if let Err(e) = body {
         emit_rejected(&state.events, &ctx, None, ENDPOINT, &e);
         return Err(e);
     }

@@ -8,7 +8,12 @@
 //! * duplicate object keys at any depth (compared after JSON unescaping),
 //! * nesting deeper than [`MAX_DEPTH`],
 //! * trailing data, invalid UTF-8 and lone surrogate escapes,
+//! * a request body that is not a JSON object,
 //! * unknown fields (structs opt in with `#[serde(deny_unknown_fields)]`).
+//!
+//! Every request body reaches a handler through one of the two extractors here,
+//! [`StrictJson`] or [`OptionalStrictJson`] (a body that may be left out), and
+//! always as a typed struct: no handler reads or parses a raw body itself.
 //!
 //! The first pass is a validating visitor that never copies or keeps string
 //! *values* (they may be secrets); only object keys are held, per object. The
@@ -56,23 +61,51 @@ where
                 "request body could not be read (too large or interrupted)".to_string(),
             )
         })?;
-        parse_strict(&bytes)
+        parse_request(&bytes)
             .map(StrictJson)
             .map_err(FerroError::InvalidJson)
     }
 }
 
-/// Parse a request body that was read without the extractor (a route whose
-/// body depends on something else, such as the kind of the approval it
-/// decides): the same checks as [`StrictJson`].
-pub fn parse_body<T: DeserializeOwned>(headers: &HeaderMap, bytes: &[u8]) -> Result<T, FerroError> {
-    if !is_json_content_type(headers) {
-        return Err(FerroError::InvalidJson(
-            "Content-Type must be application/json".to_string(),
-        ));
+/// [`StrictJson`] for a route whose body may be left out: an empty (or
+/// whitespace-only) body is `T::default()`, and anything else must pass every
+/// check of [`StrictJson`], `Content-Type` included. Pair it with [`NoBody`]
+/// for a route that takes no body at all.
+pub struct OptionalStrictJson<T>(pub T);
+
+impl<S, T> FromRequest<S> for OptionalStrictJson<T>
+where
+    T: DeserializeOwned + Default,
+    S: Send + Sync,
+{
+    type Rejection = FerroError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let json_type = is_json_content_type(req.headers());
+        let bytes = Bytes::from_request(req, state).await.map_err(|_| {
+            FerroError::InvalidJson(
+                "request body could not be read (too large or interrupted)".to_string(),
+            )
+        })?;
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return Ok(OptionalStrictJson(T::default()));
+        }
+        if !json_type {
+            return Err(FerroError::InvalidJson(
+                "Content-Type must be application/json".to_string(),
+            ));
+        }
+        parse_request(&bytes)
+            .map(OptionalStrictJson)
+            .map_err(FerroError::InvalidJson)
     }
-    parse_strict(bytes).map_err(FerroError::InvalidJson)
 }
+
+/// The body of a route that takes none: nothing, or `{}`. Any member is an
+/// unknown field.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoBody {}
 
 /// Same rule as axum's `Json`: `application/json` or `application/*+json`,
 /// ignoring parameters and case.
@@ -99,6 +132,18 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
 /// The error is safe to return to the client: it never contains body values.
 pub fn parse_strict<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     check_json(bytes).map_err(|e| describe(&e))?;
+    serde_json::from_slice(bytes).map_err(|e| describe(&e))
+}
+
+/// [`parse_strict`] for a request body, which must also be a JSON **object**:
+/// every request body of the API is one, and serde would otherwise read a
+/// struct from an array (`[15]` as `{ "minutes": 15 }`).
+pub fn parse_request<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    check_json(bytes).map_err(|e| describe(&e))?;
+    let first = bytes.iter().find(|b| !b.is_ascii_whitespace());
+    if first != Some(&b'{') {
+        return Err("the request body must be a JSON object".to_string());
+    }
     serde_json::from_slice(bytes).map_err(|e| describe(&e))
 }
 

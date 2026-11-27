@@ -263,3 +263,73 @@ fn request_structs_reject_unknown_fields() {
     assert!(m.contains("unknown field `remember`"), "{m}");
     assert!(parse_strict::<UnlockPayload>(br#"{"password":"p"}"#).is_ok());
 }
+
+#[test]
+fn a_request_body_must_be_a_json_object() {
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct One {
+        #[allow(dead_code)]
+        n: u32,
+    }
+    assert!(parse_request::<One>(br#" {"n":1} "#).is_ok());
+    // serde reads a struct from an array; a request body may not be one.
+    assert!(parse_strict::<One>(br#"[1]"#).is_ok());
+    for bad in [&br#"[1]"#[..], br#"1"#, br#""n""#, br#"null"#, br#"true"#] {
+        let m = parse_request::<One>(bad).unwrap_err();
+        assert!(
+            m.contains("JSON object") || m.contains("malformed") || m.contains("wrong type"),
+            "{m}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_optional_body_may_be_left_out_and_is_otherwise_strict() {
+    use axum::body::Body;
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    async fn none(OptionalStrictJson(_b): OptionalStrictJson<NoBody>) -> &'static str {
+        "ok"
+    }
+    let app = Router::new().route("/", post(none));
+    let send = |ct: Option<&str>, body: &'static str| {
+        let app = app.clone();
+        let mut r = Request::post("/");
+        if let Some(ct) = ct {
+            r = r.header(header::CONTENT_TYPE, ct);
+        }
+        async move {
+            app.oneshot(r.body(Body::from(body)).unwrap())
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    let json = Some("application/json");
+    // Left out: no body, or only whitespace, with or without a Content-Type.
+    assert_eq!(send(None, "").await, StatusCode::OK);
+    assert_eq!(send(None, " \n").await, StatusCode::OK);
+    assert_eq!(send(json, "").await, StatusCode::OK);
+    // Present: the strict rules, Content-Type included.
+    assert_eq!(send(json, "{}").await, StatusCode::OK);
+    assert_eq!(send(None, "{}").await, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        send(Some("text/plain"), "{}").await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        send(json, r#"{"minutes":5}"#).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(send(json, "[]").await, StatusCode::BAD_REQUEST);
+    assert_eq!(send(json, "null").await, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        send(json, r#"{"a":1,"a":2}"#).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(send(json, "{").await, StatusCode::BAD_REQUEST);
+}

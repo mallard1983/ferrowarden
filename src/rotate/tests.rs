@@ -90,7 +90,7 @@ fn two_items_with_the_name_are_ambiguous() {
 // ── The request ───────────────────────────────────────────────────────────────
 
 fn payload(json: &str) -> FerroResult<RotateRequest> {
-    crate::api::strict_json::parse_strict::<RotatePayload>(json.as_bytes())
+    crate::api::strict_json::parse_request::<RotatePayload>(json.as_bytes())
         .map_err(FerroError::InvalidJson)?
         .validate()
 }

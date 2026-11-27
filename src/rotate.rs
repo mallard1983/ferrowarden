@@ -59,41 +59,15 @@ use crate::vault::Vault;
 
 // ── The request ───────────────────────────────────────────────────────────────
 
-/// The body of `POST /v1/credentials/{name}/rotate`, as parsed. Unknown fields
-/// are refused, and so is `null`. The whole body may be left out.
-#[derive(Debug, Default)]
-pub struct RotatePayload {
-    pub generate: Option<GeneratePayload>,
-}
-
-#[derive(Deserialize)]
+/// The body of `POST /v1/credentials/{name}/rotate`. Unknown fields are
+/// refused, and so is `null`; the whole body may be left out. (That a request
+/// body is a JSON object is checked for every route by
+/// [`parse_request`](crate::api::strict_json::parse_request).)
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RotateFields {
+pub struct RotatePayload {
     #[serde(default, deserialize_with = "some_not_null")]
-    generate: Option<GeneratePayload>,
-}
-
-/// The body is a JSON object: serde would also read a struct from an array
-/// (`[]`), which is not what a rotation takes.
-impl<'de> Deserialize<'de> for RotatePayload {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Object;
-        impl<'de> serde::de::Visitor<'de> for Object {
-            type Value = RotateFields;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a JSON object")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                map: A,
-            ) -> Result<RotateFields, A::Error> {
-                RotateFields::deserialize(serde::de::value::MapAccessDeserializer::new(map))
-            }
-        }
-        d.deserialize_map(Object).map(|f| RotatePayload {
-            generate: f.generate,
-        })
-    }
+    pub generate: Option<GeneratePayload>,
 }
 
 /// A validated rotate request: the options checked, the defaults filled in.
