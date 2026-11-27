@@ -63,6 +63,9 @@ pub enum ApiError {
     /// The server refused a write because the item changed since the revision
     /// the write named (`lastKnownRevisionDate`): someone else edited it.
     Conflict,
+    /// The write was never sent (the login failed, the id is not an item id):
+    /// **nothing was applied**.
+    Refused,
 }
 
 /// An item id as the server issues them (a UUID): letters, digits and `-`.
@@ -75,6 +78,13 @@ fn valid_item_id(id: &str) -> bool {
 /// is out of date?
 fn is_stale_message(text: &str) -> bool {
     text.contains("out of date") || text.contains("out-of-date")
+}
+
+/// Does an error message (lower case) say that the item no longer exists?
+/// Vaultwarden answers a read or a write of a deleted item with a 400 and
+/// this message instead of a 404.
+fn is_missing_message(text: &str) -> bool {
+    text.contains("cipher doesn't exist") || text.contains("cipher does not exist")
 }
 
 /// The stable device identifier for an API key: a UUIDv5 of a fixed label and
@@ -337,6 +347,19 @@ impl Api {
         }
     }
 
+    /// What a write's status means. A 2xx is applied. A 401 or 403 is the
+    /// server refusing the credentials before it did anything: **nothing was
+    /// applied**. Every other answer (any other 4xx, a 5xx, a redirect) leaves
+    /// the outcome unknown: Vaultwarden can save an item and then answer with
+    /// an error (for instance when the folder update that follows fails).
+    fn classify_write(status: StatusCode) -> Result<(), ApiError> {
+        match status.as_u16() {
+            200..=299 => Ok(()),
+            401 | 403 => Err(ApiError::Unauthorized),
+            _ => Err(ApiError::Unavailable),
+        }
+    }
+
     /// API-key login (`grant_type=client_credentials`, `scope=api`).
     pub async fn login(&self, client_id: &str, client_secret: &str) -> Result<Login, ApiError> {
         // The form is built in a buffer that is wiped on drop. The HTTP stack
@@ -436,11 +459,15 @@ impl Api {
     /// `POST /api/ciphers/create`: write a new item (the JSON body is
     /// ciphertext and structure only) and return the id the server gave it.
     /// Not retried here: a request that timed out may have been applied.
+    ///
+    /// `Ok(None)` is an answer with a success status whose body could not be
+    /// read (too large, cut off, not the expected JSON): **the item was
+    /// created**, only its id is unknown.
     pub async fn create_cipher(
         &self,
         token: &str,
         body: &serde_json::Value,
-    ) -> Result<String, ApiError> {
+    ) -> Result<Option<String>, ApiError> {
         #[derive(Deserialize)]
         struct Created {
             id: String,
@@ -454,10 +481,12 @@ impl Api {
         .send()
         .await
         .map_err(|_| ApiError::Unavailable)?;
-        Self::classify(resp.status(), false)?;
-        let raw = Self::read_body(resp, MAX_SMALL_BODY).await?;
-        let created: Created = serde_json::from_slice(&raw).map_err(|_| ApiError::BadResponse)?;
-        Ok(created.id)
+        Self::classify_write(resp.status())?;
+        let created = Self::read_body(resp, MAX_SMALL_BODY)
+            .await
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<Created>(&raw).ok());
+        Ok(created.map(|c| c.id))
     }
 
     /// `GET /api/ciphers/{id}`: the item as the server holds it now (every
@@ -473,27 +502,52 @@ impl Api {
                 .send()
                 .await
                 .map_err(|_| ApiError::Unavailable)?;
-        if resp.status() == StatusCode::NOT_FOUND {
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
             return Err(ApiError::NotFound);
         }
-        Self::classify(resp.status(), false)?;
+        if status == StatusCode::BAD_REQUEST {
+            // Vaultwarden answers a read of a deleted item with a 400. The
+            // body is read only for that phrase (bounded), never kept or
+            // logged.
+            let text = Self::error_text(resp).await;
+            return Err(if is_missing_message(&text) {
+                ApiError::NotFound
+            } else {
+                ApiError::Unavailable
+            });
+        }
+        Self::classify(status, false)?;
         let raw = Self::read_body(resp, MAX_ITEM_BODY).await?;
         serde_json::from_slice(&raw).map_err(|_| ApiError::BadResponse)
+    }
+
+    /// An error body, lower case, for a phrase search only (bounded; empty when
+    /// it cannot be read).
+    async fn error_text(resp: reqwest::Response) -> String {
+        Self::read_body(resp, MAX_ERROR_BODY)
+            .await
+            .map(|b| String::from_utf8_lossy(&b).to_ascii_lowercase())
+            .unwrap_or_default()
     }
 
     /// `PUT /api/ciphers/{id}`: replace the item with `body` (which names the
     /// revision it was made from, `lastKnownRevisionDate`) and return the
     /// item as the server now holds it. A refusal because the item changed
-    /// since that revision is [`ApiError::Conflict`]. Not retried here: a
-    /// request that timed out may have been applied.
+    /// since that revision is [`ApiError::Conflict`]; an item that is gone is
+    /// [`ApiError::NotFound`]. Not retried here: a request that timed out may
+    /// have been applied.
+    ///
+    /// `Ok(None)` is an answer with a success status whose body could not be
+    /// read: **the write was applied**, only the answer is unknown.
     pub async fn put_cipher(
         &self,
         token: &str,
         id: &str,
         body: &serde_json::Value,
-    ) -> Result<serde_json::Value, ApiError> {
+    ) -> Result<Option<serde_json::Value>, ApiError> {
         if !valid_item_id(id) {
-            return Err(ApiError::BadResponse);
+            return Err(ApiError::Refused);
         }
         let resp =
             Self::with_client_headers(self.client.put(format!("{}/api/ciphers/{id}", self.base)))
@@ -508,21 +562,26 @@ impl Api {
         }
         if matches!(status.as_u16(), 400 | 409) {
             // Vaultwarden refuses a stale write with a 400 whose message says
-            // the client copy is out of date. The body is read only for that
-            // phrase (bounded) and is never kept or logged.
-            let text = Self::read_body(resp, MAX_ERROR_BODY)
-                .await
-                .map(|b| String::from_utf8_lossy(&b).to_ascii_lowercase())
-                .unwrap_or_default();
+            // the client copy is out of date, and a write to a deleted item
+            // with a 400 that says it does not exist. The body is read only
+            // for those phrases (bounded) and is never kept or logged.
+            let text = Self::error_text(resp).await;
             return Err(if status.as_u16() == 409 || is_stale_message(&text) {
                 ApiError::Conflict
+            } else if is_missing_message(&text) {
+                ApiError::NotFound
             } else {
+                // A 400 that is neither of those may have come after the
+                // write was saved: the outcome is not known.
                 ApiError::Unavailable
             });
         }
-        Self::classify(status, false)?;
-        let raw = Self::read_body(resp, MAX_ITEM_BODY).await?;
-        serde_json::from_slice(&raw).map_err(|_| ApiError::BadResponse)
+        Self::classify_write(status)?;
+        let written = Self::read_body(resp, MAX_ITEM_BODY)
+            .await
+            .ok()
+            .and_then(|raw| serde_json::from_slice(&raw).ok());
+        Ok(written)
     }
 
     /// `GET /api/accounts/profile`: only the account email is read.

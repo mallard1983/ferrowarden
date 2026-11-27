@@ -62,10 +62,11 @@ management endpoint, for tests only) so a test can hand it to the secret gate.
                                     the current one (else 401)
     POST /api/rotating/login        JSON {"password": ...} -> 200 when it is the
                                     current password, else 401
-                                    Every password this service is given (setup
-                                    and "new") is listed at GET /__issued__ as
-                                    "rotating_password", so the secret gate can
-                                    search for it; none is ever put in a response.
+                                    Every password this service is given is listed
+                                    at GET /__issued__ so the secret gate can search
+                                    for it: the one it is set up with as
+                                    "rotating_password", each replacement ("new") as
+                                    "rotated_password". None is ever put in a response.
   Careless targets
     GET  /api/reflect               returns every token it was sent in the body
                                     (raw, base64, URL-encoded), a header and an
@@ -109,7 +110,7 @@ LOGIN_PASSWORD = "test-full-pass-88880000"
 # Tokens issued by the login services, newest last.
 _issued: dict[str, list[str]] = {
     "portainer_jwt": [], "pve_ticket": [], "pve_csrf": [], "php_token": [],
-    "created_password": [], "rotating_password": [],
+    "created_password": [], "rotating_password": [], "rotated_password": [],
 }
 
 # The rotating service's one account: its current password (never answered).
@@ -410,7 +411,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                and _rotating["password"] != "" and old == _rotating["password"])
                     if allowed:
                         _rotating["password"] = new
-                        _issued["rotating_password"].append(new)
+                        _issued["rotated_password"].append(new)
                 self._send_json(200 if allowed else 401, {"ok": bool(allowed)})
                 return True
             if path == "/api/rotating/login":

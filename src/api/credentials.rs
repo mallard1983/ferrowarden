@@ -36,6 +36,13 @@ pub struct CredentialDetail {
     /// A rotation has been started on this credential and is pending.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rotation_pending: bool,
+    /// Identifies exactly the pending value (a digest of its ciphertext, not of
+    /// the password): what a commit or an abort must name. Shown so that an
+    /// agent that lost the answer of a start can still finish the rotation it
+    /// means. Omitted when the pending field cannot be named (a person has to
+    /// fix the item).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,6 +83,7 @@ fn detail(name: &str, entries: &[CredentialEntry]) -> CredentialDetail {
         placeholder: None,
         next: None,
         rotation_pending: false,
+        rotation_id: None,
         username: None,
         totp: None,
         notes: None,
@@ -118,6 +126,7 @@ fn detail(name: &str, entries: &[CredentialEntry]) -> CredentialDetail {
     if login && entry.has_next {
         d.next = Some(render(Selector::Next));
         d.rotation_pending = true;
+        d.rotation_id = entry.rotation_id.clone();
     }
     if login && entry.has_username {
         d.username = Some(render(Selector::Username));

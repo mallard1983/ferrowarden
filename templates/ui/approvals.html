@@ -33,9 +33,9 @@
 
 <h2>Rotations in progress ({{ rotations.len() }})</h2>
 {% if rotations.is_empty() %}
-<p class="muted">No rotation is pending. A rotation is pending between an agent starting it and committing or aborting it; abort one here if it is stuck, for instance because the agent went away. Aborting removes the pending new password and leaves the current one in place.</p>
+<p class="muted">No rotation is pending. A rotation is pending between an agent starting it and committing or aborting it; abort one here if it is stuck, for instance because the agent went away. Aborting removes the pending new password and leaves the current one in place; the discarded value is kept in the item's password history in the vault.</p>
 {% else %}
-<p class="muted">A rotation was started and has not been committed or aborted. If the agent has gone away, abort it: the pending new password is removed and the current password stays.</p>
+<p class="muted">A rotation was started and has not been committed or aborted. <strong>Before you abort, check which password the service accepts now.</strong> If the agent changed the password at the service and then lost its answer, the service may already use the pending one, and aborting would leave the vault with the old one. If the service rejected the change, or the agent has gone away before making it, abort: the pending new password is removed and the current password stays. An abort keeps the discarded value in the item's password history in the vault, so it can still be recovered from there.</p>
 <div class="scroll">
 <table class="stack">
 <thead>
@@ -46,11 +46,16 @@
 <tr class="card-row">
 <th scope="row"><code>{{ r.name }}</code></th>
 <td data-label="Actions">
+{% if let Some(rotation_id) = r.rotation_id %}
 <form method="post" action="/ui/rotations/abort" class="inline">
 <input type="hidden" name="csrf" value="{{ csrf }}">
 <input type="hidden" name="name" value="{{ r.name }}">
+<input type="hidden" name="rotation_id" value="{{ rotation_id }}">
 <button type="submit" class="secondary">Abort rotation</button>
 </form>
+{% else %}
+<span class="muted">Needs manual repair in Vaultwarden</span>
+{% endif %}
 </td>
 </tr>
 {% endfor %}

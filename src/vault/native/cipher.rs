@@ -29,9 +29,9 @@ use super::keys::unwrap_sym_key;
 use super::totp;
 use crate::error::{FerroError, FerroResult};
 use crate::vault::model::{
-    approval_field_valid, is_approval_field_name, is_next_field_name, match_type_is_binding,
-    split_uris, Builtin, CredentialEntry, FieldInfo, FieldKind, ItemKind, BINDINGS_FIELD,
-    CREATED_BY_FIELD, NEXT_FIELD,
+    approval_field_valid, is_approval_field_name, is_next_base_field_name, is_next_field_name,
+    match_type_is_binding, rotation_id_of_ciphertext, split_uris, Builtin, CredentialEntry,
+    FieldInfo, FieldKind, ItemKind, BINDINGS_FIELD, CREATED_BY_FIELD, NEXT_FIELD,
 };
 
 /// Every key needed to read the vault. Wiped on drop; never printed.
@@ -164,6 +164,7 @@ pub fn build_metadata(
     let mut approval_required = false;
     let mut approval_field_invalid = false;
     let mut has_next = false;
+    let mut pending_ciphertexts: Vec<&str> = Vec::new();
     let mut fields = Vec::new();
     for f in c.fields.as_deref().unwrap_or_default() {
         let Some(enc_name) = f.name.as_deref().filter(|n| !n.is_empty()) else {
@@ -181,10 +182,15 @@ pub fn build_metadata(
             // item): not offered as a field.
             continue;
         }
+        if is_next_base_field_name(&field_name) {
+            // The password the rotation started from: ours, never offered.
+            continue;
+        }
         if is_next_field_name(&field_name) {
             // The pending password of a rotation: reached with
             // `{{vault:NAME:next}}`, never offered as a field.
             has_next = true;
+            pending_ciphertexts.push(f.value.as_deref().unwrap_or_default());
             continue;
         }
         if is_approval_field_name(&field_name) {
@@ -248,6 +254,10 @@ pub fn build_metadata(
         approval_required,
         approval_field_invalid,
         has_next,
+        rotation_id: match pending_ciphertexts.as_slice() {
+            [one] if !one.is_empty() => Some(rotation_id_of_ciphertext(one)),
+            _ => None,
+        },
         collection_ids: c.collection_ids.clone(),
     };
     Ok((name.as_str().to_string(), entry))
@@ -333,7 +343,14 @@ fn next_value(key: &SymKey, c: &RawCipher, label: &str) -> FerroResult<Zeroizing
         .and_then(|f| f.value.as_deref())
         .filter(|v| !v.is_empty())
     {
-        Some(v) => dec_value(key, v),
+        // Empty or whitespace-only counts as none, like the password does.
+        Some(v) => {
+            let plain = dec_value(key, v)?;
+            if plain.trim().is_empty() {
+                return Err(not_found(label));
+            }
+            Ok(plain)
+        }
         None => Err(not_found(label)),
     }
 }

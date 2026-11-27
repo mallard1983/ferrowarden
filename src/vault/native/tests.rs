@@ -175,6 +175,35 @@ struct Mock {
     put_stale_once: bool,
     /// Counts the revisions the server gives an item.
     item_revisions: u64,
+    /// Apply the next `PUT`, then answer 200 with a body that is not JSON (a
+    /// truncated answer). 2: and let every read fail afterwards.
+    put_garbage: u8,
+    /// Apply the next create, then answer 200 with a body that is not JSON.
+    create_garbage: bool,
+    /// Answer a read or a write of an item that does not exist with a 404
+    /// instead of the 400 Vaultwarden gives.
+    missing_is_404: bool,
+    /// Answer every `GET /api/ciphers/{id}` with this status.
+    get_status: Option<u16>,
+    /// Delete the item right after the next `GET` has returned it (it is gone
+    /// by the time the write arrives).
+    vanish_after_get: bool,
+}
+
+/// What Vaultwarden 1.36.0 and 1.37.5 answer for a cipher that does not exist,
+/// for a read and for a write: a 400 with this message (checked against both,
+/// with a hard-deleted item and an id that never existed).
+fn missing_cipher_response() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "message": "Cipher doesn't exist",
+            "validationErrors": {"": ["Cipher doesn't exist"]},
+            "errorModel": {"message": "Cipher doesn't exist", "object": "error"},
+            "object": "error"
+        })),
+    )
+        .into_response()
 }
 
 type Shared = Arc<Mutex<Mock>>;
@@ -275,6 +304,9 @@ async fn create_cipher(
         return StatusCode::from_u16(status).unwrap().into_response();
     }
     m.created.push(body);
+    if m.create_garbage {
+        return (StatusCode::OK, "{\"id\": \"new-").into_response();
+    }
     Json(json!({"id": format!("new-{}", m.created.len()), "object": "cipher"})).into_response()
 }
 
@@ -288,6 +320,9 @@ async fn get_cipher(
         return r;
     }
     m.gets.push(id.clone());
+    if let Some(status) = m.get_status {
+        return StatusCode::from_u16(status).unwrap().into_response();
+    }
     match m.ciphers.iter().find(|c| c["id"] == id.as_str()) {
         Some(c) => {
             let mut c = c.clone();
@@ -295,9 +330,13 @@ async fn get_cipher(
             if c.get("revisionDate").is_none() {
                 c["revisionDate"] = json!("2026-11-26T10:00:00.000000Z");
             }
+            if std::mem::take(&mut m.vanish_after_get) {
+                m.ciphers.retain(|x| x["id"] != id.as_str());
+            }
             Json(c).into_response()
         }
-        None => StatusCode::NOT_FOUND.into_response(),
+        None if m.missing_is_404 => StatusCode::NOT_FOUND.into_response(),
+        None => missing_cipher_response(),
     }
 }
 
@@ -320,7 +359,10 @@ async fn put_cipher(
     }
     let stale = std::mem::take(&mut m.put_stale_once);
     let Some(i) = m.ciphers.iter().position(|c| c["id"] == id.as_str()) else {
-        return StatusCode::NOT_FOUND.into_response();
+        if m.missing_is_404 {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        return missing_cipher_response();
     };
     let current = m.ciphers[i]
         .get("revisionDate")
@@ -344,6 +386,15 @@ async fn put_cipher(
     m.ciphers[i]["revisionDate"] = json!(revision);
     m.revision += 1;
     m.puts.push((id, body));
+    match std::mem::take(&mut m.put_garbage) {
+        0 => {}
+        broken => {
+            if broken == 2 {
+                m.get_status = Some(500);
+            }
+            return (StatusCode::OK, "{\"id\": \"c3\", \"revisio").into_response();
+        }
+    }
     Json(m.ciphers[i].clone()).into_response()
 }
 
@@ -1683,7 +1734,7 @@ async fn a_create_is_posted_to_the_managed_collection_and_nowhere_else() {
     let h = managed_harness("Ferrowarden managed").await;
     h.vault.unlock(pw()).await.unwrap();
     let id = h.vault.create_login(new_login()).await.unwrap();
-    assert_eq!(id, "new-1");
+    assert_eq!(id.as_deref(), Some("new-1"));
 
     let m = h.mock.lock().unwrap();
     assert_eq!(m.created.len(), 1);
@@ -1743,10 +1794,11 @@ async fn a_rejected_token_is_replaced_once_and_the_write_goes_through() {
 async fn a_server_error_is_not_retried_and_a_refusal_is_retried_once() {
     let h = managed_harness(COLL_MANAGED).await;
     h.vault.unlock(pw()).await.unwrap();
-    // A 5xx may have been applied: it is not sent again.
+    // A 5xx may have been applied: it is not sent again, and the answer says
+    // that the outcome is not known.
     h.mock.lock().unwrap().create_status = Some(500);
     let e = h.vault.create_login(new_login()).await.unwrap_err();
-    assert!(matches!(e, FerroError::VaultWriteFailed), "{e}");
+    assert!(matches!(e, FerroError::VaultWriteUnknown), "{e}");
     assert_eq!(h.mock.lock().unwrap().create_auth.len(), 1);
     // A 403 (no permission) is tried once more with a fresh login, then fails.
     h.mock.lock().unwrap().create_status = Some(403);
@@ -1754,6 +1806,15 @@ async fn a_server_error_is_not_retried_and_a_refusal_is_retried_once() {
     assert!(matches!(e, FerroError::VaultWriteFailed), "{e}");
     assert_eq!(h.mock.lock().unwrap().create_auth.len(), 3);
     assert!(h.mock.lock().unwrap().created.is_empty());
+    // Any other 4xx may have come after the item was saved: unknown, not sent
+    // again.
+    for status in [400, 422, 429] {
+        let before = h.mock.lock().unwrap().create_auth.len();
+        h.mock.lock().unwrap().create_status = Some(status);
+        let e = h.vault.create_login(new_login()).await.unwrap_err();
+        assert!(matches!(e, FerroError::VaultWriteUnknown), "{status}: {e}");
+        assert_eq!(h.mock.lock().unwrap().create_auth.len(), before + 1);
+    }
 }
 
 #[tokio::test]

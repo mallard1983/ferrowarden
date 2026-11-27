@@ -60,7 +60,7 @@ fn notice_text(code: &str) -> Option<&'static str> {
             "Approved. Ferrowarden generates the new password and stores it on the item as a pending value now; the current password stays until the agent commits. The agent never sees either. This approval covers that one rotation only.",
         ),
         "rotation_aborted" => Some(
-            "Rotation aborted. The pending new password was removed and the item's password is unchanged.",
+            "Rotation aborted. The pending new password was removed and the item's password is unchanged. The discarded value is kept in the item's password history in the vault.",
         ),
         "denied" => Some("Denied. The agent is refused for these credentials for a while."),
         "revoked" => Some("Grant revoked. The next request asks again."),
@@ -200,7 +200,37 @@ async fn failed(ui: &UiState, view: &SessionView, e: &FerroError) -> Reply {
             )
             .await
         }
-        FerroError::VaultConflict => {
+        FerroError::RotationMismatch(_) => {
+            ui.message_in(
+                view,
+                StatusCode::CONFLICT,
+                "That rotation has changed",
+                "The pending value is not the one this page showed: the rotation was finished or replaced since. Nothing was written. Reload the Approvals page and check again.",
+                BACK,
+            )
+            .await
+        }
+        FerroError::VaultItemGone => {
+            ui.message_in(
+                view,
+                StatusCode::CONFLICT,
+                "The item no longer exists",
+                "The item is gone from the vault. Nothing was changed.",
+                BACK,
+            )
+            .await
+        }
+        FerroError::VaultWriteUnknown => {
+            ui.message_in(
+                view,
+                StatusCode::BAD_GATEWAY,
+                "The result is not known",
+                "The write may have been applied. Reload the Approvals page and check the item in the vault before trying again.",
+                BACK,
+            )
+            .await
+        }
+        FerroError::VaultConflict | FerroError::VaultItemReplaced => {
             ui.message_in(
                 view,
                 StatusCode::CONFLICT,
@@ -280,7 +310,13 @@ async fn pending_rotations(ui: &UiState) -> Vec<RotationRow> {
                 .iter()
                 .any(|e| e.has_next && e.collection_ids.contains(&collection.id))
         })
-        .map(|(name, _)| RotationRow { name: name.clone() })
+        .map(|(name, entries)| RotationRow {
+            name: name.clone(),
+            // The same function the abort itself uses: a button only where
+            // the POST would be accepted.
+            rotation_id: crate::rotate::abortable_rotation(name, entries, &collection)
+                .map(str::to_string),
+        })
         .collect()
 }
 
@@ -568,7 +604,7 @@ pub async fn rotation_abort_post(
         &transport,
         request,
         "/ui/rotations/abort",
-        &["csrf", "name"],
+        &["csrf", "name", "rotation_id"],
     )
     .await
     {
@@ -581,7 +617,21 @@ pub async fn rotation_abort_post(
     let Some(name) = form.take("name").map(|n| n.to_string()) else {
         return failed(&ui, &view, &FerroError::NoRotationPending(String::new())).await;
     };
-    match rotate_credential::admin_abort(&ui.app, caller(&ctx), &name, &approver(&ui).await).await {
+    // The rotation the page showed: a stale form (the rotation was finished or
+    // replaced since) is refused by name, not applied to what is there now.
+    let rotation_id = form
+        .take("rotation_id")
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+    match rotate_credential::admin_abort(
+        &ui.app,
+        caller(&ctx),
+        &name,
+        &rotation_id,
+        &approver(&ui).await,
+    )
+    .await
+    {
         Ok(_) => Reply::redirect("/ui/approvals?m=rotation_aborted"),
         Err(e) => failed(&ui, &view, &e).await,
     }

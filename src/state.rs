@@ -219,6 +219,14 @@ impl AppState {
         keys.get(&hash).cloned()
     }
 
+    /// The key `id` as it is **now** (its policy included), or `None` when it
+    /// was revoked. For a request that waited (for a human, for a lock) and
+    /// must not act on a policy that has since been changed or removed.
+    pub async fn live_key(&self, id: &str) -> Option<AgentKey> {
+        let keys = self.agent_keys.read().await;
+        keys.values().find(|k| k.id == id).cloned()
+    }
+
     /// Validate the admin key. Uses constant-time comparison.
     pub fn authenticate_admin(&self, token: &str) -> bool {
         constant_time_eq(self.config.admin_key.as_str(), token)

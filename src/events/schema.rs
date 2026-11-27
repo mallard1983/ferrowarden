@@ -407,18 +407,20 @@ pub enum Reason {
     CredentialCreateDisabled,
     CredentialCreateOutOfScope,
     VaultWriteFailed,
+    VaultWriteUnknown,
     CredentialRotateOutOfScope,
     CredentialNotManaged,
     CredentialNotRotatable,
     RotationInProgress,
     NoRotationPending,
     VaultConflict,
+    RotationMismatch,
 }
 
 impl Reason {
     /// Every reason, in declaration order (tests and the notifier tables).
     #[cfg(test)]
-    pub const ALL: [Reason; 50] = [
+    pub const ALL: [Reason; 52] = [
         Reason::MissingKey,
         Reason::InvalidKey,
         Reason::MissingAdminKey,
@@ -463,12 +465,14 @@ impl Reason {
         Reason::CredentialCreateDisabled,
         Reason::CredentialCreateOutOfScope,
         Reason::VaultWriteFailed,
+        Reason::VaultWriteUnknown,
         Reason::CredentialRotateOutOfScope,
         Reason::CredentialNotManaged,
         Reason::CredentialNotRotatable,
         Reason::RotationInProgress,
         Reason::NoRotationPending,
         Reason::VaultConflict,
+        Reason::RotationMismatch,
     ];
 
     /// The wire code (`event.reason`), the same text serde writes.
@@ -518,12 +522,14 @@ impl Reason {
             Reason::CredentialCreateDisabled => "credential_create_disabled",
             Reason::CredentialCreateOutOfScope => "credential_create_out_of_scope",
             Reason::VaultWriteFailed => "vault_write_failed",
+            Reason::VaultWriteUnknown => "vault_write_unknown",
             Reason::CredentialRotateOutOfScope => "credential_rotate_out_of_scope",
             Reason::CredentialNotManaged => "credential_not_managed",
             Reason::CredentialNotRotatable => "credential_not_rotatable",
             Reason::RotationInProgress => "rotation_in_progress",
             Reason::NoRotationPending => "no_rotation_pending",
             Reason::VaultConflict => "vault_conflict",
+            Reason::RotationMismatch => "rotation_mismatch",
         }
     }
 
@@ -608,13 +614,15 @@ impl Reason {
             Reason::ManagedCollectionUnavailable => "the managed collection cannot be written to",
             Reason::CredentialCreateDisabled => "creating credentials is switched off",
             Reason::CredentialCreateOutOfScope => "this agent key may not create that credential",
-            Reason::VaultWriteFailed => "the credential could not be written to the vault",
+            Reason::VaultWriteFailed => "the vault refused the write",
+            Reason::VaultWriteUnknown => "the write may have been applied",
             Reason::CredentialRotateOutOfScope => "this agent key may not rotate that credential",
             Reason::CredentialNotManaged => "the credential is not in the managed collection",
             Reason::CredentialNotRotatable => "the credential cannot be rotated",
             Reason::RotationInProgress => "a rotation of the credential is already pending",
             Reason::NoRotationPending => "no rotation of the credential is pending",
             Reason::VaultConflict => "the item was changed in the vault by someone else",
+            Reason::RotationMismatch => "the pending rotation is not the one the request names",
         }
     }
 }
@@ -655,12 +663,17 @@ impl From<&FerroError> for Reason {
             FerroError::CredentialExists(_) => Reason::CredentialExists,
             FerroError::ManagedCollectionUnavailable(_) => Reason::ManagedCollectionUnavailable,
             FerroError::VaultWriteFailed => Reason::VaultWriteFailed,
+            FerroError::VaultWriteUnknown => Reason::VaultWriteUnknown,
             FerroError::CredentialRotateOutOfScope(_) => Reason::CredentialRotateOutOfScope,
             FerroError::CredentialNotManaged(_) => Reason::CredentialNotManaged,
             FerroError::CredentialNotRotatable(_) => Reason::CredentialNotRotatable,
             FerroError::RotationInProgress(_) => Reason::RotationInProgress,
             FerroError::NoRotationPending(_) => Reason::NoRotationPending,
-            FerroError::VaultConflict => Reason::VaultConflict,
+            FerroError::VaultConflict
+            | FerroError::VaultItemGone
+            | FerroError::VaultItemReplaced
+            | FerroError::VaultPasswordChanged => Reason::VaultConflict,
+            FerroError::RotationMismatch(_) => Reason::RotationMismatch,
             FerroError::Config(_) => Reason::InternalError,
             FerroError::UnlockEndpointDisabled => Reason::InvalidRequest,
             FerroError::InvalidRequest(_) => Reason::InvalidRequest,

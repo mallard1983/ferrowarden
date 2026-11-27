@@ -46,6 +46,49 @@ pub fn is_next_field_name(name: &str) -> bool {
     name.trim().eq_ignore_ascii_case(NEXT_FIELD)
 }
 
+/// Name of the second reserved **hidden** custom field of a rotation: it holds
+/// [`password_base_of_ciphertext`] of the item's password as it was when the
+/// rotation started, so that a commit can tell that a person changed the
+/// password since (docs/managed-credentials.md). Written and removed with
+/// `ferrowarden_next`; never offered as a `field:` placeholder, never listed.
+pub const NEXT_BASE_FIELD: &str = "ferrowarden_next_base";
+
+/// Is `name` the reserved base field? Trimmed and case-insensitive, like
+/// [`is_next_field_name`].
+pub fn is_next_base_field_name(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case(NEXT_BASE_FIELD)
+}
+
+/// First 16 bytes of the SHA-256 of `ciphertext` (an EncString's text), as
+/// base64url without padding.
+fn ciphertext_digest(ciphertext: &str) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(ciphertext.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..16])
+}
+
+/// The digest of the **ciphertext** of the item's `login.password` (the
+/// EncString text as the server holds it), kept in the base field. It is a
+/// digest of the encrypted text, never of the password: it changes when the
+/// stored password changes, and tells nothing about the password.
+pub fn password_base_of_ciphertext(password_ciphertext: &str) -> String {
+    ciphertext_digest(password_ciphertext)
+}
+
+/// The identifier of one pending rotation value: the first 16 bytes of the
+/// SHA-256 of the **ciphertext** of the `ferrowarden_next` field (its
+/// EncString text, as the server holds it), as base64url without padding.
+///
+/// Nothing secret goes in: the input is the encrypted text, which is unique to
+/// each start (every encryption uses a fresh random IV), never the password.
+/// It is not a secret either, so it is shown in the detailed listing. A commit
+/// or an abort names it, so that it can only ever finish the one pending value
+/// the agent meant (docs/managed-credentials.md).
+pub fn rotation_id_of_ciphertext(pending_ciphertext: &str) -> String {
+    ciphertext_digest(pending_ciphertext)
+}
+
 /// Kind of vault item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
@@ -164,6 +207,10 @@ pub struct CredentialEntry {
     /// A rotation has started and is waiting to be committed or aborted: the
     /// item has a `ferrowarden_next` field.
     pub has_next: bool,
+    /// The identifier of that pending value ([`rotation_id_of_ciphertext`]);
+    /// `None` when none is pending, or when the item is not in a state that
+    /// can be finished (two pending fields, or one without a value).
+    pub rotation_id: Option<String>,
     /// The collections the item is in (organisation items), as the sync lists
     /// them. A rotation is only ever done to an item in the managed one.
     pub collection_ids: Vec<String>,
@@ -186,6 +233,7 @@ impl CredentialEntry {
             approval_required: false,
             approval_field_invalid: false,
             has_next: false,
+            rotation_id: None,
             collection_ids: Vec::new(),
         }
     }

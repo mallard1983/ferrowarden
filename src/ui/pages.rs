@@ -348,6 +348,9 @@ pub struct ApprovalListRow {
 /// One credential with a rotation pending, on the Approvals page.
 pub struct RotationRow {
     pub name: String,
+    /// The rotation the Abort button names. `None`: an abort would be refused
+    /// (the item needs a person to fix it in the vault), so there is no button.
+    pub rotation_id: Option<String>,
 }
 
 /// One live grant.

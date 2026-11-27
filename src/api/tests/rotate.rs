@@ -16,6 +16,8 @@ use std::time::Duration;
 
 const COLLECTION_ID: &str = "6c0d7f0e-52d0-4b5b-8a39-0e8a7f6d5c4b";
 const NAME: &str = "agent_keycloak_svc";
+/// A rotation id of the right shape that names no rotation.
+const DUMMY_ID: &str = "aaaaaaaaaaaaaaaaaaaaaa";
 
 /// A test value made at run time (a fixed literal reads as a hard-coded
 /// password to static analysis), the same for the whole test process.
@@ -93,7 +95,7 @@ impl Setup {
             )),
         )
         .await;
-        assert_eq!(s, StatusCode::CREATED, "{body}");
+        assert_eq!(s, StatusCode::CREATED, "unexpected response status");
         body["token"].as_str().unwrap().to_string()
     }
 
@@ -108,7 +110,12 @@ impl Setup {
         p: &str,
         body: Option<serde_json::Value>,
     ) -> (StatusCode, serde_json::Value) {
-        let body = body.map(|b| b.to_string());
+        // A commit and an abort name the rotation they mean: unless a test says
+        // which, they name one that does not exist.
+        let finishing = p.ends_with("/commit") || p.ends_with("/abort");
+        let body = body
+            .or_else(|| finishing.then(|| json!({ "rotation_id": DUMMY_ID })))
+            .map(|b| b.to_string());
         let (s, _, j) = call(
             &self.app,
             "POST",
@@ -118,6 +125,23 @@ impl Setup {
         )
         .await;
         (s, j)
+    }
+
+    /// A commit or an abort (`tail`: `/commit` or `/abort`) of the rotation
+    /// `rotation_id`.
+    async fn finish(
+        &self,
+        token: &str,
+        name: &str,
+        tail: &str,
+        rotation_id: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        self.post(
+            token,
+            &path(name, tail),
+            Some(json!({ "rotation_id": rotation_id })),
+        )
+        .await
     }
 
     async fn start(&self, token: &str, name: &str) -> (StatusCode, serde_json::Value) {
@@ -175,13 +199,15 @@ impl Setup {
         .await
     }
 
-    /// A rotation started and approved: the pending value exists.
-    async fn started(&self, token: &str) {
+    /// A rotation started and approved: the pending value exists. Returns its
+    /// rotation id.
+    async fn started(&self, token: &str) -> String {
         let held = self.spawn_start(token, NAME, None);
         let open = self.wait_for_pending(1).await;
         assert_eq!(self.decide(&open[0].id, "approve", None).await.0, 200);
         let (st, resp) = held.await.unwrap();
         assert_eq!(st, StatusCode::ACCEPTED, "{resp}");
+        resp["rotation_id"].as_str().unwrap().to_string()
     }
 
     /// Nothing was asked of a human, generated or written.
@@ -234,19 +260,22 @@ async fn a_rotation_is_held_approved_started_listed_committed_and_the_value_is_n
 
     // Approve with no body: no duration.
     let (st, body) = s.decide(&open[0].id, "approve", None).await;
-    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(st, StatusCode::OK, "unexpected response status");
     assert_eq!(body, json!({"status": "approved", "kind": "rotate"}));
 
     let (st, started) = held.await.unwrap();
     assert_eq!(st, StatusCode::ACCEPTED, "{started}");
+    let rid = started["rotation_id"].as_str().unwrap().to_string();
     assert_eq!(
         started,
         json!({
             "name": NAME,
             "current": format!("{{{{vault:{NAME}}}}}"),
             "next": format!("{{{{vault:{NAME}:next}}}}"),
+            "rotation_id": rid,
         })
     );
+    assert_eq!(fake(&s.state).rotation_id_of(&s.item), Some(rid.clone()));
     assert_eq!(fake(&s.state).rotate_calls(), [format!("start:{}", s.item)]);
 
     // The pending value has the length and characters asked for; the current
@@ -273,6 +302,8 @@ async fn a_rotation_is_held_approved_started_listed_committed_and_the_value_is_n
         .find(|d| d["name"] == NAME)
         .unwrap();
     assert_eq!(entry["rotation_pending"], true);
+    // A start whose answer was lost can be finished: the listing has the id.
+    assert_eq!(entry["rotation_id"], rid.as_str());
     assert_eq!(entry["next"], format!("{{{{vault:{NAME}:next}}}}"));
     assert_eq!(entry["placeholder"], format!("{{{{vault:{NAME}}}}}"));
 
@@ -286,7 +317,7 @@ async fn a_rotation_is_held_approved_started_listed_committed_and_the_value_is_n
     assert_eq!(events_of(&s.state, "approval_requested").len(), before);
 
     // Commit: no approval, and the pending value is now the password.
-    let (st, done) = s.post(&token, &path(NAME, "/commit"), None).await;
+    let (st, done) = s.finish(&token, NAME, "/commit", &rid).await;
     assert_eq!(st, StatusCode::OK, "{done}");
     assert_eq!(
         done,
@@ -298,7 +329,7 @@ async fn a_rotation_is_held_approved_started_listed_committed_and_the_value_is_n
     assert_eq!(fake(&s.state).history_len(&s.item), 1);
 
     // ...and again is "no rotation pending".
-    let (st, resp) = s.post(&token, &path(NAME, "/commit"), None).await;
+    let (st, resp) = s.finish(&token, NAME, "/commit", &rid).await;
     assert_eq!(
         (st, resp["code"].as_str()),
         (StatusCode::CONFLICT, Some("no_rotation_pending"))
@@ -364,14 +395,15 @@ async fn the_body_may_be_left_out_and_the_defaults_are_32_alphanumeric() {
 async fn abort_removes_the_pending_value_and_needs_no_approval() {
     let s = setup(|_| {}).await;
     let token = s.key("agent-a").await;
-    s.started(&token).await;
-    let (st, done) = s.post(&token, &path(NAME, "/abort"), None).await;
+    let rid = s.started(&token).await;
+    let (st, done) = s.finish(&token, NAME, "/abort", &rid).await;
     assert_eq!(st, StatusCode::OK, "{done}");
     assert_eq!(done["name"], NAME);
     assert_eq!(fake(&s.state).next_of(&s.item), None);
     assert_eq!(fake(&s.state).password_of(&s.item).as_deref(), Some(old()));
-    assert_eq!(fake(&s.state).history_len(&s.item), 0);
-    let (st, resp) = s.post(&token, &path(NAME, "/abort"), Some(json!({}))).await;
+    // The discarded value went to the item's password history.
+    assert_eq!(fake(&s.state).history_len(&s.item), 1);
+    let (st, resp) = s.finish(&token, NAME, "/abort", &rid).await;
     assert_eq!(
         (st, resp["code"].as_str()),
         (StatusCode::CONFLICT, Some("no_rotation_pending"))
@@ -411,7 +443,8 @@ async fn a_name_with_spaces_quotes_and_slashes_is_passed_percent_encoded() {
         "{{vault:'agent_Service (prod) \\'x\\'/y':next}}"
     );
     assert!(fake(&s.state).next_of(&id).is_some());
-    let (st, _) = s.post(&token, &path(odd, "/commit"), None).await;
+    let rid = resp["rotation_id"].as_str().unwrap().to_string();
+    let (st, _) = s.finish(&token, odd, "/commit", &rid).await;
     assert_eq!(st, StatusCode::OK);
     // Non-ASCII names too.
     let accented = "agent_dépôt";
@@ -596,12 +629,32 @@ async fn every_field_is_validated_before_any_prompt() {
         let (st, _) = s.post(&token, &path(&long, tail), None).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{tail}");
     }
-    // A commit or an abort takes no body.
+    // A commit or an abort names the rotation, strictly: nothing else, and not
+    // nothing.
     for tail in ["/commit", "/abort"] {
-        let (st, resp) = s
-            .post(&token, &path(NAME, tail), Some(json!({"generate": {}})))
-            .await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "{tail}: {resp}");
+        for body in [
+            json!({"generate": {}}),
+            json!({}),
+            json!({"rotation_id": null}),
+            json!({"rotation_id": 7}),
+            json!({"rotation_id": ""}),
+            json!({"rotation_id": "has space"}),
+            json!({"rotation_id": "a".repeat(65)}),
+            json!({"rotation_id": DUMMY_ID, "extra": 1}),
+            json!([DUMMY_ID]),
+        ] {
+            let (st, resp) = s.post(&token, &path(NAME, tail), Some(body.clone())).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{tail} {body}: {resp}");
+        }
+        let (st, _, resp) = call(
+            &s.app,
+            "POST",
+            &path(NAME, tail),
+            &[("x-agent-key", &token)],
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{tail} without a body: {resp}");
     }
     s.assert_untouched();
 }
@@ -686,7 +739,11 @@ async fn an_undecided_start_is_pending_and_the_identical_retry_uses_the_approval
     assert_eq!(st, StatusCode::ACCEPTED, "{resp}");
     assert_eq!(fake(&s.state).rotate_calls().len(), 1);
     // Used up: a new start (after the rotation was aborted) asks again.
-    s.post(&token, &path(NAME, "/abort"), None).await;
+    let rid = resp["rotation_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        s.finish(&token, NAME, "/abort", &rid).await.0,
+        StatusCode::OK
+    );
     let (st, resp) = s.start(&token, NAME).await;
     assert_eq!(
         (st, resp["code"].as_str()),
@@ -756,7 +813,7 @@ async fn deciding_takes_no_duration_and_an_agent_cannot_decide() {
     let id = resp["approval_id"].as_str().unwrap().to_string();
     for body in [r#"{"minutes": 15}"#, r#"{"x": 1}"#] {
         let (st, _) = s.decide(&id, "approve", Some(body)).await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(st, StatusCode::BAD_REQUEST, "unexpected response status");
     }
     // An agent key on the decision route is refused.
     let (st, _, _) = call(
@@ -777,9 +834,9 @@ async fn deciding_takes_no_duration_and_an_agent_cannot_decide() {
 async fn a_change_by_someone_else_is_a_conflict_and_is_recorded() {
     let s = setup(|_| {}).await;
     let token = s.key("agent-a").await;
-    s.started(&token).await;
+    let rid = s.started(&token).await;
     fake(&s.state).conflict_next_write();
-    let (st, resp) = s.post(&token, &path(NAME, "/commit"), None).await;
+    let (st, resp) = s.finish(&token, NAME, "/commit", &rid).await;
     assert_eq!(
         (st, resp["code"].as_str()),
         (StatusCode::CONFLICT, Some("vault_conflict"))
@@ -796,7 +853,7 @@ async fn a_change_by_someone_else_is_a_conflict_and_is_recorded() {
     assert_eq!(ev["event"]["reason"], "vault_conflict");
     // Retrying works.
     assert_eq!(
-        s.post(&token, &path(NAME, "/commit"), None).await.0,
+        s.finish(&token, NAME, "/commit", &rid).await.0,
         StatusCode::OK
     );
 }
@@ -814,8 +871,34 @@ async fn a_failed_write_is_a_502_and_leaves_no_value_anywhere() {
         (st, resp["code"].as_str()),
         (StatusCode::BAD_GATEWAY, Some("vault_write_failed"))
     );
+    assert!(resp["error"]
+        .as_str()
+        .unwrap()
+        .contains("nothing was created or changed"));
     assert_eq!(fake(&s.state).next_of(&s.item), None);
     assert!(!all_events_text(&s.state).contains(old()));
+}
+
+#[tokio::test]
+async fn a_write_with_an_unknown_outcome_says_to_read_the_credential_again() {
+    let s = setup(|_| {}).await;
+    let token = s.key("agent-a").await;
+    fake(&s.state).unknown_next_write();
+    let held = s.spawn_start(&token, NAME, None);
+    let open = s.wait_for_pending(1).await;
+    s.decide(&open[0].id, "approve", None).await;
+    let (st, resp) = held.await.unwrap();
+    assert_eq!(
+        (st, resp["code"].as_str()),
+        (StatusCode::BAD_GATEWAY, Some("vault_write_unknown"))
+    );
+    let message = resp["error"].as_str().unwrap();
+    assert!(message.contains("may have been applied"), "{message}");
+    assert!(message.contains("GET /v1/credentials?detail=true"));
+    assert!(!message.contains("nothing was created"), "{message}");
+    let ev = &events_of(&s.state, "credential_rotate_start")[0];
+    assert_eq!(ev["event"]["reason"], "vault_write_unknown");
+    assert_eq!(ev["event"]["outcome"], "failure");
 }
 
 // ── The operator ──────────────────────────────────────────────────────────────
@@ -828,7 +911,8 @@ fn admin_path(name: &str) -> String {
 async fn an_operator_can_clear_a_stuck_rotation_and_an_agent_key_cannot() {
     let s = setup(|_| {}).await;
     let token = s.key("agent-a").await;
-    s.started(&token).await;
+    let rid = s.started(&token).await;
+    let named = |id: &str| json!({ "rotation_id": id }).to_string();
 
     // The agent key is not an admin key.
     let (st, _, _) = call(
@@ -836,18 +920,39 @@ async fn an_operator_can_clear_a_stuck_rotation_and_an_agent_key_cannot() {
         "POST",
         &admin_path(NAME),
         &[("x-agent-key", &token)],
-        None,
+        Some(&named(&rid)),
     )
     .await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
     assert!(fake(&s.state).next_of(&s.item).is_some(), "untouched");
 
-    let (st, body) = admin(&s.app, "POST", &admin_path(NAME), None).await;
-    assert_eq!(st, StatusCode::OK, "{body}");
+    // The abort names the rotation: not naming one, or a stale form (another
+    // rotation's id), is refused and writes nothing.
+    let (st, _) = admin(&s.app, "POST", &admin_path(NAME), None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "unexpected response status");
+    let (st, body) = admin(&s.app, "POST", &admin_path(NAME), Some(&named(DUMMY_ID))).await;
+    assert_eq!(
+        (st, body["code"].as_str()),
+        (StatusCode::CONFLICT, Some("rotation_mismatch"))
+    );
+    assert!(fake(&s.state).next_of(&s.item).is_some(), "untouched");
+
+    let (st, body) = admin(&s.app, "POST", &admin_path(NAME), Some(&named(&rid))).await;
+    assert_eq!(st, StatusCode::OK, "unexpected response status");
     assert_eq!(body, json!({"status": "aborted", "name": NAME}));
     assert_eq!(fake(&s.state).next_of(&s.item), None);
     assert_eq!(fake(&s.state).password_of(&s.item).as_deref(), Some(old()));
-    let ev = events_of(&s.state, "credential_rotate_abort");
+    assert_eq!(fake(&s.state).history_len(&s.item), 1, "kept");
+    // The refused attempts are recorded too (stale form, not naming one); the
+    // successful abort is the one with the details below.
+    let all = events_of(&s.state, "credential_rotate_abort");
+    assert!(all
+        .iter()
+        .any(|e| e["event"]["reason"] == "rotation_mismatch"));
+    let ev: Vec<_> = all
+        .into_iter()
+        .filter(|e| e["event"]["outcome"] == "success")
+        .collect();
     assert_eq!(ev.len(), 1);
     assert_eq!(ev[0]["ferrowarden"]["details"]["by"], "admin");
     assert_eq!(ev[0]["ferrowarden"]["details"]["approver"], "admin_api");
@@ -855,18 +960,24 @@ async fn an_operator_can_clear_a_stuck_rotation_and_an_agent_key_cannot() {
     assert!(ev[0]["ferrowarden"].get("key").is_none());
 
     // Nothing pending: the usual conflict. Not managed: refused.
-    let (st, body) = admin(&s.app, "POST", &admin_path(NAME), None).await;
+    let (st, body) = admin(&s.app, "POST", &admin_path(NAME), Some(&named(&rid))).await;
     assert_eq!(
         (st, body["code"].as_str()),
         (StatusCode::CONFLICT, Some("no_rotation_pending"))
     );
     fake(&s.state).add_item("agent_personal", &["http://127.0.0.1:9"]);
-    let (st, body) = admin(&s.app, "POST", &admin_path("agent_personal"), None).await;
+    let (st, body) = admin(
+        &s.app,
+        "POST",
+        &admin_path("agent_personal"),
+        Some(&named(&rid)),
+    )
+    .await;
     assert_eq!(
         (st, body["code"].as_str()),
         (StatusCode::FORBIDDEN, Some("credential_not_managed"))
     );
-    // A body is refused.
+    // Anything but the rotation id is refused.
     let (st, _) = admin(&s.app, "POST", &admin_path(NAME), Some(r#"{"a":1}"#)).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 }
@@ -923,4 +1034,322 @@ async fn refusals_are_recorded_with_the_fixed_reasons_the_counter_maps() {
         assert_eq!(e["event"]["outcome"], "failure");
         assert_eq!(e["ferrowarden"]["details"]["by"], "agent");
     }
+}
+
+// ── A finish names exactly what it means ──────────────────────────────────────
+
+/// Start and approve another rotation of `NAME`, once the previous one is done.
+async fn start_again(s: &Setup, token: &str) -> String {
+    s.started(token).await
+}
+
+#[tokio::test]
+async fn a_replayed_commit_cannot_finish_the_next_rotation() {
+    let s = setup(|_| {}).await;
+    let token = s.key("agent-a").await;
+    // Commit A succeeds, but its answer is lost: the agent will send it again.
+    let a = s.started(&token).await;
+    assert_eq!(
+        s.finish(&token, NAME, "/commit", &a).await.0,
+        StatusCode::OK
+    );
+    let password_after_a = fake(&s.state).password_of(&s.item);
+    // Meanwhile another rotation, B, starts.
+    let b = start_again(&s, &token).await;
+    assert_ne!(a, b);
+    let next_b = fake(&s.state).next_of(&s.item);
+    assert!(next_b.is_some());
+
+    // The replay of A's commit (and an abort of A) is refused, and B is
+    // untouched.
+    for tail in ["/commit", "/abort"] {
+        let (st, resp) = s.finish(&token, NAME, tail, &a).await;
+        assert_eq!(
+            (st, resp["code"].as_str()),
+            (StatusCode::CONFLICT, Some("rotation_mismatch")),
+            "{tail}"
+        );
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("Nothing was written"));
+    }
+    assert_eq!(fake(&s.state).next_of(&s.item), next_b);
+    assert_eq!(fake(&s.state).password_of(&s.item), password_after_a);
+    assert_eq!(fake(&s.state).rotation_id_of(&s.item), Some(b.clone()));
+    let ev = events_of(&s.state, "credential_rotate_commit");
+    assert!(ev
+        .iter()
+        .any(|e| e["event"]["reason"] == "rotation_mismatch"));
+    // B's own id finishes it.
+    assert_eq!(
+        s.finish(&token, NAME, "/commit", &b).await.0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn a_pending_value_a_person_replaced_is_not_finished_by_the_old_id() {
+    let s = setup(|_| {}).await;
+    let token = s.key("agent-a").await;
+    let rid = s.started(&token).await;
+    // A person replaces the pending value in the vault: a new rotation id.
+    let replaced = fake(&s.state).set_next(&s.item, "a-value-a-person-chose");
+    assert_ne!(replaced, rid);
+    crate::vault::refresh::refresh_credentials(&s.state)
+        .await
+        .unwrap();
+    let (st, resp) = s.finish(&token, NAME, "/commit", &rid).await;
+    assert_eq!(
+        (st, resp["code"].as_str()),
+        (StatusCode::CONFLICT, Some("rotation_mismatch"))
+    );
+    assert_eq!(fake(&s.state).password_of(&s.item).as_deref(), Some(old()));
+    // The listing names the one that is there now, and that one finishes it.
+    let (_, _, listing) = call(
+        &s.app,
+        "GET",
+        "/v1/credentials?detail=true",
+        &[("x-agent-key", &token)],
+        None,
+    )
+    .await;
+    let entry = listing
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == NAME)
+        .unwrap();
+    assert_eq!(entry["rotation_id"], replaced.as_str());
+    assert_eq!(
+        s.finish(&token, NAME, "/commit", &replaced).await.0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn an_item_swapped_while_the_approval_was_pending_is_not_written() {
+    let s = setup(|c| c.approval.wait_secs = 20).await;
+    let token = s.key("agent-a").await;
+    let held = s.spawn_start(&token, NAME, None);
+    let open = s.wait_for_pending(1).await;
+    // Someone deletes the approved item and makes another with the same name.
+    let new_item = fake(&s.state).swap_item(NAME);
+    assert_ne!(new_item, s.item);
+    assert_eq!(s.decide(&open[0].id, "approve", None).await.0, 200);
+    let (st, resp) = held.await.unwrap();
+    assert_eq!(
+        (st, resp["code"].as_str()),
+        (StatusCode::CONFLICT, Some("vault_conflict"))
+    );
+    assert!(resp["error"]
+        .as_str()
+        .unwrap()
+        .contains("start the rotation again"));
+    // Nothing was written to either item.
+    assert_eq!(fake(&s.state).rotate_calls(), Vec::<String>::new());
+    assert_eq!(fake(&s.state).next_of(&s.item), None);
+    assert_eq!(fake(&s.state).next_of(&new_item), None);
+    let ev = &events_of(&s.state, "credential_rotate_start")[0];
+    assert_eq!(ev["event"]["reason"], "vault_conflict");
+}
+
+// ── Which names are answered as missing ───────────────────────────────────────
+
+#[tokio::test]
+async fn an_ambiguous_name_outside_the_credentials_scope_is_answered_like_a_missing_one() {
+    let s = setup(|_| {}).await;
+    // Two managed items with one name, which the key cannot see.
+    fake(&s.state).add_managed_item("secret_dup", &["http://127.0.0.1:9"], old());
+    fake(&s.state).add_managed_item("secret_dup", &["http://127.0.0.1:9"], old());
+    let token = s.key_with("agent-a", r#"["agent_*"]"#, r#"["*"]"#).await;
+    let (st1, r1) = s.start(&token, "secret_dup").await;
+    let (st2, r2) = s.start(&token, "secret_missing").await;
+    assert_eq!(
+        (st1, r1["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("credential_not_managed"))
+    );
+    assert_eq!((st1, &r1["code"]), (st2, &r2["code"]));
+    for tail in ["/commit", "/abort"] {
+        let (st, resp) = s.post(&token, &path("secret_dup", tail), None).await;
+        assert_eq!(
+            (st, resp["code"].as_str()),
+            (StatusCode::FORBIDDEN, Some("credential_not_managed")),
+            "{tail}"
+        );
+    }
+    s.assert_untouched();
+}
+
+#[tokio::test]
+async fn membership_is_checked_before_ambiguity_for_a_name_in_scope() {
+    let s = setup(|_| {}).await;
+    let token = s.key("agent-a").await;
+    // Two items with the name, neither in the managed collection: missing, not
+    // ambiguous.
+    fake(&s.state).add_item("agent_twice", &["http://127.0.0.1:9"]);
+    fake(&s.state).add_item("agent_twice", &["http://127.0.0.1:9"]);
+    let (st, resp) = s.start(&token, "agent_twice").await;
+    assert_eq!(
+        (st, resp["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("credential_not_managed"))
+    );
+    // One in the collection and one outside it: ambiguous (the ordinary
+    // conflict, no code).
+    fake(&s.state).add_managed_item("agent_mixed", &["http://127.0.0.1:9"], old());
+    fake(&s.state).add_item("agent_mixed", &["http://127.0.0.1:9"]);
+    let (st, resp) = s.start(&token, "agent_mixed").await;
+    assert_eq!(st, StatusCode::CONFLICT, "{resp}");
+    assert!(resp.get("code").is_none());
+    s.assert_untouched();
+}
+
+// ── The key as it is after the wait ───────────────────────────────────────────
+
+/// Start a rotation, approve it, and hold it on the create/rotate lock while
+/// `change` runs on the key store; then let it go on. Returns its answer.
+async fn approved_then_changed<F, Fut>(
+    s: &Setup,
+    token: &str,
+    change: F,
+) -> (StatusCode, serde_json::Value)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let guard = s.state.create_lock.lock().await;
+    let held = s.spawn_start(token, NAME, None);
+    let open = s.wait_for_pending(1).await;
+    assert_eq!(s.decide(&open[0].id, "approve", None).await.0, 200);
+    // The request has its approval and waits for the lock.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!held.is_finished());
+    change().await;
+    drop(guard);
+    held.await.unwrap()
+}
+
+#[tokio::test]
+async fn a_key_narrowed_while_the_request_waited_is_refused_and_nothing_is_written() {
+    let s = setup(|c| c.approval.wait_secs = 20).await;
+    let token = s.key("agent-a").await;
+    let (st, resp) = approved_then_changed(&s, &token, || async {
+        let mut keys = s.state.agent_keys.write().await;
+        for k in keys.values_mut() {
+            k.policy = crate::policy::KeyPolicy::from_raw(
+                vec!["*".into()],
+                vec!["*".into()],
+                vec![],
+                vec![],
+                vec![],
+            )
+            .unwrap();
+        }
+    })
+    .await;
+    assert_eq!(
+        (st, resp["code"].as_str()),
+        (
+            StatusCode::FORBIDDEN,
+            Some("credential_rotate_out_of_scope")
+        )
+    );
+    assert_eq!(fake(&s.state).rotate_calls(), Vec::<String>::new());
+    assert_eq!(fake(&s.state).next_of(&s.item), None);
+
+    // The credentials scope too: now answered like a name that does not exist.
+    let s = setup(|c| c.approval.wait_secs = 20).await;
+    let token = s.key("agent-a").await;
+    let (st, resp) = approved_then_changed(&s, &token, || async {
+        let mut keys = s.state.agent_keys.write().await;
+        for k in keys.values_mut() {
+            k.policy = crate::policy::KeyPolicy::from_raw(
+                vec!["lab_*".into()],
+                vec!["*".into()],
+                vec![],
+                vec![],
+                vec!["*".into()],
+            )
+            .unwrap();
+        }
+    })
+    .await;
+    assert_eq!(
+        (st, resp["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("credential_not_managed"))
+    );
+    assert!(fake(&s.state).rotate_calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_key_revoked_while_the_request_waited_is_unauthorized_and_nothing_is_written() {
+    let s = setup(|c| c.approval.wait_secs = 20).await;
+    let token = s.key("agent-a").await;
+    let (st, _) = approved_then_changed(&s, &token, || async {
+        s.state.agent_keys.write().await.clear();
+    })
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert!(fake(&s.state).rotate_calls().is_empty());
+    assert_eq!(fake(&s.state).next_of(&s.item), None);
+}
+
+#[tokio::test]
+async fn a_finish_rechecks_the_key_after_the_lock_too() {
+    let s = setup(|_| {}).await;
+    let token = s.key("agent-a").await;
+    let rid = s.started(&token).await;
+    let guard = s.state.create_lock.lock().await;
+    let (app, token2, p) = (s.app.clone(), token.clone(), path(NAME, "/commit"));
+    let body = json!({ "rotation_id": rid }).to_string();
+    let held = tokio::spawn(async move {
+        call(
+            &app,
+            "POST",
+            &p,
+            &[("x-agent-key", token2.as_str())],
+            Some(&body),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    s.state.agent_keys.write().await.clear();
+    drop(guard);
+    let (st, _, _) = held.await.unwrap();
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert!(fake(&s.state).next_of(&s.item).is_some(), "still pending");
+}
+
+#[tokio::test]
+async fn a_commit_after_a_persons_password_change_is_a_conflict_and_an_abort_still_works() {
+    let s = setup(|_| {}).await;
+    let token = s.key("agent-a").await;
+    let rid = s.started(&token).await;
+    let person = format!("person-{}", random_value(&PERSON, "pw"));
+    static PERSON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    fake(&s.state).person_changes_password(&s.item, &person);
+    for _ in 0..2 {
+        let (st, resp) = s.finish(&token, NAME, "/commit", &rid).await;
+        assert_eq!(
+            (st, resp["code"].as_str()),
+            (StatusCode::CONFLICT, Some("vault_conflict"))
+        );
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("password was changed after the rotation started"));
+    }
+    assert_eq!(
+        fake(&s.state).password_of(&s.item).as_deref(),
+        Some(person.as_str()),
+        "the person's password stays"
+    );
+    assert_eq!(fake(&s.state).history_len(&s.item), 0);
+    let ev = &events_of(&s.state, "credential_rotate_commit")[0];
+    assert_eq!(ev["event"]["reason"], "vault_conflict");
+    // An abort is always possible.
+    let (st, resp) = s.finish(&token, NAME, "/abort", &rid).await;
+    assert_eq!(st, StatusCode::OK, "{resp}");
+    assert_eq!(fake(&s.state).next_of(&s.item), None);
+    assert_eq!(fake(&s.state).history_len(&s.item), 1);
 }

@@ -75,6 +75,26 @@ macro_rules! authed {
     }};
 }
 
+/// Like [`authed!`], for a **write**: a login that fails means the write was
+/// never sent (`ApiError::Refused`, nothing was applied), and a 401 is retried
+/// once with a fresh login (the request was refused, not applied). Nothing
+/// else is retried: a request that timed out may have been applied.
+macro_rules! authed_write {
+    ($self:ident, |$t:ident| $call:expr) => {{
+        let first: Result<_, ApiError> = match $self.token(false).await {
+            Ok($t) => $call.await,
+            Err(_) => Err(ApiError::Refused),
+        };
+        match first {
+            Err(ApiError::Unauthorized) => match $self.token(true).await {
+                Ok($t) => $call.await,
+                Err(_) => Err(ApiError::Refused),
+            },
+            other => other,
+        }
+    }};
+}
+
 /// Everything held while unlocked.
 struct Unlocked {
     ring: KeyRing,
@@ -128,13 +148,6 @@ pub struct NativeVault {
     /// The account email, once known (it never changes for an API key).
     email: StdMutex<Option<String>>,
     cause: StdMutex<&'static str>,
-    /// For each item with a rotation pending that Ferrowarden started: the
-    /// revision the item had right after Ferrowarden's own write. A commit or
-    /// abort that finds another revision knows someone edited the item in
-    /// between, and refuses (`vault_conflict`) without writing. Memory only:
-    /// a restart forgets it (the server's own check still applies), and a
-    /// lock clears it.
-    pins: StdMutex<HashMap<String, String>>,
 }
 
 impl NativeVault {
@@ -165,7 +178,6 @@ impl NativeVault {
             state: RwLock::new(State::Locked),
             email: StdMutex::new(None),
             cause: StdMutex::new("vault_locked"),
-            pins: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -206,11 +218,6 @@ impl NativeVault {
         self.set_cause(cause);
         *self.state.write().await = State::Locked;
         *self.session.lock().await = None;
-        self.pins().clear();
-    }
-
-    fn pins(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
-        self.pins.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Edit one item of the managed collection for a rotation: read it as it
@@ -221,7 +228,10 @@ impl NativeVault {
     /// be in the collection and organisation of the evaluated managed state,
     /// both in the cached copy and in the copy read now. `label` (the
     /// credential's name) is only used in error messages.
-    async fn rotate(&self, id: &str, label: &str, op: RotateOp<'_>) -> FerroResult<()> {
+    ///
+    /// Returns the rotation id of the pending value after a start, and `None`
+    /// after a commit or an abort.
+    async fn rotate(&self, id: &str, label: &str, op: RotateOp<'_>) -> FerroResult<Option<String>> {
         // 1. The collection, and the cached copy must be in it.
         let (collection_id, organization_id) = {
             let guard = self.state.read().await;
@@ -241,9 +251,20 @@ impl NativeVault {
             (collection.id.clone(), collection.organization_id.clone())
         };
 
-        // 2. The item as the server holds it now.
-        let item = authed!(self, |t| self.api.get_cipher(&t, id)).map_err(|e| match e {
-            ApiError::NotFound => FerroError::CredentialNotFound(label.to_string()),
+        // 2. The item as the server holds it now. The login (if one is due) is
+        // done first, and the same token is used for the write, so that no
+        // network call but the write itself lies between this read and the
+        // write (docs/native-vault.md, "The window that remains").
+        let mut token = self.token(false).await.map_err(api_error)?;
+        let read = match self.api.get_cipher(&token, id).await {
+            Err(ApiError::Unauthorized) => {
+                token = self.token(true).await.map_err(api_error)?;
+                self.api.get_cipher(&token, id).await
+            }
+            other => other,
+        };
+        let item = read.map_err(|e| match e {
+            ApiError::NotFound => FerroError::VaultItemGone,
             other => api_error(other),
         })?;
         let revision = item
@@ -254,7 +275,7 @@ impl NativeVault {
             .ok_or(FerroError::VaultWriteFailed)?;
 
         // 3. The new item, under the keys of the current state.
-        let body = {
+        let (body, started) = {
             let guard = self.state.read().await;
             let State::Unlocked(u) = &*guard else {
                 return Err(FerroError::VaultLocked);
@@ -282,58 +303,63 @@ impl NativeVault {
             let org_key = u.ring.org.get(&organization_id).ok_or(
                 FerroError::ManagedCollectionUnavailable(ManagedProblem::NoOrganizationKey),
             )?;
-            // Someone edited the item since Ferrowarden's own write: refuse
-            // here, before anything is sent.
-            if !matches!(op, RotateOp::Start(_)) {
-                let mut pins = self.pins();
-                if pins.get(id).is_some_and(|pinned| *pinned != revision) {
-                    pins.remove(id);
-                    return Err(FerroError::VaultConflict);
-                }
-            }
             let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-            let mut body = match op {
-                RotateOp::Start(next) => rotate::start(&item, org_key, &revision, next),
-                RotateOp::Commit => rotate::commit(&item, org_key, &revision, &now),
-                RotateOp::Abort => rotate::abort(&item, org_key, &revision),
+            let (mut body, started) = match op {
+                RotateOp::Start(next) => rotate::start(&item, org_key, &revision, next)
+                    .map(|(body, rotation_id)| (body, Some(rotation_id))),
+                RotateOp::Commit(rotation_id) => {
+                    rotate::commit(&item, org_key, &revision, &now, rotation_id)
+                        .map(|body| (body, None))
+                }
+                RotateOp::Abort(rotation_id) => {
+                    rotate::abort(&item, org_key, &revision, &now, rotation_id)
+                        .map(|body| (body, None))
+                }
             }
             .map_err(|e| rotate_error(e, label))?;
             // Vaultwarden 1.37 refuses a `PUT` without `encryptedFor`, which
             // the answer to a `GET` does not have: the account's own id, as
             // a create sends it.
-            body["encryptedFor"] = serde_json::json!(u.user_id);
-            body
+            if let Some(user) = &u.user_id {
+                body["encryptedFor"] = serde_json::json!(user);
+            }
+            (body, started)
         };
 
-        // 4. Write it. A 401 is retried once with a fresh login (the request
-        // was refused, not applied). Nothing else is.
-        match authed!(self, |t| self.api.put_cipher(&t, id, &body)) {
-            Ok(written) => {
-                let mut pins = self.pins();
-                match (
-                    &op,
-                    written
-                        .get("revisionDate")
-                        .and_then(serde_json::Value::as_str),
-                ) {
-                    (RotateOp::Start(_), Some(revision)) => {
-                        pins.insert(id.to_string(), revision.to_string());
-                    }
-                    _ => {
-                        pins.remove(id);
-                    }
-                }
-                Ok(())
-            }
-            Err(ApiError::Conflict) | Err(ApiError::NotFound) => {
-                self.pins().remove(id);
-                Err(FerroError::VaultConflict)
-            }
-            Err(e) => {
-                tracing::warn!(error = ?e, "Editing a vault item failed");
-                Err(FerroError::VaultWriteFailed)
-            }
+        // 4. Write it with the token the read used. A 401 is the server
+        // refusing, not applying: it is retried once with a fresh login (the
+        // only call that can lie after the read, and only after a refusal).
+        // Nothing else is retried: a request that timed out may have been
+        // applied.
+        let written = match self.api.put_cipher(&token, id, &body).await {
+            Err(ApiError::Unauthorized) => match self.token(true).await {
+                Ok(fresh) => self.api.put_cipher(&fresh, id, &body).await,
+                Err(_) => Err(ApiError::Refused),
+            },
+            other => other,
+        };
+        // A success status is the write applied, whatever the body says (it
+        // is not read for anything).
+        match written {
+            Ok(_) => Ok(started),
+            Err(e) => Err(write_error(e)),
         }
+    }
+}
+
+/// A failed write, as the error the caller sees, saying exactly what is known:
+/// a refused login (or a write that was never sent) changed nothing; anything
+/// else that is not a clean answer may have been applied; a changed or deleted
+/// item is a conflict.
+fn write_error(e: ApiError) -> FerroError {
+    tracing::warn!(error = ?e, "Writing to the vault failed");
+    match e {
+        ApiError::Conflict => FerroError::VaultConflict,
+        ApiError::NotFound => FerroError::VaultItemGone,
+        ApiError::Unauthorized | ApiError::Refused | ApiError::BadResponse => {
+            FerroError::VaultWriteFailed
+        }
+        ApiError::RateLimited | ApiError::Unavailable => FerroError::VaultWriteUnknown,
     }
 }
 
@@ -341,8 +367,10 @@ impl NativeVault {
 enum RotateOp<'a> {
     /// Add the pending value (the plaintext, encrypted by [`rotate::start`]).
     Start(&'a str),
-    Commit,
-    Abort,
+    /// Make the pending value the rotation id names the password.
+    Commit(&'a str),
+    /// Throw the pending value the rotation id names away (into the history).
+    Abort(&'a str),
 }
 
 /// The usable managed collection, or the reason there is none.
@@ -365,6 +393,8 @@ fn rotate_error(e: rotate::RotateError, label: &str) -> FerroError {
         E::NoPending => FerroError::NoRotationPending(label.to_string()),
         // Something on the item needs a person: never guessed at.
         E::DuplicatePending | E::CorruptPending => FerroError::VaultConflict,
+        E::RotationMismatch => FerroError::RotationMismatch(label.to_string()),
+        E::PasswordChanged => FerroError::VaultPasswordChanged,
         E::Crypto(e) => {
             tracing::warn!(reason = e.code(), "A vault item could not be edited");
             FerroError::VaultWriteFailed
@@ -734,7 +764,7 @@ impl Vault for NativeVault {
         }
     }
 
-    async fn create_login(&self, new: NewLogin) -> FerroResult<String> {
+    async fn create_login(&self, new: NewLogin) -> FerroResult<Option<String>> {
         // Encrypt under the keys of the current state, then let go of it for
         // the network call. The target is the evaluated managed collection and
         // nothing else: if it is not usable, nothing is written.
@@ -767,12 +797,9 @@ impl Vault for NativeVault {
                 FerroError::VaultWriteFailed
             })?
         };
-        // A 401 is retried once with a fresh login (the request was refused,
-        // not applied). Nothing else is: a timeout may have been applied.
-        authed!(self, |t| self.api.create_cipher(&t, &body)).map_err(|e| {
-            tracing::warn!(error = ?e, "Creating a vault item failed");
-            FerroError::VaultWriteFailed
-        })
+        // See `authed_write!`. `None` is an item that was created whose id the
+        // answer did not give: the caller syncs afterwards anyway.
+        authed_write!(self, |t| self.api.create_cipher(&t, &body)).map_err(write_error)
     }
 
     async fn rotate_start(
@@ -780,16 +807,22 @@ impl Vault for NativeVault {
         id: &str,
         label: &str,
         next: Zeroizing<String>,
-    ) -> FerroResult<()> {
-        self.rotate(id, label, RotateOp::Start(next.as_str())).await
+    ) -> FerroResult<String> {
+        self.rotate(id, label, RotateOp::Start(next.as_str()))
+            .await?
+            .ok_or(FerroError::VaultWriteFailed)
     }
 
-    async fn rotate_commit(&self, id: &str, label: &str) -> FerroResult<()> {
-        self.rotate(id, label, RotateOp::Commit).await
+    async fn rotate_commit(&self, id: &str, label: &str, rotation_id: &str) -> FerroResult<()> {
+        self.rotate(id, label, RotateOp::Commit(rotation_id))
+            .await
+            .map(|_| ())
     }
 
-    async fn rotate_abort(&self, id: &str, label: &str) -> FerroResult<()> {
-        self.rotate(id, label, RotateOp::Abort).await
+    async fn rotate_abort(&self, id: &str, label: &str, rotation_id: &str) -> FerroResult<()> {
+        self.rotate(id, label, RotateOp::Abort(rotation_id))
+            .await
+            .map(|_| ())
     }
 }
 

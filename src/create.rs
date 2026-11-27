@@ -384,6 +384,16 @@ async fn run_inner(
     // 6. One create at a time from here: of two requests for one name that
     // were both approved, the second sees the first's item and gets 409.
     let _one_at_a_time = state.create_lock.lock().await;
+    // The key's permission as it is now: the request may have waited a long
+    // time for the human and for the lock, and the key may have been revoked
+    // or narrowed since (nothing is written then).
+    let live = state
+        .live_key(&agent.id)
+        .await
+        .ok_or(FerroError::Unauthorized)?;
+    if !live.policy.allows_create(&req.name) {
+        return Err(FerroError::CredentialCreateOutOfScope(req.name.clone()));
+    }
     fresh(state).await?;
     ensure_absent(state, &req.name).await?;
 
@@ -397,7 +407,16 @@ async fn run_inner(
         approval_required: req.approval_required,
     };
     // The value moves into the vault call and is wiped when it is dropped.
-    state.vault.create_login(new).await?;
+    if let Err(e) = state.vault.create_login(new).await {
+        if matches!(e, FerroError::VaultWriteUnknown) {
+            // It may have been applied: bring the cache up to date, so that the
+            // agent's listing (and a retry's 409) show what is really there.
+            if let Err(e) = refresh_credentials(state).await {
+                tracing::warn!(error = %e, "The cache could not be refreshed after a write of unknown outcome");
+            }
+        }
+        return Err(e);
+    }
 
     // The write is done. A cache that cannot be refreshed does not undo it.
     let cache_refreshed = match refresh_credentials(state).await {

@@ -753,6 +753,26 @@ async fn a_locked_vault_refuses_before_any_prompt() {
 // ── The write fails ───────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn a_write_with_an_unknown_outcome_does_not_claim_that_nothing_was_created() {
+    let s = setup(|c| c.approval.wait_secs = 20).await;
+    fake(&s.state).unknown_next_write();
+    let token = s.key("agent-a").await;
+    let held = s.spawn_create(&token, body_for(NAME));
+    let open = s.wait_for_pending(1).await;
+    s.decide(&open[0].id, "approve", None).await;
+    let (st, resp) = held.await.unwrap();
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{resp}");
+    assert_eq!(resp["code"], "vault_write_unknown");
+    let message = resp["error"].as_str().unwrap();
+    assert!(message.contains("may have been applied"), "{message}");
+    assert!(message.contains("GET /v1/credentials?detail=true"));
+    assert!(!message.contains("nothing was created"), "{message}");
+    let ev = &events_of(&s.state, "credential_create")[0];
+    assert_eq!(ev["event"]["outcome"], "failure");
+    assert_eq!(ev["event"]["reason"], "vault_write_unknown");
+}
+
+#[tokio::test]
 async fn a_failed_write_is_a_502_and_leaves_no_value_anywhere() {
     let s = setup(|c| c.approval.wait_secs = 20).await;
     fake(&s.state).fail_writes(true);
@@ -788,4 +808,69 @@ async fn refusals_are_recorded_with_the_fixed_reasons_the_counter_maps() {
         .collect();
     assert!(reasons.contains(&"credential_create_out_of_scope".to_string()));
     assert!(reasons.contains(&"credential_exists".to_string()));
+}
+
+// ── The key as it is after the wait ───────────────────────────────────────────
+
+/// A create approved and held on the create/rotate lock while `change` runs on
+/// the key store; then let go. Returns its answer.
+async fn approved_then_changed<F, Fut>(
+    s: &Setup,
+    token: &str,
+    change: F,
+) -> (StatusCode, serde_json::Value)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let guard = s.state.create_lock.lock().await;
+    let held = s.spawn_create(token, body_for(NAME));
+    let open = s.wait_for_pending(1).await;
+    assert_eq!(s.decide(&open[0].id, "approve", None).await.0, 200);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!held.is_finished());
+    change().await;
+    drop(guard);
+    held.await.unwrap()
+}
+
+#[tokio::test]
+async fn a_key_narrowed_while_the_create_waited_is_refused_and_nothing_is_written() {
+    let s = setup(|c| c.approval.wait_secs = 20).await;
+    let token = s.key("agent-a").await;
+    let (st, resp) = approved_then_changed(&s, &token, || async {
+        let mut keys = s.state.agent_keys.write().await;
+        for k in keys.values_mut() {
+            k.policy = crate::policy::KeyPolicy::from_raw(
+                vec!["*".into()],
+                vec!["*".into()],
+                vec![],
+                vec![],
+                vec![],
+            )
+            .unwrap();
+        }
+    })
+    .await;
+    assert_eq!(
+        (st, resp["code"].as_str()),
+        (
+            StatusCode::FORBIDDEN,
+            Some("credential_create_out_of_scope")
+        )
+    );
+    assert_eq!(fake(&s.state).create_calls(), 0);
+    assert!(fake(&s.state).created().is_empty());
+}
+
+#[tokio::test]
+async fn a_key_revoked_while_the_create_waited_is_unauthorized_and_nothing_is_written() {
+    let s = setup(|c| c.approval.wait_secs = 20).await;
+    let token = s.key("agent-a").await;
+    let (st, _) = approved_then_changed(&s, &token, || async {
+        s.state.agent_keys.write().await.clear();
+    })
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(fake(&s.state).create_calls(), 0);
 }

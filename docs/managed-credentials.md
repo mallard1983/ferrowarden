@@ -11,7 +11,7 @@ What the feature guarantees, and what it asks you to trust:
 - **The generated value never reaches the agent.** It is generated inside Ferrowarden, encrypted there and sent to Vaultwarden. The response to the agent, every event, every log line and every metric carry names and codes, never the value.
 - **Writes go to one collection only.** Ferrowarden creates items in the **managed collection** and nowhere else, whatever an agent key's policy says. Your own items are out of reach.
 - **A human approves every create and every rotation.** Nothing is generated or written before a person has approved that one operation.
-- **Rotation changes only the managed collection, and never overwrites a person.** Only an item in the managed collection can be rotated, only the members Ferrowarden owns are changed, and a write that finds the item edited by someone else fails with `409 vault_conflict`.
+- **Rotation changes only the managed collection, and never overwrites a person.** Only an item in the managed collection can be rotated, only the members Ferrowarden owns are changed, and a write that finds the item edited by someone else fails with `409 vault_conflict` (the one case the server cannot detect is an edit landing between Ferrowarden's read and its write within the same second: see [native vault](native-vault.md#the-window-that-remains)).
 - **The cost:** Ferrowarden's Vaultwarden account now needs *edit* rights on one collection. Everything else about its access is unchanged (see "What you are trusting").
 
 ## Set it up
@@ -131,8 +131,11 @@ Creates are serialised past the approval: the name is checked again, the item wr
 | `403` (no code) | A URI is blocked by the outbound target policy. |
 | `409` `credential_exists` | A vault item with that name exists. Nothing was asked of a human. |
 | `429` `approval_limit_reached` | The key has too many open or recent approval requests. |
-| `502` `vault_write_failed` | Vaultwarden refused or failed the write. Nothing was created; a retry needs a new approval. |
+| `502` `vault_write_failed` | Vaultwarden refused the credentials **before anything was written** (a refused login), or the write was never sent. Nothing was created; a retry needs a new approval. |
+| `502` `vault_write_unknown` | Any other failure of the write (a timeout, a lost connection, a server error, an unrecognised `4xx`): the item **may have been created**. Read the credentials again (`GET /v1/credentials?detail=true`) before retrying: if the name is listed, the create was applied (and a retry would be `409 credential_exists`). |
 | `503` | The vault is locked or unreachable, or `managed_collection_unavailable` (with a `reason`). |
+
+A write whose answer Vaultwarden gave with a success status but that Ferrowarden could not read (cut off, not the expected JSON) **was applied**: it is treated as a success.
 
 ## Approval
 
@@ -216,7 +219,7 @@ Only an item that is **all** of these:
 
 - in the **managed collection** (its collections include it). It need not have been created by Ferrowarden: moving an item into the collection puts it under agent maintenance on purpose, so to let an agent maintain an existing service account, move the item there (and give the key a `rotate` pattern for it);
 - a **Login** with a **password**, with **master password re-prompt off**, and whose name is **unique** in the vault;
-- matched by the key's **`rotate`** patterns, and within the key's `credentials` scope.
+- matched by the key's **`rotate`** patterns **and** within the key's `credentials` scope: the name has to be in **both** lists (`rotate` says what the key may ask to rotate, `credentials` what it may see and use, and it needs the latter to use the placeholders anyway).
 
 Anything else is refused **before any prompt**, with a stable code:
 
@@ -225,7 +228,7 @@ Anything else is refused **before any prompt**, with a stable code:
 | `credential_rotate_out_of_scope` | The key has no `rotate` pattern for this name. |
 | `credential_not_managed` | There is no such item in the managed collection. The answer is the same whether the name exists somewhere else in the vault or not at all, and for a name outside the key's `credentials` scope, so it is not a way to find out what the vault holds. |
 | `credential_not_rotatable` | The item is not a login, has no password, or has master password re-prompt on. |
-| (`409`, no code) | Two vault items share the name. |
+| (`409`, no code) | The managed collection has the name, and another vault item, in the collection or outside it, shares it. A name that no item of the collection has is `credential_not_managed` however many items elsewhere share it. |
 
 Rotating is also off without a managed collection (`403 credential_create_disabled`) and refused while the collection is unusable (`503 managed_collection_unavailable`), like creating.
 
@@ -258,27 +261,36 @@ The start takes an optional body (leave it out for the defaults), parsed strictl
 { "generate": { "length": 32, "charset": "alphanumeric" } }
 ```
 
-`generate` is exactly that of [creating](#the-request): `length` 16 to 128 (default 32) and `charset` `alphanumeric` (default), `ascii`, `hex` or `base64url`. A commit and an abort take no body (none, or `{}`).
+`generate` is exactly that of [creating](#the-request): `length` 16 to 128 (default 32) and `charset` `alphanumeric` (default), `ascii`, `hex` or `base64url`.
+
+A commit and an abort take a **required** strict body that names the rotation they mean:
+
+```json
+{ "rotation_id": "6WnQ3xZk0m1YtV5pUa9bLw" }
+```
+
+`rotation_id` is the opaque identifier of exactly the pending value the start created (the first 16 bytes of the SHA-256 of the pending field's **ciphertext**, base64url: it is not derived from the password, and every start has a fresh one). A commit or an abort writes only if the pending value on the item **now** is the one the id names; otherwise it is `409 rotation_mismatch` and nothing is written. So a request repeated after its answer was lost cannot finish a *later* rotation, and one that was started before a person replaced the pending value cannot accept the replacement.
 
 **The order of the checks for a start**, every check before any prompt and every prompt before any generation or write:
 
 1. The agent key (`401`), then the strict body (`400`).
 2. The key's `rotate` patterns match the name (`403 credential_rotate_out_of_scope`).
 3. Rotating is on and the managed collection is usable (`403 credential_create_disabled`, `503 managed_collection_unavailable`).
-4. A **fresh sync**, then the item checks above (`403 credential_not_managed`, `409` for a duplicate name, `422 credential_not_rotatable`).
+4. A **fresh sync**, then the item checks above (`403 credential_not_managed`, `409` for a duplicate name, `422 credential_not_rotatable`). Membership comes first: a name that no item of the managed collection has is `credential_not_managed` before it can be called ambiguous, and a name outside the key's `credentials` scope is answered like one that does not exist.
 5. No rotation is already pending on the item (`409 rotation_in_progress`).
 6. **A human approves** this one operation (same hold, retry, denial and limits as a create: [approvals](approvals.md)).
-7. Under the same lock as creates, a fresh sync and the checks again; then Ferrowarden generates the value, writes the pending field, syncs and refreshes its cache.
+7. Under the same lock as creates, a fresh sync and the checks again, **and the item must be the one that was approved** (the approval names its id: another item with the same name, say one a person made after deleting the original, is `409 vault_conflict`, "start again", and nothing is written); then Ferrowarden generates the value, writes the pending field, syncs and refreshes its cache.
 
 The answer is `202`, and **never a value**:
 
 ```json
 { "name": "agent_keycloak_svc",
   "current": "{{vault:agent_keycloak_svc}}",
-  "next": "{{vault:agent_keycloak_svc:next}}" }
+  "next": "{{vault:agent_keycloak_svc:next}}",
+  "rotation_id": "6WnQ3xZk0m1YtV5pUa9bLw" }
 ```
 
-A commit (`200 { "name", "placeholder" }`) and an abort (`200`, the same shape) run the same policy and item checks, under the lock, and answer `409 no_rotation_pending` when none was started.
+A commit (`200 { "name", "placeholder" }`) and an abort (`200`, the same shape) run the same policy and item checks, under the lock, and answer `409 no_rotation_pending` when none was started. **Keep the `rotation_id`.** If the answer of a start is lost, the detailed listing (`GET /v1/credentials?detail=true`) shows `rotation_id` next to `rotation_pending: true`, so the rotation can still be finished or aborted.
 
 | Status and `code` | Meaning |
 |---|---|
@@ -289,15 +301,17 @@ A commit (`200 { "name", "placeholder" }`) and an abort (`200`, the same shape) 
 | `403` `approval_pending` / `approval_denied` | Start only. Retry the **identical** request after your human approves / stop and tell them. |
 | `409` `rotation_in_progress` | Start only: one is already pending. Commit or abort it first. |
 | `409` `no_rotation_pending` | Commit or abort with nothing pending. |
-| `409` `vault_conflict` | Someone changed the item, or it needs a person to fix it. **Nothing was overwritten.** See below. |
+| `409` `rotation_mismatch` | Commit or abort: the pending value is not the one `rotation_id` names (it was finished, or replaced, since). **Nothing was written.** Read the credential again for the current `rotation_id`. |
+| `409` `vault_conflict` | Someone changed or deleted the item (or replaced it while the approval was pending), a person changed the password after the rotation started (commit only), or it needs a person to fix it. **Nothing was overwritten.** See below. |
 | `422` `credential_not_rotatable` | Not a login with a password and no re-prompt. |
 | `429` `approval_limit_reached` | Too many open or recent approval requests. |
-| `502` `vault_write_failed` | Vaultwarden refused or failed the write. Nothing was changed (a start needs a new approval). |
+| `502` `vault_write_failed` | Vaultwarden refused the credentials **before anything was written**, or the write was never sent. Nothing was changed (a start needs a new approval). |
+| `502` `vault_write_unknown` | Any other failure of the write (a timeout, a lost connection, a server error, an unrecognised `4xx`): the write **may have been applied**. Read the credential again (`GET /v1/credentials?detail=true`): `rotation_pending` and `rotation_id` tell which state the item is in. |
 | `503` | The vault is locked or unreachable, or `managed_collection_unavailable`. |
 
 ### Using the pending password: `{{vault:name:next}}`
 
-`{{vault:NAME:next}}` is the pending value, and it works **only while a rotation is pending** (otherwise it is the ordinary unknown-placeholder error). It follows the rules of the item's password in every other way: the same host binding (it can only be sent where the item may go), the same `credentials` scope, the same approval rules (an item that needs approval for use needs it for `:next` too), and the same scrubbing from responses. The detailed credential listing shows the placeholder and a `rotation_pending: true` flag while a rotation is pending.
+`{{vault:NAME:next}}` is the pending value, and it works **only while a rotation is pending** (otherwise it is the ordinary unknown-placeholder error). It follows the rules of the item's password in every other way: the same host binding (it can only be sent where the item may go), the same `credentials` scope, the same approval rules (an item that needs approval for use needs it for `:next` too), and the same scrubbing from responses. The detailed credential listing shows the placeholder, a `rotation_pending: true` flag and the `rotation_id` while a rotation is pending. A pending value that is empty or only whitespace is no password: `{{vault:NAME:next}}` is then the ordinary unknown-placeholder error, and a commit refuses it (`409 vault_conflict`, nothing written).
 
 `ferrowarden_next` is a **reserved field**, like `ferrowarden_uris`, `ferrowarden_approval` and `ferrowarden_created_by`: it is matched by name (trimmed, any letter case), never offered as a `field:` placeholder, and hidden from the listing's fields.
 
@@ -307,20 +321,19 @@ A service account `agent_keycloak_svc` for Keycloak was created earlier (see abo
 
 1. **Start.** The agent sends `POST /v1/credentials/agent_keycloak_svc/rotate`. The request is held. A prompt reaches you (admin UI, Gotify, ntfy or webhook): "key homelab-claude wants to rotate the password of the credential agent_keycloak_svc in the collection Ferrowarden managed: Ferrowarden generates a new 32-character alphanumeric password that the agent never sees, and the current password stays until the agent commits." The Approvals page of the admin UI shows the same, with Approve and Deny and no duration.
 2. **Approve.** The held request goes on, and the answer is `202` with the two placeholders. In Vaultwarden the item now has a hidden custom field `ferrowarden_next`; its password has not changed.
-3. **Change it at the service.** The agent calls Keycloak's change-password API through Ferrowarden, signing in with the current password and sending the new one:
+3. **Change it at the service.** The agent changes the password through Keycloak's **Admin REST API** (`PUT /admin/realms/{realm}/users/{id}/reset-password`), authenticated with an admin token it captured from the token endpoint (see [sessions](sessions.md)), and sends the new password as the value:
 
    ```json
    POST /v1/forward
-   { "request": { "method": "POST",
-       "url": "https://keycloak.example.com/account/credentials/password",
-       "headers": { "Content-Type": "application/json" },
-       "body": { "username": "{{vault:agent_keycloak_svc:username}}",
-                 "currentPassword": "{{vault:agent_keycloak_svc}}",
-                 "newPassword": "{{vault:agent_keycloak_svc:next}}" } } }
+   { "request": { "method": "PUT",
+       "url": "https://keycloak.example.com/admin/realms/lab/users/USER-ID/reset-password",
+       "headers": { "Content-Type": "application/json",
+                    "Authorization": "Bearer {{session:kc_admin}}" },
+       "body": { "type": "password", "value": "{{vault:agent_keycloak_svc:next}}", "temporary": false } } }
    ```
 
-   (For a service that wants the new password in one place and the old one in another, use the two placeholders where it asks for them.)
-4. **Commit.** If the service accepted the change, `POST /v1/credentials/agent_keycloak_svc/rotate/commit`. `{{vault:agent_keycloak_svc}}` is now the new password, and the old one is the newest entry of the item's **password history** in Vaultwarden (you can still read it there). **If the service refused it**, the agent aborts instead (`.../rotate/abort`) and the item is exactly as it was; a service that did not change its password never ends up with a vault that says it did.
+   Keycloak answers `204` when it took the password. (The admin token comes from `POST /realms/master/protocol/openid-connect/token` with an admin account's credentials, captured with `"capture": [{ "from": "json:/access_token", "as": "kc_admin" }]`; the user id is in `GET /admin/realms/lab/users?username=...`. This reflects Keycloak's documented Admin REST API of the current releases, written from the documentation and not re-verified against a running Keycloak here; check the paths against your version.)
+4. **Commit.** If the service accepted the change, `POST /v1/credentials/agent_keycloak_svc/rotate/commit` with the `rotation_id`. `{{vault:agent_keycloak_svc}}` is now the new password, and the old one is the newest entry of the item's **password history** in Vaultwarden (you can still read it there). **Abort only if the service confirmed that it rejected the change** (`.../rotate/abort`, with the same `rotation_id`): the password stays as it was, and the discarded value goes to the item's password history, so nothing is ever lost from the vault. **If the outcome is unknown** (a timeout, a lost answer), first find out which password the service accepts, for example with a harmless authenticated call that uses `{{vault:agent_keycloak_svc:next}}`: if the service takes it, commit; if it does not, abort. If that cannot be established, ask a human. A service that took the new password never ends up with a vault that does not have it.
 
 What the operator sees: the prompt, the pending approval, the events `credential_rotate_start` and `credential_rotate_commit` (or `..._abort`), and in Vaultwarden the item's revision history. Nothing contains either password.
 
@@ -328,15 +341,19 @@ What the operator sees: the prompt, the pending approval, the events `credential
 
 A rotation stays pending until it is committed or aborted, by design, so that an agent that crashed between the service call and the commit does not leave the vault behind the service. If the agent has gone away:
 
-- **The admin UI**: the **Approvals** page has a "Rotations in progress" list with an **Abort rotation** button per credential (it needs a recent sign-in, like any decision).
-- **The admin API**: `POST /v1/admin/credentials/{name}/rotate/abort` with the admin key (`{name}` URL-encoded; no body). It removes the pending value and changes nothing else. Only items in the managed collection are accepted.
+- **The admin UI**: the **Approvals** page has a "Rotations in progress" list with an **Abort rotation** button per credential (it needs a recent sign-in, like any decision). The button is shown only for a rotation the abort would accept; one that needs fixing by hand (say, two pending fields) is listed as "needs manual repair in Vaultwarden". The form names the rotation the page showed, so a stale page cannot abort a later one.
+- **The admin API**: `POST /v1/admin/credentials/{name}/rotate/abort` with the admin key (`{name}` URL-encoded) and the body `{ "rotation_id": "..." }` (the id is in the detailed listing). It removes the pending value and changes nothing else. Only items in the managed collection are accepted.
 - Or a person deletes the `ferrowarden_next` field in Vaultwarden.
 
-Before aborting a rotation whose service call may have succeeded, check whether the service already has the new password: aborting throws the pending password away, and a service that took it is then out of step with the vault. The pending value is the only copy until it is committed.
+**Before aborting, check which password the service accepts.** If the agent changed it at the service and then lost the answer (or died before the commit), the service may already use the pending value, and aborting would leave the vault with the old one. An abort therefore **keeps the discarded value in the item's password history** (newest entry, five are kept): if the service had switched, a person can still recover it there. The pending value is the only copy until it is committed or kept in the history.
 
 ### Conflicts: a person edited the item
 
-Ferrowarden edits the item as it is **now** (it reads it, changes only the members it owns and writes everything else back as it came) and names the revision it read in every write. If a person edited the item in the vault since, the write is refused and the answer is `409 vault_conflict`. **Ferrowarden never overwrites a person's change.** The message says what to do: read the credential again and retry. The pending value is still there, and the retry works on the item as the person left it, so their change survives. The same answer is given, and for the same reason, when the item has two `ferrowarden_next` fields, or a pending value that does not decrypt: those need a person to fix them (or an abort).
+Ferrowarden edits the item as it is **now** (it reads it, changes only the members it owns and writes everything else back as it came) and names the revision it read in every write. If a person edited the item in the vault since, the write is refused and the answer is `409 vault_conflict`. **Ferrowarden does not overwrite a person's change** (except for the same-second window described below). The message says what to do: read the credential again and retry. The pending value is still there, and the retry works on the item as the person left it, so their change survives. The same answer is given, and for the same reason, when the item has two `ferrowarden_next` fields, or a pending value that is empty or does not decrypt, or a base that is missing, repeated or unreadable: those need a person to fix them. A deleted item is `409 vault_conflict` too, saying that it no longer exists.
+
+Vaultwarden compares the revision with a tolerance of a second, so Ferrowarden adds its own protections: it re-reads the item immediately before every write, and it writes only to the pending value the `rotation_id` names.
+
+**What a person may change during a rotation.** Every write is built from a fresh read of the item, so a person's edit of the **notes, URIs or other fields** is kept, and the commit goes through. A change of the **password** is different: a commit would replace it. A start therefore also stores a second reserved hidden field, `ferrowarden_next_base` (a digest of the ciphertext of the password the rotation started from; like `ferrowarden_next` it is never offered as a field and is not in the listing), and a commit refuses with `409 vault_conflict` ("the password was changed after the rotation started; nothing was changed") when the password is no longer that one. The base is on the item, so this holds after a restart of Ferrowarden too. Abort the rotation (always possible; the pending value goes to the item's history) or ask a person to look at the item. A missing, repeated or unreadable base is the same conflict. The one case that remains is an edit that lands in the milliseconds between Ferrowarden's read and its write, within the same second: see [native vault](native-vault.md#the-window-that-remains).
 
 ### Events and metrics
 

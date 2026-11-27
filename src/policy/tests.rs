@@ -752,6 +752,11 @@ fn create_follows_the_patch_rules_and_never_accepts_null() {
         e.contains("`create`") && e.contains("null") && e.contains("cannot create"),
         "{e}"
     );
+    assert!(
+        e.contains("send []")
+            && e.contains("leaving the field out of a PATCH keeps the current value"),
+        "{e}"
+    );
     let e = serde_json::from_str::<Required>(r#"{"create":null}"#)
         .err()
         .unwrap()
@@ -893,6 +898,11 @@ fn rotate_follows_the_patch_rules_and_never_accepts_null() {
         .to_string();
     assert!(
         e.contains("`rotate`") && e.contains("null") && e.contains("cannot rotate"),
+        "{e}"
+    );
+    assert!(
+        e.contains("send []")
+            && e.contains("leaving the field out of a PATCH keeps the current value"),
         "{e}"
     );
     let e = serde_json::from_str::<Required>(r#"{"rotate":null}"#)

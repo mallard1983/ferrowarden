@@ -400,9 +400,9 @@ impl<'de> Visitor<'de> for ListVisitor {
         let hint = if self.0 == "approval" {
             "leave it out for no extra approval requirement, or send [\"*\"] to require approval for every credential"
         } else if self.0 == "rotate" {
-            "leave it out so the key cannot rotate credentials, or send [\"*\"] to let it rotate any name in the managed collection"
+            "send [] to remove the permission so the key cannot rotate credentials (leaving the field out of a PATCH keeps the current value), or send [\"*\"] to let it rotate any name in the managed collection"
         } else if self.0 == "create" {
-            "leave it out so the key cannot create credentials, or send [\"*\"] to let it create any name"
+            "send [] to remove the permission so the key cannot create credentials (leaving the field out of a PATCH keeps the current value), or send [\"*\"] to let it create any name"
         } else {
             "leave it out to keep the default, or send [\"*\"] to allow everything"
         };

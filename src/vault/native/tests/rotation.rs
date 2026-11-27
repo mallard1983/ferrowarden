@@ -4,7 +4,9 @@
 //! whose message says the client copy is out of date.
 
 use super::*;
-use crate::vault::model::NEXT_FIELD;
+use crate::vault::model::{
+    password_base_of_ciphertext, rotation_id_of_ciphertext, NEXT_BASE_FIELD, NEXT_FIELD,
+};
 
 const NEXT: &str = "PENDING-VALUE-0123456789";
 
@@ -14,6 +16,14 @@ async fn unlocked_managed() -> Harness {
     let h = managed_harness("Ferrowarden managed").await;
     h.vault.unlock(pw()).await.unwrap();
     h
+}
+
+/// A second `NativeVault` on the same server and account, unlocked: what a
+/// restart of Ferrowarden gives (nothing is remembered in memory).
+async fn fresh_vault_on(h: &Harness) -> NativeVault {
+    let v = NativeVault::new(&h.config).unwrap();
+    v.unlock(pw()).await.unwrap();
+    v
 }
 
 fn next() -> Zeroizing<String> {
@@ -61,10 +71,10 @@ fn puts(h: &Harness) -> usize {
 }
 
 #[tokio::test]
-async fn start_writes_only_the_pending_field_and_the_password_stays() {
+async fn start_writes_only_the_two_reserved_fields_and_the_password_stays() {
     let h = unlocked_managed().await;
     let before = cipher(&h, "c3");
-    h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
 
     // One PUT, naming the revision that was read.
     let (id, body) = h.mock.lock().unwrap().puts[0].clone();
@@ -87,12 +97,26 @@ async fn start_writes_only_the_pending_field_and_the_password_stays() {
         assert_eq!(&body[k], v, "{k}");
     }
     let fields = body["fields"].as_array().unwrap();
-    assert_eq!(fields.len(), 2);
+    assert_eq!(fields.len(), 3);
     assert_eq!(fields[0], before["fields"][0]);
     assert_eq!(open(&h.acct.org, &fields[1]["name"]), NEXT_FIELD);
     assert_eq!(open(&h.acct.org, &fields[1]["value"]), NEXT);
     assert_eq!(fields[1]["type"], 1);
+    // The base: a digest of the ciphertext of the password the rotation starts
+    // from, in a second hidden field.
+    assert_eq!(fields[2]["type"], 1);
+    assert_eq!(open(&h.acct.org, &fields[2]["name"]), NEXT_BASE_FIELD);
+    assert_eq!(
+        open(&h.acct.org, &fields[2]["value"]),
+        password_base_of_ciphertext(before["login"]["password"].as_str().unwrap())
+    );
+    assert!(!body.to_string().contains("PASS-orgitem"));
     assert!(!body.to_string().contains(NEXT));
+    // The rotation id is the digest of the pending field's ciphertext.
+    assert_eq!(
+        rid,
+        rotation_id_of_ciphertext(fields[1]["value"].as_str().unwrap())
+    );
 
     // After the next sync the item shows the pending rotation, the current
     // password is untouched and the pending one is reachable as `next`.
@@ -100,6 +124,9 @@ async fn start_writes_only_the_pending_field_and_the_password_stays() {
     let listing = h.vault.list_credentials().await.unwrap();
     let entry = &listing.map["orgitem"][0];
     assert!(entry.has_next);
+    // The listing carries the id, so that a lost start response is not the end
+    // of the rotation.
+    assert_eq!(entry.rotation_id.as_deref(), Some(rid.as_str()));
     assert_eq!(entry.collection_ids, [COLL_MANAGED]);
     assert!(
         entry.fields.iter().all(|f| f.name != NEXT_FIELD),
@@ -112,18 +139,20 @@ async fn start_writes_only_the_pending_field_and_the_password_stays() {
 #[tokio::test]
 async fn commit_makes_the_pending_value_the_password_and_keeps_the_old_one() {
     let h = unlocked_managed().await;
-    h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
     h.vault.sync().await.unwrap();
-    h.vault.rotate_commit("c3", "orgitem").await.unwrap();
+    h.vault.rotate_commit("c3", "orgitem", &rid).await.unwrap();
 
     let (_, body) = h.mock.lock().unwrap().puts[1].clone();
-    // The second write names the revision the first one produced.
+    // The second write names the revision the first one produced (the
+    // revision of the fresh read).
     assert_eq!(body["lastKnownRevisionDate"], "2026-11-26T11:00:01.000000Z");
     let history = body["passwordHistory"].as_array().unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(open(&h.acct.org, &history[0]["password"]), "PASS-orgitem");
     assert!(history[0]["lastUsedDate"].as_str().unwrap().ends_with('Z'));
     assert!(body["login"]["passwordRevisionDate"].is_string());
+    // Both reserved fields are gone.
     assert_eq!(body["fields"].as_array().unwrap().len(), 1);
 
     h.vault.sync().await.unwrap();
@@ -134,27 +163,43 @@ async fn commit_makes_the_pending_value_the_password_and_keeps_the_old_one() {
     ));
     let listing = h.vault.list_credentials().await.unwrap();
     assert!(!listing.map["orgitem"][0].has_next);
+    assert_eq!(listing.map["orgitem"][0].rotation_id, None);
 }
 
 #[tokio::test]
-async fn abort_removes_the_field_and_leaves_the_password() {
+async fn abort_removes_the_field_leaves_the_password_and_keeps_the_discarded_value() {
     let h = unlocked_managed().await;
-    h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
-    h.vault.rotate_abort("c3", "orgitem").await.unwrap();
+    let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    let pending = cipher(&h, "c3")["fields"][1]["value"].clone();
+    h.vault.rotate_abort("c3", "orgitem", &rid).await.unwrap();
     h.vault.sync().await.unwrap();
     assert_eq!(password_of(&h, "c3").await, "PASS-orgitem");
     assert!(next_of(&h, "c3").await.is_err());
     let after = cipher(&h, "c3");
-    assert_eq!(after["passwordHistory"], Value::Null, "no history");
     assert_eq!(after["fields"].as_array().unwrap().len(), 1);
+    // The discarded value is the newest history entry, ciphertext as it was
+    // on the item: if the service had switched to it, a person can recover it.
+    let history = after["passwordHistory"].as_array().unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0]["password"], pending);
+    assert_eq!(open(&h.acct.org, &history[0]["password"]), NEXT);
+    assert!(history[0]["lastUsedDate"].as_str().unwrap().ends_with('Z'));
 }
 
 #[tokio::test]
 async fn a_second_start_and_a_commit_without_a_start_are_refused_without_writing() {
     let h = unlocked_managed().await;
-    let e = h.vault.rotate_commit("c3", "orgitem").await.unwrap_err();
+    let e = h
+        .vault
+        .rotate_commit("c3", "orgitem", "any")
+        .await
+        .unwrap_err();
     assert!(matches!(e, FerroError::NoRotationPending(n) if n == "orgitem"));
-    let e = h.vault.rotate_abort("c3", "orgitem").await.unwrap_err();
+    let e = h
+        .vault
+        .rotate_abort("c3", "orgitem", "any")
+        .await
+        .unwrap_err();
     assert!(matches!(e, FerroError::NoRotationPending(_)));
     assert_eq!(puts(&h), 0);
 
@@ -169,9 +214,9 @@ async fn a_second_start_and_a_commit_without_a_start_are_refused_without_writing
 }
 
 #[tokio::test]
-async fn an_edit_by_a_person_in_between_is_never_overwritten() {
+async fn a_persons_edit_of_the_notes_in_between_is_kept_and_the_commit_goes_through() {
     let h = unlocked_managed().await;
-    h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
 
     // A person edits the item's notes in the vault (a new revision).
     let human_notes = enc(&h.acct.org, "a person was here");
@@ -184,20 +229,135 @@ async fn an_edit_by_a_person_in_between_is_never_overwritten() {
     }
     h.vault.sync().await.unwrap();
 
-    // The commit finds a revision it did not write: refused, and nothing was
-    // sent (only the start's PUT happened).
-    let e = h.vault.rotate_commit("c3", "orgitem").await.unwrap_err();
-    assert!(matches!(e, FerroError::VaultConflict), "{e}");
-    assert_eq!(h.mock.lock().unwrap().put_calls, 1);
-    assert_eq!(cipher(&h, "c3")["notes"], human_notes);
-    assert_eq!(password_of(&h, "c3").await, "PASS-orgitem");
-
-    // Retrying (having re-read the item) goes through, with the person's edit
-    // kept.
-    h.vault.rotate_commit("c3", "orgitem").await.unwrap();
+    // The commit works on the item as the person left it: their edit is kept.
+    h.vault.rotate_commit("c3", "orgitem", &rid).await.unwrap();
+    let (_, body) = h.mock.lock().unwrap().puts[1].clone();
+    assert_eq!(body["lastKnownRevisionDate"], "2026-11-26T11:30:00.000000Z");
     assert_eq!(cipher(&h, "c3")["notes"], human_notes);
     h.vault.sync().await.unwrap();
     assert_eq!(password_of(&h, "c3").await, NEXT);
+}
+
+/// A person changes the item's password (to a new ciphertext, a new revision).
+fn person_changes_the_password(h: &Harness) -> Value {
+    let changed = enc(&h.acct.org, "PERSON-PASSWORD");
+    let mut m = h.mock.lock().unwrap();
+    let c = m.ciphers.iter_mut().find(|c| c["id"] == "c3").unwrap();
+    c["login"]["password"] = changed.clone();
+    c["revisionDate"] = json!("2026-11-26T11:30:00.000000Z");
+    m.revision += 1;
+    changed
+}
+
+#[tokio::test]
+async fn a_persons_password_change_in_between_is_never_replaced_by_a_commit() {
+    let h = unlocked_managed().await;
+    let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    let changed = person_changes_the_password(&h);
+    h.vault.sync().await.unwrap();
+
+    // Refused every time (nothing is remembered in memory that a refusal could
+    // clear), and nothing is written.
+    for _ in 0..2 {
+        let e = h
+            .vault
+            .rotate_commit("c3", "orgitem", &rid)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, FerroError::VaultPasswordChanged), "{e}");
+        assert_eq!(e.create_code(), Some("vault_conflict"));
+    }
+    assert_eq!(puts(&h), 1, "only the start was written");
+    assert_eq!(cipher(&h, "c3")["login"]["password"], changed);
+    assert_eq!(cipher(&h, "c3")["passwordHistory"], Value::Null);
+
+    // The same after a restart: the base is on the item, not in memory.
+    let h2 = fresh_vault_on(&h).await;
+    let e = h2.rotate_commit("c3", "orgitem", &rid).await.unwrap_err();
+    assert!(matches!(e, FerroError::VaultPasswordChanged), "{e}");
+    assert_eq!(puts(&h), 1);
+
+    // An abort is always possible: both fields go, the pending value is the
+    // newest history entry, the person's password stays.
+    let pending = cipher(&h, "c3")["fields"][1]["value"].clone();
+    h.vault.rotate_abort("c3", "orgitem", &rid).await.unwrap();
+    let after = cipher(&h, "c3");
+    assert_eq!(after["fields"].as_array().unwrap().len(), 1);
+    assert_eq!(after["login"]["password"], changed);
+    assert_eq!(after["passwordHistory"][0]["password"], pending);
+    assert_eq!(after["passwordHistory"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_missing_repeated_or_unreadable_base_is_a_conflict_for_a_person_to_fix() {
+    for how in ["missing", "twice", "garbled", "empty"] {
+        let h = unlocked_managed().await;
+        let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+        {
+            let mut m = h.mock.lock().unwrap();
+            let c = m.ciphers.iter_mut().find(|c| c["id"] == "c3").unwrap();
+            let fields = c["fields"].as_array_mut().unwrap();
+            match how {
+                "missing" => {
+                    fields.pop();
+                }
+                "twice" => {
+                    let again = fields[2].clone();
+                    fields.push(again);
+                }
+                "garbled" => fields[2]["value"] = json!("not an encstring"),
+                _ => fields[2]["value"] = json!(""),
+            }
+        }
+        h.vault.sync().await.unwrap();
+        let writes = puts(&h);
+        let e = h
+            .vault
+            .rotate_commit("c3", "orgitem", &rid)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, FerroError::VaultConflict), "{how}: {e}");
+        assert_eq!(puts(&h), writes, "{how}: nothing written");
+        // An abort still works, and removes every base field.
+        h.vault.rotate_abort("c3", "orgitem", &rid).await.unwrap();
+        assert_eq!(
+            cipher(&h, "c3")["fields"].as_array().unwrap().len(),
+            1,
+            "{how}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_base_field_is_reserved_and_never_offered() {
+    let h = unlocked_managed().await;
+    h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    h.vault.sync().await.unwrap();
+    let listing = h.vault.list_credentials().await.unwrap();
+    let entry = &listing.map["orgitem"][0];
+    assert!(entry
+        .fields
+        .iter()
+        .all(|f| f.name != NEXT_BASE_FIELD && f.name != NEXT_FIELD));
+    // (A `field:` placeholder is planned from this listing, so it is unknown.)
+}
+
+#[tokio::test]
+async fn a_stray_base_without_a_pending_value_is_dropped_by_the_next_start() {
+    let h = unlocked_managed().await;
+    let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    {
+        // The pending field was removed by hand; the base stayed.
+        let mut m = h.mock.lock().unwrap();
+        let c = m.ciphers.iter_mut().find(|c| c["id"] == "c3").unwrap();
+        c["fields"].as_array_mut().unwrap().remove(1);
+        m.revision += 1;
+    }
+    let _ = rid;
+    h.vault.sync().await.unwrap();
+    h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    // One pending field and one base field, not two.
+    assert_eq!(cipher(&h, "c3")["fields"].as_array().unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -217,7 +377,7 @@ async fn the_server_refusing_a_stale_write_is_a_conflict_and_nothing_is_retried(
 }
 
 #[tokio::test]
-async fn other_failures_are_write_failures_and_only_a_401_is_retried() {
+async fn a_refusal_changed_nothing_an_unknown_outcome_is_said_so_and_only_a_401_is_retried() {
     let h = unlocked_managed().await;
     h.mock.lock().unwrap().put_status = Some(500);
     let e = h
@@ -225,8 +385,37 @@ async fn other_failures_are_write_failures_and_only_a_401_is_retried() {
         .rotate_start("c3", "orgitem", next())
         .await
         .unwrap_err();
-    assert!(matches!(e, FerroError::VaultWriteFailed), "{e}");
+    // A 5xx may have been applied: said so, and not sent again.
+    assert!(matches!(e, FerroError::VaultWriteUnknown), "{e}");
     assert_eq!(h.mock.lock().unwrap().put_calls, 1, "a 5xx is not retried");
+    // So is a redirect, which no server of ours gives.
+    h.mock.lock().unwrap().put_status = Some(302);
+    let e = h
+        .vault
+        .rotate_start("c3", "orgitem", next())
+        .await
+        .unwrap_err();
+    assert!(matches!(e, FerroError::VaultWriteUnknown), "{e}");
+    // Any other 4xx may have come after the write was saved: unknown too.
+    for unknown in [422, 413, 429, 400] {
+        h.mock.lock().unwrap().put_status = Some(unknown);
+        let e = h
+            .vault
+            .rotate_start("c3", "orgitem", next())
+            .await
+            .unwrap_err();
+        assert!(matches!(e, FerroError::VaultWriteUnknown), "{unknown}: {e}");
+    }
+    // Only a refused login (401 or 403, even after the retry) is a refusal.
+    for refused in [401, 403] {
+        h.mock.lock().unwrap().put_status = Some(refused);
+        let e = h
+            .vault
+            .rotate_start("c3", "orgitem", next())
+            .await
+            .unwrap_err();
+        assert!(matches!(e, FerroError::VaultWriteFailed), "{refused}: {e}");
+    }
     // A 400 that is not about the revision is not a conflict.
     h.mock.lock().unwrap().put_status = Some(400);
     let e = h
@@ -234,8 +423,9 @@ async fn other_failures_are_write_failures_and_only_a_401_is_retried() {
         .rotate_start("c3", "orgitem", next())
         .await
         .unwrap_err();
-    assert!(matches!(e, FerroError::VaultWriteFailed), "{e}");
+    assert!(matches!(e, FerroError::VaultWriteUnknown), "{e}");
     h.mock.lock().unwrap().put_status = None;
+    assert_eq!(puts(&h), 0, "nothing was applied by any of them");
 
     let logins = h.mock.lock().unwrap().logins;
     h.mock.lock().unwrap().put_reject_once = true;
@@ -262,7 +452,11 @@ async fn an_item_outside_the_managed_collection_is_never_touched() {
         .await
         .unwrap_err();
     assert!(matches!(e, FerroError::CredentialNotManaged(_)), "{e}");
-    let e = h.vault.rotate_commit("nope", "nope").await.unwrap_err();
+    let e = h
+        .vault
+        .rotate_commit("nope", "nope", "any")
+        .await
+        .unwrap_err();
     assert!(matches!(e, FerroError::CredentialNotFound(_)), "{e}");
     let m = h.mock.lock().unwrap();
     assert!(m.gets.is_empty(), "the item was not even read");
@@ -332,7 +526,7 @@ async fn locked_unconfigured_and_unavailable_refuse_before_any_request() {
 #[tokio::test]
 async fn two_pending_fields_are_a_conflict_and_the_value_is_ambiguous() {
     let h = unlocked_managed().await;
-    h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
     {
         let mut m = h.mock.lock().unwrap();
         let c = m.ciphers.iter_mut().find(|c| c["id"] == "c3").unwrap();
@@ -347,7 +541,10 @@ async fn two_pending_fields_are_a_conflict_and_the_value_is_ambiguous() {
     h.vault.sync().await.unwrap();
     // Neither a commit nor a start goes on guessing.
     for e in [
-        h.vault.rotate_commit("c3", "orgitem").await.unwrap_err(),
+        h.vault
+            .rotate_commit("c3", "orgitem", &rid)
+            .await
+            .unwrap_err(),
         h.vault
             .rotate_start("c3", "orgitem", next())
             .await
@@ -359,15 +556,10 @@ async fn two_pending_fields_are_a_conflict_and_the_value_is_ambiguous() {
         next_of(&h, "c3").await,
         Err(FerroError::AmbiguousField { .. })
     ));
-}
-
-#[tokio::test]
-async fn a_lock_forgets_what_was_pinned() {
-    let h = unlocked_managed().await;
-    h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
-    assert!(!h.vault.pins().is_empty());
-    h.vault.lock().await;
-    assert!(h.vault.pins().is_empty());
+    // Nothing can name either of them, so the listing offers no id.
+    let listing = h.vault.list_credentials().await.unwrap();
+    assert!(listing.map["orgitem"][0].has_next);
+    assert_eq!(listing.map["orgitem"][0].rotation_id, None);
 }
 
 #[tokio::test]
@@ -380,4 +572,217 @@ async fn nothing_secret_is_in_the_debug_output_of_the_errors() {
         .await
         .unwrap_err();
     assert!(!format!("{e:?} {e}").contains(NEXT));
+}
+
+// ── What a finish names ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_finish_naming_another_pending_value_writes_nothing() {
+    let h = unlocked_managed().await;
+    let first = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    h.vault
+        .rotate_commit("c3", "orgitem", &first)
+        .await
+        .unwrap();
+    // A second rotation starts; a replayed commit of the first (a lost
+    // response, retried) must not finish it.
+    let second = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    assert_ne!(
+        first, second,
+        "a fresh IV, so a fresh id, for the same value"
+    );
+    let writes = puts(&h);
+    for e in [
+        h.vault
+            .rotate_commit("c3", "orgitem", &first)
+            .await
+            .unwrap_err(),
+        h.vault
+            .rotate_abort("c3", "orgitem", &first)
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(
+            matches!(&e, FerroError::RotationMismatch(n) if n == "orgitem"),
+            "{e}"
+        );
+    }
+    assert_eq!(puts(&h), writes, "nothing written");
+    assert!(cipher(&h, "c3")["fields"].as_array().unwrap().len() == 3);
+    // The one it means works.
+    h.vault
+        .rotate_commit("c3", "orgitem", &second)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_person_replacing_the_pending_value_is_not_finished_by_the_old_id() {
+    let h = unlocked_managed().await;
+    let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    // A person replaces the pending value (a new ciphertext, a new revision).
+    {
+        let mut m = h.mock.lock().unwrap();
+        let c = m.ciphers.iter_mut().find(|c| c["id"] == "c3").unwrap();
+        c["fields"][1]["value"] = enc(&h.acct.org, "PERSON-CHOSE-THIS");
+        c["revisionDate"] = json!("2026-11-26T11:30:00.000000Z");
+        m.revision += 1;
+    }
+    h.vault.sync().await.unwrap();
+    for _ in 0..2 {
+        let e = h
+            .vault
+            .rotate_commit("c3", "orgitem", &rid)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, FerroError::RotationMismatch(_)), "{e}");
+        let e = h
+            .vault
+            .rotate_abort("c3", "orgitem", &rid)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, FerroError::RotationMismatch(_)), "{e}");
+    }
+    assert_eq!(puts(&h), 1, "only the start was ever written");
+    // The id of what is there now finishes it.
+    let now = h.vault.list_credentials().await.unwrap().map["orgitem"][0]
+        .rotation_id
+        .clone()
+        .unwrap();
+    assert_ne!(now, rid);
+    h.vault.rotate_commit("c3", "orgitem", &now).await.unwrap();
+    h.vault.sync().await.unwrap();
+    assert_eq!(password_of(&h, "c3").await, "PERSON-CHOSE-THIS");
+}
+
+#[tokio::test]
+async fn an_empty_or_blank_pending_value_is_refused_by_the_commit_and_the_placeholder() {
+    for blank in ["", "   ", "\t\n"] {
+        let h = unlocked_managed().await;
+        let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+        {
+            let mut m = h.mock.lock().unwrap();
+            let c = m.ciphers.iter_mut().find(|c| c["id"] == "c3").unwrap();
+            c["fields"][1]["value"] = enc(&h.acct.org, blank);
+        }
+        h.vault.sync().await.unwrap();
+        // The placeholder: as if the item had no pending value.
+        assert!(
+            matches!(
+                next_of(&h, "c3").await,
+                Err(FerroError::CredentialNotFound(_))
+            ),
+            "{blank:?}"
+        );
+        // The commit: a person has to fix it, and nothing is written.
+        let current = h.vault.list_credentials().await.unwrap().map["orgitem"][0]
+            .rotation_id
+            .clone()
+            .unwrap_or(rid);
+        let writes = puts(&h);
+        let e = h
+            .vault
+            .rotate_commit("c3", "orgitem", &current)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, FerroError::VaultConflict), "{blank:?}: {e}");
+        assert_eq!(puts(&h), writes);
+        assert_eq!(password_of(&h, "c3").await, "PASS-orgitem");
+    }
+}
+
+// ── What a write that did not answer cleanly did ──────────────────────────────
+
+#[tokio::test]
+async fn a_success_whose_answer_cannot_be_read_was_applied_and_is_a_success() {
+    // A start: the write was applied, only the answer is unreadable. Nothing
+    // else is sent, and the rotation can be finished.
+    let h = unlocked_managed().await;
+    h.mock.lock().unwrap().put_garbage = 1;
+    let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    assert_eq!(puts(&h), 1);
+    assert_eq!(h.mock.lock().unwrap().put_calls, 1, "not sent again");
+    assert_eq!(h.mock.lock().unwrap().gets.len(), 1, "no read after it");
+    h.vault.sync().await.unwrap();
+    assert_eq!(next_of(&h, "c3").await.unwrap(), NEXT);
+    h.vault.rotate_commit("c3", "orgitem", &rid).await.unwrap();
+
+    // The commit and the abort do not need the answer at all.
+    let h = unlocked_managed().await;
+    let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+    h.mock.lock().unwrap().put_garbage = 1;
+    h.vault.rotate_abort("c3", "orgitem", &rid).await.unwrap();
+    assert_eq!(
+        cipher(&h, "c3")["fields"].as_array().unwrap().len(),
+        1,
+        "applied"
+    );
+}
+
+#[tokio::test]
+async fn a_create_whose_answer_cannot_be_read_was_created() {
+    let h = managed_harness(COLL_MANAGED).await;
+    h.vault.unlock(pw()).await.unwrap();
+    h.mock.lock().unwrap().create_garbage = true;
+    let id = h.vault.create_login(new_login()).await.unwrap();
+    assert_eq!(id, None, "created, id unknown");
+    assert_eq!(h.mock.lock().unwrap().created.len(), 1);
+    assert_eq!(
+        h.mock.lock().unwrap().create_auth.len(),
+        1,
+        "not sent again"
+    );
+}
+
+// ── An item that no longer exists ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn an_item_deleted_since_the_sync_is_a_conflict_that_says_so() {
+    // Vaultwarden's own answer: a 400 saying the cipher does not exist, for the
+    // read and for the write. Also a plain 404.
+    for as_404 in [false, true] {
+        let h = unlocked_managed().await;
+        let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
+        {
+            let mut m = h.mock.lock().unwrap();
+            m.missing_is_404 = as_404;
+            m.ciphers.retain(|c| c["id"] != "c3");
+        }
+        // The read finds it gone.
+        let e = h
+            .vault
+            .rotate_commit("c3", "orgitem", &rid)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, FerroError::VaultItemGone), "{as_404}: {e}");
+        assert_eq!(e.status_code(), 409);
+        assert_eq!(e.create_code(), Some("vault_conflict"));
+        assert!(e.to_string().contains("no longer exists"));
+    }
+    // The write finds it gone (deleted between the read and the write): the
+    // same answer, and nothing else is written.
+    for as_404 in [false, true] {
+        let h = unlocked_managed().await;
+        {
+            let mut m = h.mock.lock().unwrap();
+            m.missing_is_404 = as_404;
+            m.vanish_after_get = true;
+        }
+        let e = h
+            .vault
+            .rotate_start("c3", "orgitem", next())
+            .await
+            .unwrap_err();
+        assert!(matches!(e, FerroError::VaultItemGone), "{as_404}: {e}");
+        assert_eq!(puts(&h), 0);
+    }
+    // Other 400s stay distinct: not a missing item, an unknown outcome.
+    let h = unlocked_managed().await;
+    h.mock.lock().unwrap().put_status = Some(400);
+    let e = h
+        .vault
+        .rotate_start("c3", "orgitem", next())
+        .await
+        .unwrap_err();
+    assert!(matches!(e, FerroError::VaultWriteUnknown), "{e}");
 }

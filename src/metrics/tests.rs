@@ -1030,6 +1030,7 @@ fn credential_creates_are_counted_by_a_fixed_outcome() {
         Reason::CredentialCreateDisabled,
         Reason::CredentialCreateOutOfScope,
         Reason::VaultWriteFailed,
+        Reason::VaultWriteUnknown,
         // Anything else is counted as `other`, never as a new label.
         Reason::TargetBlocked,
         Reason::VaultLocked,
@@ -1047,6 +1048,7 @@ fn credential_creates_are_counted_by_a_fixed_outcome() {
         ("credential_create_disabled", 1.0),
         ("credential_create_out_of_scope", 1.0),
         ("vault_write_failed", 1.0),
+        ("vault_write_unknown", 1.0),
         ("other", 2.0),
     ] {
         let series = format!("ferrowarden_credential_creates_total{{outcome=\"{outcome}\"}}");
@@ -1104,7 +1106,9 @@ fn credential_rotations_are_counted_by_stage_and_a_fixed_outcome() {
         Reason::RotationInProgress,
         Reason::NoRotationPending,
         Reason::VaultConflict,
+        Reason::RotationMismatch,
         Reason::VaultWriteFailed,
+        Reason::VaultWriteUnknown,
         Reason::ManagedCollectionUnavailable,
         Reason::CredentialCreateDisabled,
         // Anything else is `other`, never a new label.

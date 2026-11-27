@@ -87,6 +87,97 @@ fn two_items_with_the_name_are_ambiguous() {
     ));
 }
 
+#[test]
+fn membership_comes_before_ambiguity_and_a_second_item_anywhere_is_ambiguous() {
+    let personal = |id: &str| {
+        let mut e = CredentialEntry::login(id, &["https://a.example"]);
+        e.collection_ids.clear();
+        e
+    };
+    // Two items with the name, neither in the managed collection: the same
+    // answer as for a name that does not exist, never "ambiguous".
+    let nothing = check_item("svc", &[], &collection())
+        .unwrap_err()
+        .to_string();
+    let two_outside = [personal("1"), personal("2")];
+    let outside = check_item("svc", &two_outside, &collection());
+    assert!(matches!(outside, Err(FerroError::CredentialNotManaged(_))));
+    assert_eq!(outside.unwrap_err().to_string(), nothing);
+    // One in the collection and another one anywhere else: ambiguous, in both
+    // orders.
+    for entries in [
+        [managed_login("1"), personal("2")],
+        [personal("2"), managed_login("1")],
+    ] {
+        assert!(matches!(
+            check_item("svc", &entries, &collection()),
+            Err(FerroError::AmbiguousCredential(n)) if n == "svc"
+        ));
+    }
+}
+
+#[test]
+fn an_operators_abort_is_offered_only_where_it_would_be_accepted() {
+    let pending = |id: &str| {
+        let mut e = managed_login(id);
+        e.has_next = true;
+        e.rotation_id = Some("rid-1".to_string());
+        e
+    };
+    let collection = collection();
+    fn abortable<'a>(entries: &'a [CredentialEntry], c: &ManagedCollection) -> Option<&'a str> {
+        abortable_rotation("svc", entries, c)
+    }
+    assert_eq!(abortable(&[pending("1")], &collection), Some("rid-1"));
+
+    // No rotation pending.
+    assert_eq!(abortable(&[managed_login("1")], &collection), None);
+    // A pending field that cannot be named (two of them, or one with no
+    // value): the abort would be refused, so there is no button.
+    let mut unnamed = pending("1");
+    unnamed.rotation_id = None;
+    assert_eq!(abortable(&[unnamed], &collection), None);
+    // Ambiguous, outside the collection, or not rotatable.
+    let mut other = managed_login("2");
+    other.collection_ids.clear();
+    assert_eq!(abortable(&[pending("1"), other], &collection), None);
+    let mut outside = pending("1");
+    outside.collection_ids.clear();
+    assert_eq!(abortable(&[outside], &collection), None);
+    let mut reprompt = pending("1");
+    reprompt.reprompt = true;
+    assert_eq!(abortable(&[reprompt], &collection), None);
+}
+
+#[test]
+fn a_finish_body_names_the_rotation_and_nothing_else() {
+    let parse = |json: &str| {
+        crate::api::strict_json::parse_request::<FinishPayload>(json.as_bytes())
+            .map_err(FerroError::InvalidJson)
+            .and_then(FinishPayload::validate)
+    };
+    assert_eq!(parse(r#"{"rotation_id":"AbC-_123"}"#).unwrap(), "AbC-_123");
+    for bad in [
+        "{}",
+        r#"{"rotation_id":null}"#,
+        r#"{"rotation_id":7}"#,
+        r#"{"rotation_id":"a","x":1}"#,
+        r#"{"rotation_id":"a","rotation_id":"a"}"#,
+        "[]",
+        "null",
+    ] {
+        assert!(parse(bad).is_err(), "{bad}");
+    }
+    // The wrong shape of an id is a bad request, not a mismatch.
+    for bad in ["", "has space", "slash/slash", &"a".repeat(65)] {
+        let body = serde_json::json!({ "rotation_id": bad }).to_string();
+        assert!(
+            matches!(parse(&body), Err(FerroError::InvalidRequest(_))),
+            "{bad:?}"
+        );
+    }
+}
+
 // ── The request ───────────────────────────────────────────────────────────────
 
 fn payload(json: &str) -> FerroResult<RotateRequest> {
@@ -200,11 +291,13 @@ fn the_answers_carry_placeholders_and_never_a_value() {
         name: "Service (prod)".into(),
         current: placeholder("Service (prod)", Selector::Password),
         next: placeholder("Service (prod)", Selector::Next),
+        rotation_id: "abc".into(),
     };
     let json = serde_json::to_value(&started).unwrap();
     assert_eq!(json["current"], "{{vault:'Service (prod)'}}");
     assert_eq!(json["next"], "{{vault:'Service (prod)':next}}");
-    assert_eq!(json.as_object().unwrap().len(), 3);
+    assert_eq!(json["rotation_id"], "abc");
+    assert_eq!(json.as_object().unwrap().len(), 4);
     let finished = Finished {
         name: "svc".into(),
         placeholder: placeholder("svc", Selector::Password),

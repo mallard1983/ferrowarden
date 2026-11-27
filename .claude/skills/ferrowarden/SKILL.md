@@ -86,12 +86,12 @@ Some credentials need a person's yes before you can use them. Your request is he
 
 To change the password of a credential in the managed collection, rotate it in two phases so the service is never locked out. You never see either password. Your key needs a `rotate` pattern for the name (`403` `credential_rotate_out_of_scope` or `credential_not_managed`: tell the user, do not try other names).
 
-1. `POST /v1/credentials/{name}/rotate` (name URL-encoded; body optional: `{ "generate": { "length": 32, "charset": "alphanumeric" } }`). A person approves. `202`: `{ "name", "current": "{{vault:name}}", "next": "{{vault:name:next}}" }`.
+1. `POST /v1/credentials/{name}/rotate` (name URL-encoded; body optional: `{ "generate": { "length": 32, "charset": "alphanumeric" } }`). A person approves. `202`: `{ "name", "current": "{{vault:name}}", "next": "{{vault:name:next}}", "rotation_id" }`. Keep the `rotation_id` (it is also in `GET /v1/credentials?detail=true` next to `rotation_pending`).
 2. Change it at the service through `POST /v1/forward`, signing in with `{{vault:name}}` and sending `{{vault:name:next}}`.
-3. If the service accepted it: `POST /v1/credentials/{name}/rotate/commit`. If not: `POST /v1/credentials/{name}/rotate/abort`. Neither needs another approval.
+3. If the service accepted it: `POST /v1/credentials/{name}/rotate/commit` with `{ "rotation_id": "..." }`. Abort (`.../rotate/abort`, same body) **only after the service confirmed that it rejected the change**: an abort keeps the discarded value in the item's password history. If the outcome is unknown (a timeout, a lost response), first check which password the service accepts, for example with a harmless authenticated call using `{{vault:name:next}}`: commit if it has the new one, abort if it does not. If you cannot establish it, ask the user. Neither needs another approval.
 
 - Held while the user decides: `403` `approval_pending` (with `approval_id`): ask the user to approve it in the Ferrowarden admin UI, quoting the id, then **retry the identical request**. `approval_denied`: stop, tell the user.
-- `409` `rotation_in_progress`: finish the pending one first. `409` `no_rotation_pending`: nothing to finish. `409` `vault_conflict`: someone changed the item; nothing was overwritten: read the credential again and retry, and tell the user if it persists. `422` `credential_not_rotatable`: tell the user.
+- `409` `rotation_in_progress`: finish the pending one first. `409` `no_rotation_pending`: nothing to finish. `409` `rotation_mismatch`: the pending value is not the one your `rotation_id` names (nothing was written): read the listing for the current id. `502` `vault_write_unknown`: the write may have been applied: read `GET /v1/credentials?detail=true` before retrying anything. `409` `vault_conflict`: someone changed the item; nothing was overwritten: read the credential again and retry, and tell the user if it persists. `422` `credential_not_rotatable`: tell the user.
 - `{{vault:name:next}}` exists only while a rotation is pending (the detailed listing shows `rotation_pending` and `next`).
 
 ## Creating a credential for a new service

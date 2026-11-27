@@ -35,7 +35,7 @@
  * comparison). Test fixtures only: this logs in with the master password of the
  * throwaway test account.
  *
- * Editor mode: when EDIT_NOTES is set, the reader also plays "a person who
+ * Editor mode: when EDIT_NOTES and/or EDIT_PASSWORD is set, the reader also plays "a person who
  * edits the item in the vault": it reads the item as the server holds it, sets
  * its notes to that text (encrypted with the item's key) and saves it with a
  * correct PUT (the revision it read as lastKnownRevisionDate), then prints its
@@ -48,6 +48,7 @@
  *   SETUP_MASTER_PASSWORD  its master password (or SETUP_MASTER_PASSWORD_FILE: a file with it)
  *   ITEM_NAME              the item to read (exact name)
  *   EDIT_NOTES             (optional) set the item's notes to this text first
+ *   EDIT_PASSWORD          (optional) set the item's password to this text first
  * stdin: line 1 the expected password (may be empty: passwordMatches is then
  *        false); line 2 the expected previous password; line 3 the expected
  *        pending value
@@ -67,6 +68,7 @@ const password  = process.env.SETUP_MASTER_PASSWORD ||
     : undefined);
 const itemName  = process.env.ITEM_NAME;
 const editNotes = process.env.EDIT_NOTES;
+const editPassword = process.env.EDIT_PASSWORD;
 // What the test expects, from stdin (never printed).
 let expected = '';
 let expectedPrevious = '';
@@ -108,14 +110,20 @@ const RESPONSE_ONLY = [
  * read it as the server holds it now, change the notes, send it back with the
  * revision that was read as lastKnownRevisionDate.
  */
-async function editItemNotes(token, id, key, text, userId) {
+async function editItem(token, id, key, text, newPassword, userId) {
   const auth = { Authorization: `Bearer ${token}`, ...CLIENT_HEADERS };
   const got = await request('GET', `/api/ciphers/${id}`, null, auth);
   if (got.status !== 200) throw new Error(`could not read the item to edit it (${got.status})`);
   const item = JSON.parse(got.body);
   const body = { ...item };
   for (const m of RESPONSE_ONLY) delete body[m];
-  body.notes = lib.encryptCipherString(key, Buffer.from(text, 'utf8'));
+  if (text !== undefined) {
+    body.notes = lib.encryptCipherString(key, Buffer.from(text, 'utf8'));
+  }
+  if (newPassword !== undefined) {
+    // What a person changing the password in a client does to the stored item.
+    body.login = { ...body.login, password: lib.encryptCipherString(key, Buffer.from(newPassword, 'utf8')) };
+  }
   // Vaultwarden 1.37 refuses a PUT without it (clients send their own id).
   body.encryptedFor = userId;
   body.lastKnownRevisionDate = item.revisionDate;
@@ -165,8 +173,8 @@ async function main() {
 
     let edited = false;
     let current = c;
-    if (editNotes !== undefined) {
-      await editItemNotes(token, c.id, key, editNotes, sync.profile.id);
+    if (editNotes !== undefined || editPassword !== undefined) {
+      await editItem(token, c.id, key, editNotes, editPassword, sync.profile.id);
       edited = true;
       // Read the item again: the line below shows what is stored now.
       const again = await request('GET', `/api/ciphers/${c.id}`, null,
@@ -201,6 +209,7 @@ async function main() {
       totp: dec(key, l.totp),
       notes: dec(key, current.notes),
       hasNextField: fields.some((f) => f.name === 'ferrowarden_next'),
+      hasNextBaseField: fields.some((f) => f.name === 'ferrowarden_next_base'),
       nextMatches: sameText(field('ferrowarden_next'), expectedNext),
       passwordHistoryCount: history.length,
       historyFirstMatches: history.length > 0 && sameText(history[0], expectedPrevious),

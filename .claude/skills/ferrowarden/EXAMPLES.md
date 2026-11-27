@@ -270,24 +270,32 @@ After a minute with no decision:
 Tell the user: "Please approve request 2m3x8Qk0Zr1YtV5pUa9bLw (rotating agent_keycloak_svc) in the Ferrowarden admin UI." When they say it is done, send the **identical** request again:
 
 ```
-202 { "name": "agent_keycloak_svc", "current": "{{vault:agent_keycloak_svc}}", "next": "{{vault:agent_keycloak_svc:next}}" }
+202 { "name": "agent_keycloak_svc", "current": "{{vault:agent_keycloak_svc}}", "next": "{{vault:agent_keycloak_svc:next}}", "rotation_id": "6WnQ3xZk0m1YtV5pUa9bLw" }
 ```
 
-Change the password at the service, signing in with the current one and sending the new one:
+Change the password at the service. Keycloak has no change-password call that takes the old and the new password together; use its **Admin REST API**, authenticated with an admin token captured through Ferrowarden (never read the token yourself):
 
 ```
 POST /v1/forward
-{ "request": { "method": "POST", "url": "https://keycloak.example.com/account/credentials/password",
-    "body": { "username": "{{vault:agent_keycloak_svc:username}}",
-              "currentPassword": "{{vault:agent_keycloak_svc}}",
-              "newPassword": "{{vault:agent_keycloak_svc:next}}" } } }
+{ "request": { "method": "POST", "url": "https://keycloak.example.com/realms/master/protocol/openid-connect/token",
+    "headers": { "Content-Type": "application/x-www-form-urlencoded" },
+    "body": "grant_type=password&client_id=admin-cli&username={{vault:keycloak_admin:username}}&password={{vault:keycloak_admin}}" },
+  "capture": [{ "from": "json:/access_token", "as": "kc_admin" }] }
+
+POST /v1/forward
+{ "request": { "method": "PUT",
+    "url": "https://keycloak.example.com/admin/realms/lab/users/USER-ID/reset-password",
+    "headers": { "Content-Type": "application/json", "Authorization": "Bearer {{session:kc_admin}}" },
+    "body": { "type": "password", "value": "{{vault:agent_keycloak_svc:next}}", "temporary": false } } }
 ```
+
+(The password goes into a form body as it is, without encoding: it must not contain `&`, `+` or `%`, or use a service-account client with a client secret that does not.) (Written from Keycloak's documented Admin REST API for current releases, not re-verified against a running Keycloak: check the paths against your version. The user id is in `GET /admin/realms/lab/users?username=...`.) Keycloak answers `204` when it took the password.
 
 If the service answers success, commit:
 
 ```
-POST /v1/credentials/agent_keycloak_svc/rotate/commit
+POST /v1/credentials/agent_keycloak_svc/rotate/commit   { "rotation_id": "6WnQ3xZk0m1YtV5pUa9bLw" }
 200 { "name": "agent_keycloak_svc", "placeholder": "{{vault:agent_keycloak_svc}}" }
 ```
 
-If it refused the change, abort instead (`POST /v1/credentials/agent_keycloak_svc/rotate/abort`) and tell the user. If the commit answers `409` with `"code": "vault_conflict"`, someone edited the item meanwhile: nothing was overwritten, so read the credential again and retry. You never saw either password.
+Abort (`POST /v1/credentials/agent_keycloak_svc/rotate/abort`, same body) only if Keycloak **confirmed that it rejected** the change, and tell the user. If you do not know (a timeout, a lost answer), first find out which password Keycloak accepts (a harmless authenticated call with `{{vault:agent_keycloak_svc:next}}`): commit if it takes the new one, abort if it does not, and ask the user if you cannot tell. `409` `rotation_mismatch` means the pending value is not the one your id names: read `GET /v1/credentials?detail=true` for the current `rotation_id`. If the commit answers `409` with `"code": "vault_conflict"`, someone edited the item meanwhile: nothing was overwritten, so read the credential again and retry. You never saw either password.

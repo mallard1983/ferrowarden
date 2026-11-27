@@ -130,7 +130,8 @@ Never the value. `cache_refreshed` is `false` when the item was written but the 
 | `403` | `approval_denied` | A human said no |
 | `409` | `credential_exists` | A vault item with that name exists (checked against a fresh sync, before any prompt) |
 | `429` | `approval_limit_reached` | The key has too many open or recent approval requests |
-| `502` | `vault_write_failed` | Vaultwarden did not accept the write; nothing was created |
+| `502` | `vault_write_failed` | Vaultwarden refused the credentials **before anything was written** (or the write was never sent); nothing was created |
+| `502` | `vault_write_unknown` | Any other failure of the write (a timeout, a lost connection, a server error, an unrecognised `4xx`): the item **may have been created**. Read the credentials again (`GET /v1/credentials?detail=true`) before retrying |
 | `503` | `managed_collection_unavailable` | The collection cannot be written to; `reason` is `not_found`, `read_only`, `hides_passwords`, `ambiguous_name` or `no_organization_key` |
 | `503` | | The vault is locked or unreachable |
 
@@ -155,13 +156,14 @@ The request is held up to `approval.wait_secs` (60 s by default) while a person 
    ```json
    { "name": "agent_keycloak_svc",
      "current": "{{vault:agent_keycloak_svc}}",
-     "next": "{{vault:agent_keycloak_svc:next}}" }
+     "next": "{{vault:agent_keycloak_svc:next}}",
+     "rotation_id": "6WnQ3xZk0m1YtV5pUa9bLw" }
    ```
 
-   `{{vault:NAME}}` is still the current password and `{{vault:NAME:next}}` is the new one ([Placeholder Syntax](#placeholder-syntax)). The answer never has a value.
+   `rotation_id` identifies exactly this pending value; a commit and an abort must send it. It is also shown, with `rotation_pending: true`, in the detailed credential listing, so a lost answer can be recovered. `{{vault:NAME}}` is still the current password and `{{vault:NAME:next}}` is the new one ([Placeholder Syntax](#placeholder-syntax)). The answer never has a value.
 2. Change the password at the service with a normal [`/v1/forward`](#post-v1forward), signing in with the current password and sending the new one.
-3. **`POST /v1/credentials/{name}/rotate/commit`**: the new password becomes the password; the old one goes to the item's password history. **`200`**: `{ "name": "...", "placeholder": "{{vault:...}}" }`. No approval, no body.
-4. **`POST /v1/credentials/{name}/rotate/abort`**: throw the pending password away; nothing else changes. **`200`**: the same shape. No approval, no body.
+3. **`POST /v1/credentials/{name}/rotate/commit`**: the new password becomes the password; the old one goes to the item's password history. **`200`**: `{ "name": "...", "placeholder": "{{vault:...}}" }`. No approval. The body is required and strict: `{ "rotation_id": "..." }`; `409 rotation_mismatch` (nothing written) if the pending value is not the one it names.
+4. **`POST /v1/credentials/{name}/rotate/abort`**: throw the pending password away; the password stays as it was and the discarded value goes to the item's password history. **Abort only after the service confirmed that it rejected the change**; if the outcome is unknown, first check which password the service accepts (for example with a harmless call using `{{vault:NAME:next}}`), then commit or abort, and if that cannot be established ask a human. **`200`**: the same shape. No approval; the same `{ "rotation_id": "..." }` body.
 
 Only a login with a password, no master password re-prompt and a unique name, **in the managed collection**, can be rotated. Every refusal below comes before any prompt:
 
@@ -175,11 +177,13 @@ Only a login with a password, no master password re-prompt and a unique name, **
 | `403` | `approval_pending` / `approval_denied` | Start only. Retry the **identical** request after your human approves / stop and tell them |
 | `409` | `rotation_in_progress` | Start only: a rotation is already pending on the item |
 | `409` | `no_rotation_pending` | Commit or abort with none pending |
-| `409` | `vault_conflict` | Someone changed the item (or it needs a person to fix it). **Nothing was overwritten**: read the credential again and retry |
-| `409` | | Two vault items share the name |
+| `409` | `rotation_mismatch` | Commit or abort: the pending value is not the one `rotation_id` names (finished or replaced since). **Nothing was written**: read the credential again for its current `rotation_id` |
+| `409` | `vault_conflict` | Someone changed or deleted the item, replaced it while the approval was pending, or changed its **password** after the rotation started (commit only); or it needs a person to fix it. **Nothing was overwritten**: read the credential again and retry |
+| `409` | | The managed collection has the name and another vault item (in or out of the collection) shares it |
 | `422` | `credential_not_rotatable` | Not a login, no password, or master password re-prompt on |
 | `429` | `approval_limit_reached` | Too many open or recent approval requests |
-| `502` | `vault_write_failed` | Vaultwarden did not accept the write; nothing was changed |
+| `502` | `vault_write_failed` | Vaultwarden refused the credentials **before anything was written** (or the write was never sent); nothing was changed |
+| `502` | `vault_write_unknown` | Any other failure of the write (a timeout, a lost connection, a server error, an unrecognised `4xx`): the write **may have been applied**. Read the credential again; `rotation_pending` and `rotation_id` say which state it is in |
 | `503` | `managed_collection_unavailable` | The managed collection cannot be written to (with a `reason`); or the vault is locked |
 
 Emits `credential_rotate_start`, `credential_rotate_commit` or `credential_rotate_abort`.
@@ -395,7 +399,7 @@ Every agent key carries a policy, set when the key is created and changed with `
 | `methods` | List of allowed HTTP methods: `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`. Case-insensitive on input, returned upper case. |
 
 | `approval` | Optional list of patterns, matched like `credentials`: a credential whose name matches needs a human's approval before this key can use it ([approvals.md](approvals.md)). `[]` (the default when left out) adds no requirement. A vault item that carries a `ferrowarden_approval` field needs approval whatever this list says. |
-| `rotate` | Optional list of patterns, matched like `credentials`: the names this key may ask Ferrowarden to **rotate** the password of, for items in the managed collection, with `POST /v1/credentials/{name}/rotate` ([managed-credentials.md](managed-credentials.md#rotating-a-credential)). `[]` (the default when left out) means the key cannot rotate anything. Its own permission, independent of `create`, `credentials` and `methods`. Adding or broadening a pattern widens the key's access. |
+| `rotate` | Optional list of patterns, matched like `credentials`: the names this key may ask Ferrowarden to **rotate** the password of, for items in the managed collection, with `POST /v1/credentials/{name}/rotate` ([managed-credentials.md](managed-credentials.md#rotating-a-credential)). `[]` (the default when left out) means the key cannot rotate anything. Its own permission, independent of `create`, `credentials` and `methods`: a rotation needs the name in **both** `rotate` and `credentials` (and the key needs `credentials` to use the placeholders anyway). Adding or broadening a pattern widens the key's access. |
 | `create` | Optional list of patterns, matched like `credentials`: the names this key may ask Ferrowarden to **create** in the managed collection with `POST /v1/credentials` ([managed-credentials.md](managed-credentials.md)). `[]` (the default when left out) means the key cannot create anything. It is its own permission, independent of `credentials` and `methods`. Adding or broadening a pattern widens the key's access. |
 
 **`credentials` and `methods` are required when creating a key. There is no default access.** `approval`, `create` and `rotate` are optional: `approval` only adds a requirement, `create` and `rotate` are off unless given, and a key without them (including every key from 0.2.0) has `[]` for both.
@@ -510,7 +514,7 @@ The change is written to the key file (when persistence is configured) before it
 
 ### `POST /v1/admin/credentials/{name}/rotate/abort`
 
-Clear a **stuck rotation**: remove the pending new password of a credential in the managed collection (see [a rotation that is stuck](managed-credentials.md#a-rotation-that-is-stuck)). `{name}` is URL-encoded as above. No body (or `{}`). The current password is unchanged.
+Clear a **stuck rotation**: remove the pending new password of a credential in the managed collection (see [a rotation that is stuck](managed-credentials.md#a-rotation-that-is-stuck)). `{name}` is URL-encoded as above. The body is required: `{ "rotation_id": "..." }` (from the detailed listing). The current password is unchanged and the discarded value is kept in the item's password history. **Check which password the service accepts before you abort.**
 
 **Response `200 OK`**: `{ "status": "aborted", "name": "agent_keycloak_svc" }`.
 
@@ -519,9 +523,9 @@ Clear a **stuck rotation**: remove the pending new password of a credential in t
 |---|---|
 | `401 Unauthorized` | No valid admin key (an agent key is not one) |
 | `403 Forbidden` | `credential_not_managed`: no such item in the managed collection |
-| `409 Conflict` | `no_rotation_pending`, `vault_conflict` (someone changed the item: nothing was overwritten, try again), or two vault items share the name |
+| `409 Conflict` | `no_rotation_pending`, `rotation_mismatch` (a stale `rotation_id`: nothing written), `vault_conflict` (someone changed the item: nothing was overwritten, try again), or two vault items share the name |
 | `422` | `credential_not_rotatable` |
-| `502` / `503` | `vault_write_failed`, `managed_collection_unavailable`, or the vault is locked |
+| `502` / `503` | `vault_write_failed`, `vault_write_unknown` (read the credential again), `managed_collection_unavailable`, or the vault is locked |
 
 Emits `credential_rotate_abort` with `by: "admin"`. The admin UI does the same from the **Approvals** page ("Rotations in progress").
 

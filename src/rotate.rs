@@ -34,8 +34,18 @@
 //! 4. a fresh sync, and the item checks ([`check_item`]);
 //! 5. no rotation is pending on the item already;
 //! 6. **a human approves this one operation** ([`crate::approvals::gate_rotate`]);
-//! 7. under the write lock: a fresh sync, the checks again, the value is
-//!    generated, encrypted and written, and the cache is refreshed.
+//! 7. under the write lock: a fresh sync, the checks again (and the item must
+//!    be **the one that was approved**: the approval named its id, and an item
+//!    with another id, though it has the same name, is `vault_conflict`, with
+//!    nothing written), the value is generated, encrypted and written, and the
+//!    cache is refreshed.
+//!
+//! **A finish names what it finishes.** A start answers with a `rotation_id`,
+//! an opaque identifier of exactly that pending value (a digest of its
+//! ciphertext). A commit or an abort must send it, and the write happens only
+//! if the pending value found on the item now has that id: a replayed or
+//! stale request cannot finish a rotation it did not start
+//! (`rotation_mismatch`).
 //!
 //! Every write sends the revision of the item that was read, and a change a
 //! person made in between makes it fail (`vault_conflict`): it is never
@@ -159,23 +169,51 @@ impl RotateRequest {
 /// re-prompt). `entries` are the vault items with this name. The answer for
 /// "not in the managed collection" is the same whether the name exists
 /// somewhere else or not at all.
+///
+/// The order matters: **membership first**. A name with no item in the managed
+/// collection is `credential_not_managed` however many items elsewhere share
+/// it, so the answer never says that an item outside the collection exists.
+/// Only when the collection has the name is a second item of that name (in it
+/// or out of it) `AmbiguousCredential`: that is not an oracle, because an
+/// in-scope name's existence and its ambiguity are already visible to the
+/// key in `GET /v1/credentials`, and a name outside the key's `credentials`
+/// scope never gets here ([`check_policy`] answers it first, as a missing
+/// name).
 pub fn check_item<'a>(
     name: &str,
     entries: &'a [CredentialEntry],
     collection: &ManagedCollection,
 ) -> FerroResult<&'a CredentialEntry> {
-    let entry = match entries {
-        [] => return Err(FerroError::CredentialNotManaged(name.to_string())),
-        [one] => one,
-        _ => return Err(FerroError::AmbiguousCredential(name.to_string())),
-    };
-    if !entry.collection_ids.contains(&collection.id) {
+    let mut managed = entries
+        .iter()
+        .filter(|e| e.collection_ids.contains(&collection.id));
+    let Some(entry) = managed.next() else {
         return Err(FerroError::CredentialNotManaged(name.to_string()));
+    };
+    if managed.next().is_some() || entries.len() > 1 {
+        return Err(FerroError::AmbiguousCredential(name.to_string()));
     }
     if entry.kind != ItemKind::Login || !entry.has_password || entry.reprompt {
         return Err(FerroError::CredentialNotRotatable(name.to_string()));
     }
     Ok(entry)
+}
+
+/// The rotation id an **operator's abort** of `name` would name, when that
+/// abort would be accepted: the item passes [`check_item`] (one item with the
+/// name, in the managed collection, a login with a password and no re-prompt),
+/// has a rotation pending, and the pending value can be named (exactly one
+/// pending field, with a value). The admin UI shows its Abort button only for
+/// such items, with this id in the form.
+pub fn abortable_rotation<'a>(
+    name: &str,
+    entries: &'a [CredentialEntry],
+    collection: &ManagedCollection,
+) -> Option<&'a str> {
+    check_item(name, entries, collection)
+        .ok()
+        .filter(|entry| entry.has_next)
+        .and_then(|entry| entry.rotation_id.as_deref())
 }
 
 // ── The answers ───────────────────────────────────────────────────────────────
@@ -188,6 +226,39 @@ pub struct Started {
     pub current: String,
     /// `{{vault:NAME:next}}`: the new password, until it is committed.
     pub next: String,
+    /// Identifies exactly this pending value (a digest of its ciphertext, not
+    /// of the password). A commit and an abort must send it back.
+    pub rotation_id: String,
+}
+
+/// The body of a commit or an abort: the rotation it finishes, as the start
+/// (or the detailed listing) named it. Strict: nothing else is accepted.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinishPayload {
+    pub rotation_id: String,
+}
+
+/// The longest `rotation_id` accepted: ours is 22 characters.
+pub const MAX_ROTATION_ID_CHARS: usize = 64;
+
+impl FinishPayload {
+    /// The id, checked to be the shape of one (it is compared, never used to
+    /// size or build anything).
+    pub fn validate(self) -> FerroResult<String> {
+        let id = self.rotation_id;
+        if id.is_empty()
+            || id.len() > MAX_ROTATION_ID_CHARS
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(FerroError::InvalidRequest(
+                "`rotation_id` must be the rotation_id the start returned".into(),
+            ));
+        }
+        Ok(id)
+    }
 }
 
 /// The answer to a commit or an abort.
@@ -287,6 +358,16 @@ fn check_policy(agent: &AgentKey, name: &str) -> FerroResult<()> {
     Ok(())
 }
 
+/// The same checks as [`check_policy`] on the key as it is **now**: a key that
+/// was revoked in the meantime is refused like an unknown key.
+async fn recheck_agent(state: &AppState, agent: &AgentKey, name: &str) -> FerroResult<()> {
+    let live = state
+        .live_key(&agent.id)
+        .await
+        .ok_or(FerroError::Unauthorized)?;
+    check_policy(&live, name)
+}
+
 /// A vault that locked behind our back is said to be locked, like a forward
 /// does.
 async fn note_locked<T>(state: &Arc<AppState>, result: &FerroResult<T>) {
@@ -304,6 +385,17 @@ async fn refresh_after_write(state: &AppState, progress: &mut Progress) {
             false
         }
     });
+}
+
+/// A write whose outcome is not known may have been applied: the cache is
+/// brought up to date, so that the listing the agent is told to read
+/// (`rotation_pending`, `rotation_id`) shows what is really there.
+async fn refresh_if_unknown(state: &AppState, e: &FerroError) {
+    if matches!(e, FerroError::VaultWriteUnknown) {
+        if let Err(e) = refresh_credentials(state).await {
+            tracing::warn!(error = %e, "The cache could not be refreshed after a write of unknown outcome");
+        }
+    }
 }
 
 /// Start a rotation for `agent`, up to and including the write of the pending
@@ -345,6 +437,7 @@ async fn start_inner(
     }
 
     // 6. A human approves this one operation. Nothing has been generated.
+    let approved_item = entry.id.clone();
     approvals::gate_rotate(
         state,
         agent,
@@ -358,36 +451,53 @@ async fn start_inner(
     // fresh copy, so that whatever happened while the request waited for the
     // human is seen.
     let _one_at_a_time = state.create_lock.lock().await;
+    // The key's permission as it is now (it may have been revoked or narrowed
+    // while the request waited for the human and the lock): nothing is written
+    // then.
+    recheck_agent(state, agent, name).await?;
     fresh(state).await?;
     let collection = self::collection(state, progress).await?;
     let entry = item(state, name, &collection, progress).await?;
+    // The human approved one item, named by its id. Another item that has the
+    // name now is not what was approved.
+    if entry.id != approved_item {
+        return Err(FerroError::VaultItemReplaced);
+    }
     if entry.has_next {
         return Err(FerroError::RotationInProgress(name.to_string()));
     }
 
     let value = generate::generate(req.charset, req.length)?;
     // The value moves into the vault call and is wiped when it is dropped.
-    state.vault.rotate_start(&entry.id, name, value).await?;
+    let rotation_id = match state.vault.rotate_start(&entry.id, name, value).await {
+        Ok(id) => id,
+        Err(e) => {
+            refresh_if_unknown(state, &e).await;
+            return Err(e);
+        }
+    };
     refresh_after_write(state, progress).await;
 
     Ok(Started {
         name: name.to_string(),
         current: placeholder(name, Selector::Password),
         next: placeholder(name, Selector::Next),
+        rotation_id,
     })
 }
 
-/// Commit or abort the pending rotation of `name`. An agent's policy applies;
-/// an operator (`Who::Admin`) is checked against the managed collection only.
-/// No approval: the start was approved.
+/// Commit or abort the pending rotation of `name` that `rotation_id` names. An
+/// agent's policy applies; an operator (`Who::Admin`) is checked against the
+/// managed collection only. No approval: the start was approved.
 pub async fn finish(
     state: &Arc<AppState>,
     who: Who<'_>,
     name: &str,
     how: Finish,
+    rotation_id: &str,
     progress: &mut Progress,
 ) -> FerroResult<Finished> {
-    let result = finish_inner(state, who, name, how, progress).await;
+    let result = finish_inner(state, who, name, how, rotation_id, progress).await;
     note_locked(state, &result).await;
     result
 }
@@ -397,6 +507,7 @@ async fn finish_inner(
     who: Who<'_>,
     name: &str,
     how: Finish,
+    rotation_id: &str,
     progress: &mut Progress,
 ) -> FerroResult<Finished> {
     if let Who::Agent(agent) = who {
@@ -406,15 +517,27 @@ async fn finish_inner(
 
     // One write at a time, like a start: and the item is read afresh.
     let _one_at_a_time = state.create_lock.lock().await;
+    if let Who::Agent(agent) = who {
+        recheck_agent(state, agent, name).await?;
+    }
     fresh(state).await?;
     let entry = item(state, name, &collection, progress).await?;
     if !entry.has_next {
         return Err(FerroError::NoRotationPending(name.to_string()));
     }
 
-    match how {
-        Finish::Commit => state.vault.rotate_commit(&entry.id, name).await?,
-        Finish::Abort => state.vault.rotate_abort(&entry.id, name).await?,
+    let written = match how {
+        Finish::Commit => {
+            state
+                .vault
+                .rotate_commit(&entry.id, name, rotation_id)
+                .await
+        }
+        Finish::Abort => state.vault.rotate_abort(&entry.id, name, rotation_id).await,
+    };
+    if let Err(e) = written {
+        refresh_if_unknown(state, &e).await;
+        return Err(e);
     }
     refresh_after_write(state, progress).await;
 

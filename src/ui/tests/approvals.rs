@@ -1285,6 +1285,13 @@ async fn a_hostile_rotate_request_is_escaped_on_the_pages() {
     let mut b = signed_in(&h).await;
     for path in ["/ui/approvals".to_string(), format!("/ui/approvals/{id}")] {
         let r = b.get(&h, &path).await;
+        // The page is shown, with the name escaped and the raw name nowhere.
+        assert_eq!(r.status, StatusCode::OK, "{path}");
+        assert!(
+            r.body.contains("&lt;script&gt;alert(1)&lt;/script&gt;")
+                || r.body.contains("&#60;script&#62;alert(1)&#60;/script&#62;"),
+            "{path}: the escaped name is on the page"
+        );
         assert!(!r.body.contains("<script>alert"), "{path}");
     }
 }
@@ -1292,7 +1299,8 @@ async fn a_hostile_rotate_request_is_escaped_on_the_pages() {
 // ── Rotations in progress, and the operator's abort ───────────────────────────
 
 /// A managed item with a rotation pending, as the credential cache shows it.
-async fn pending_rotation(h: &Harness, name: &str) -> String {
+/// The id of the item and the rotation id of its pending value.
+async fn pending_rotation_with_id(h: &Harness, name: &str) -> (String, String) {
     let fake = fake_vault(&h.app);
     fake.set_managed(crate::vault::model::ManagedState::Usable(
         crate::vault::model::ManagedCollection {
@@ -1303,18 +1311,17 @@ async fn pending_rotation(h: &Harness, name: &str) -> String {
         },
     ));
     let id = fake.add_managed_item(name, &["https://svc.example.com"], old_value());
-    fake.set_next(&id, next_value());
-    fake.edit_item(&id, |e| e.has_next = true);
+    let rotation_id = fake.set_next(&id, next_value());
     crate::vault::refresh::refresh_credentials(&h.app)
         .await
         .unwrap();
-    id
+    (id, rotation_id)
 }
 
 #[tokio::test]
 async fn the_approvals_page_lists_pending_rotations_and_aborts_one_after_a_sign_in() {
     let h = harness(full_opts()).await;
-    let item = pending_rotation(&h, "agent_stuck").await;
+    let (item, rotation_id) = pending_rotation_with_id(&h, "agent_stuck").await;
     let mut b = signed_in(&h).await;
 
     let r = b.get(&h, "/ui/approvals").await;
@@ -1323,21 +1330,54 @@ async fn the_approvals_page_lists_pending_rotations_and_aborts_one_after_a_sign_
     assert!(r.body.contains("agent_stuck"));
     assert!(r.body.contains("Abort rotation"));
     assert!(r.body.contains("action=\"/ui/rotations/abort\""));
+    // The form names the rotation the page showed, and the page tells the
+    // operator to check which password the service uses before aborting.
+    assert!(
+        r.body
+            .contains(&format!("name=\"rotation_id\" value=\"{rotation_id}\"")),
+        "{}",
+        r.body
+    );
+    assert!(r.body.contains("check which password the service accepts"));
+    assert!(r.body.contains("password history"));
     assert!(!r.body.contains(next_value()) && !r.body.contains(old_value()));
     let csrf = r.csrf();
 
     // No CSRF token: refused, nothing changed.
     let r = b
-        .post(&h, "/ui/rotations/abort", &[("name", "agent_stuck")])
+        .post(
+            &h,
+            "/ui/rotations/abort",
+            &[("name", "agent_stuck"), ("rotation_id", &rotation_id)],
+        )
         .await;
     assert_ne!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
     assert!(fake_vault(&h.app).next_of(&item).is_some());
+
+    // A stale form (another rotation's id) is refused and writes nothing; so is
+    // a form without one.
+    let stale = [
+        ("csrf", csrf.as_str()),
+        ("name", "agent_stuck"),
+        ("rotation_id", "bbbbbbbbbbbbbbbbbbbbbb"),
+    ];
+    let missing = [("csrf", csrf.as_str()), ("name", "agent_stuck")];
+    for fields in [&stale[..], &missing[..]] {
+        let r = b.post(&h, "/ui/rotations/abort", fields).await;
+        assert_ne!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+        assert!(fake_vault(&h.app).next_of(&item).is_some());
+        assert_eq!(fake_vault(&h.app).history_len(&item), 0);
+    }
 
     let r = b
         .post(
             &h,
             "/ui/rotations/abort",
-            &[("csrf", &csrf), ("name", "agent_stuck")],
+            &[
+                ("csrf", &csrf),
+                ("name", "agent_stuck"),
+                ("rotation_id", &rotation_id),
+            ],
         )
         .await;
     assert_eq!(
@@ -1347,11 +1387,25 @@ async fn the_approvals_page_lists_pending_rotations_and_aborts_one_after_a_sign_
         r.body
     );
     assert_eq!(fake_vault(&h.app).next_of(&item), None);
+    // The discarded value is kept in the item's history.
+    assert_eq!(fake_vault(&h.app).history_len(&item), 1);
     assert_eq!(
         fake_vault(&h.app).password_of(&item).as_deref(),
         Some(old_value())
     );
-    let ev = h.events_of("credential_rotate_abort");
+    // The refused attempts (a stale form, one without an id) are recorded as
+    // failures; the abort that worked is the one success.
+    let all = h.events_of("credential_rotate_abort");
+    let failures: Vec<_> = all
+        .iter()
+        .filter(|e| e["event"]["outcome"] == "failure")
+        .collect();
+    assert_eq!(failures.len(), 2, "both refusals are recorded");
+    assert!(failures.iter().all(|e| e["event"]["reason"].is_string()));
+    let ev: Vec<_> = all
+        .into_iter()
+        .filter(|e| e["event"]["outcome"] == "success")
+        .collect();
     assert_eq!(ev.len(), 1);
     let d = &ev[0]["ferrowarden"]["details"];
     assert_eq!(
@@ -1368,7 +1422,11 @@ async fn the_approvals_page_lists_pending_rotations_and_aborts_one_after_a_sign_
         .post(
             &h,
             "/ui/rotations/abort",
-            &[("csrf", &csrf), ("name", "agent_stuck")],
+            &[
+                ("csrf", &csrf),
+                ("name", "agent_stuck"),
+                ("rotation_id", &rotation_id),
+            ],
         )
         .await;
     assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
@@ -1377,23 +1435,55 @@ async fn the_approvals_page_lists_pending_rotations_and_aborts_one_after_a_sign_
         .post(
             &h,
             "/ui/rotations/abort",
-            &[("csrf", &csrf), ("name", "not_there")],
+            &[
+                ("csrf", &csrf),
+                ("name", "not_there"),
+                ("rotation_id", &rotation_id),
+            ],
         )
         .await;
     assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
 }
 
 #[tokio::test]
+async fn a_rotation_the_abort_would_refuse_has_no_button() {
+    let h = harness(full_opts()).await;
+    let (item, _) = pending_rotation_with_id(&h, "agent_broken").await;
+    // The pending field cannot be named (say it was duplicated by hand): the
+    // abort would be refused, so the page shows the row and no button.
+    fake_vault(&h.app).edit_item(&item, |e| e.rotation_id = None);
+    // A healthy one beside it.
+    pending_rotation_with_id(&h, "agent_healthy").await;
+    let mut b = signed_in(&h).await;
+    let r = b.get(&h, "/ui/approvals").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body.contains("Rotations in progress (2)"), "{}", r.body);
+    assert!(r.body.contains("agent_broken") && r.body.contains("agent_healthy"));
+    assert!(r.body.contains("Needs manual repair in Vaultwarden"));
+    // One form, for the healthy one only.
+    let form = "action=\"/ui/rotations/abort\"";
+    assert_eq!(r.body.matches(form).count(), 1);
+    assert_eq!(r.body.matches("Abort rotation").count(), 1);
+    let form_at = r.body.find(form).unwrap();
+    assert!(r.body[form_at..].contains("agent_healthy"));
+    assert!(!r.body[form_at..].contains("agent_broken"));
+}
+
+#[tokio::test]
 async fn aborting_a_rotation_needs_a_recent_sign_in_and_a_session() {
     let h = harness(full_opts()).await;
-    let item = pending_rotation(&h, "agent_stuck").await;
+    let (item, rotation_id) = pending_rotation_with_id(&h, "agent_stuck").await;
     // Nobody signed in: nothing happens.
     let mut nobody = Browser::new();
     let r = nobody
         .post(
             &h,
             "/ui/rotations/abort",
-            &[("csrf", "x"), ("name", "agent_stuck")],
+            &[
+                ("csrf", "x"),
+                ("name", "agent_stuck"),
+                ("rotation_id", &rotation_id),
+            ],
         )
         .await;
     assert_ne!(r.location(), "/ui/approvals?m=rotation_aborted");
@@ -1411,7 +1501,11 @@ async fn aborting_a_rotation_needs_a_recent_sign_in_and_a_session() {
         .post(
             &h,
             "/ui/rotations/abort",
-            &[("csrf", &csrf), ("name", "agent_stuck")],
+            &[
+                ("csrf", &csrf),
+                ("name", "agent_stuck"),
+                ("rotation_id", &rotation_id),
+            ],
         )
         .await;
     assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);

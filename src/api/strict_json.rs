@@ -69,8 +69,7 @@ where
 
 /// [`StrictJson`] for a route whose body may be left out: an empty (or
 /// whitespace-only) body is `T::default()`, and anything else must pass every
-/// check of [`StrictJson`], `Content-Type` included. Pair it with [`NoBody`]
-/// for a route that takes no body at all.
+/// check of [`StrictJson`], `Content-Type` included.
 pub struct OptionalStrictJson<T>(pub T);
 
 impl<S, T> FromRequest<S> for OptionalStrictJson<T>
@@ -100,12 +99,6 @@ where
             .map_err(FerroError::InvalidJson)
     }
 }
-
-/// The body of a route that takes none: nothing, or `{}`. Any member is an
-/// unknown field.
-#[derive(Debug, Default, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NoBody {}
 
 /// Same rule as axum's `Json`: `application/json` or `application/*+json`,
 /// ignoring parameters and case.

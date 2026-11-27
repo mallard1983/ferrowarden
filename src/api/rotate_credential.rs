@@ -27,12 +27,12 @@ use std::sync::Arc;
 use crate::api::admin::authenticate_admin;
 use crate::api::credentials::authenticate_agent;
 use crate::api::key_service::{Caller, Via};
-use crate::api::strict_json::{NoBody, OptionalStrictJson};
+use crate::api::strict_json::{OptionalStrictJson, StrictJson};
 use crate::create::MAX_NAME_CHARS;
 use crate::error::{FerroError, FerroResult};
 use crate::events::{emit_rejected, Action, SecurityEvent};
 use crate::middleware::request_context::RequestContext;
-use crate::rotate::{self, Finish, Finished, Progress, RotatePayload, Started, Who};
+use crate::rotate::{self, Finish, FinishPayload, Finished, Progress, RotatePayload, Started, Who};
 use crate::state::{AgentKey, AppState};
 
 /// The recorded `by` of an event: who asked.
@@ -138,7 +138,7 @@ async fn agent_finish(
     ctx: RequestContext,
     headers: HeaderMap,
     name: String,
-    body: Result<OptionalStrictJson<NoBody>, FerroError>,
+    body: Result<StrictJson<FinishPayload>, FerroError>,
     how: Finish,
 ) -> FerroResult<Json<Finished>> {
     let (endpoint, action) = match how {
@@ -152,13 +152,27 @@ async fn agent_finish(
         ),
     };
     let agent = authenticate_agent(&state, &ctx, &headers, endpoint).await?;
-    if let Err(e) = check_name(&name).and(body.map(|_| ())) {
-        emit_rejected(&state.events, &ctx, Some(&agent), endpoint, &e);
-        return Err(e);
-    }
+    let rotation_id = match check_name(&name)
+        .and(body)
+        .and_then(|StrictJson(payload)| payload.validate())
+    {
+        Ok(id) => id,
+        Err(e) => {
+            emit_rejected(&state.events, &ctx, Some(&agent), endpoint, &e);
+            return Err(e);
+        }
+    };
 
     let mut progress = Progress::default();
-    let result = rotate::finish(&state, Who::Agent(&agent), &name, how, &mut progress).await;
+    let result = rotate::finish(
+        &state,
+        Who::Agent(&agent),
+        &name,
+        how,
+        &rotation_id,
+        &mut progress,
+    )
+    .await;
     let event = agent_event(action, &ctx, &agent, &name).status(200);
     emit_outcome(&state, event, &progress, &result);
     result.map(Json)
@@ -167,7 +181,9 @@ async fn agent_finish(
 /// POST /v1/credentials/{name}/rotate/commit
 ///
 /// Make the pending new password the password; the old one goes to the item's
-/// password history. No approval: the start was approved. `409
+/// password history. The body names the rotation (`{ "rotation_id": ... }`,
+/// from the start or the detailed listing): `409 rotation_mismatch` when the
+/// pending value is another one. No approval: the start was approved. `409
 /// no_rotation_pending` when none is pending; `409 vault_conflict` when
 /// someone changed the item in the meantime (nothing is overwritten: read the
 /// credential again and retry).
@@ -176,38 +192,50 @@ pub async fn rotate_commit(
     ctx: RequestContext,
     headers: HeaderMap,
     Path(name): Path<String>,
-    body: Result<OptionalStrictJson<NoBody>, FerroError>,
+    body: Result<StrictJson<FinishPayload>, FerroError>,
 ) -> FerroResult<Json<Finished>> {
     agent_finish(state, ctx, headers, name, body, Finish::Commit).await
 }
 
 /// POST /v1/credentials/{name}/rotate/abort
 ///
-/// Throw the pending new password away; the password is unchanged. No
-/// approval.
+/// Throw the pending new password away; the password is unchanged, and the
+/// discarded value goes to the item's password history. The body names the
+/// rotation, like a commit's. No approval.
 pub async fn rotate_abort(
     State(state): State<Arc<AppState>>,
     ctx: RequestContext,
     headers: HeaderMap,
     Path(name): Path<String>,
-    body: Result<OptionalStrictJson<NoBody>, FerroError>,
+    body: Result<StrictJson<FinishPayload>, FerroError>,
 ) -> FerroResult<Json<Finished>> {
     agent_finish(state, ctx, headers, name, body, Finish::Abort).await
 }
 
-/// Abort the pending rotation of `name` for an operator (the admin API or the
-/// admin UI call this one function). Only the managed collection is checked:
-/// an operator is not an agent key. Emits `credential_rotate_abort` with `by`
-/// `admin`.
+/// Abort the pending rotation `rotation_id` names, of `name`, for an operator
+/// (the admin API or the admin UI call this one function). Only the managed
+/// collection is checked: an operator is not an agent key. Emits
+/// `credential_rotate_abort` with `by` `admin`.
 pub async fn admin_abort(
     state: &Arc<AppState>,
     caller: Caller<'_>,
     name: &str,
+    rotation_id: &str,
     approver: &str,
 ) -> FerroResult<Finished> {
     let mut progress = Progress::default();
     let result = match check_name(name) {
-        Ok(()) => rotate::finish(state, Who::Admin, name, Finish::Abort, &mut progress).await,
+        Ok(()) => {
+            rotate::finish(
+                state,
+                Who::Admin,
+                name,
+                Finish::Abort,
+                rotation_id,
+                &mut progress,
+            )
+            .await
+        }
         Err(e) => Err(e),
     };
     let event = caller
@@ -224,20 +252,25 @@ pub async fn admin_abort(
 /// POST /v1/admin/credentials/{name}/rotate/abort
 ///
 /// Clear a stuck rotation: remove the pending new password of a credential in
-/// the managed collection. Admin auth required; no body.
+/// the managed collection (its value goes to the item's password history).
+/// Admin auth required; the body names the rotation (`{ "rotation_id": ... }`,
+/// from the detailed listing).
 pub async fn admin_abort_route(
     State(state): State<Arc<AppState>>,
     ctx: RequestContext,
     headers: HeaderMap,
     Path(name): Path<String>,
-    body: Result<OptionalStrictJson<NoBody>, FerroError>,
+    body: Result<StrictJson<FinishPayload>, FerroError>,
 ) -> FerroResult<Json<Value>> {
     const ENDPOINT: &str = "/v1/admin/credentials/{name}/rotate/abort";
     authenticate_admin(&state, &ctx, &headers, ENDPOINT)?;
-    if let Err(e) = body {
-        emit_rejected(&state.events, &ctx, None, ENDPOINT, &e);
-        return Err(e);
-    }
+    let rotation_id = match body.and_then(|StrictJson(payload)| payload.validate()) {
+        Ok(id) => id,
+        Err(e) => {
+            emit_rejected(&state.events, &ctx, None, ENDPOINT, &e);
+            return Err(e);
+        }
+    };
     let caller = Caller {
         ctx: &ctx,
         via: Via::Api,
@@ -246,6 +279,7 @@ pub async fn admin_abort_route(
         &state,
         caller,
         &name,
+        &rotation_id,
         crate::api::approval_service::API_APPROVER,
     )
     .await?;

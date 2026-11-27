@@ -372,6 +372,7 @@ fn reason_codes_are_the_documented_snake_case_list() {
             "credential_create_out_of_scope",
         ),
         (Reason::VaultWriteFailed, "vault_write_failed"),
+        (Reason::VaultWriteUnknown, "vault_write_unknown"),
         (
             Reason::CredentialRotateOutOfScope,
             "credential_rotate_out_of_scope",
@@ -381,6 +382,7 @@ fn reason_codes_are_the_documented_snake_case_list() {
         (Reason::RotationInProgress, "rotation_in_progress"),
         (Reason::NoRotationPending, "no_rotation_pending"),
         (Reason::VaultConflict, "vault_conflict"),
+        (Reason::RotationMismatch, "rotation_mismatch"),
     ];
     assert_eq!(all.len(), Reason::ALL.len());
     for ((reason, code), listed) in all.into_iter().zip(Reason::ALL) {

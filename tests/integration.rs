@@ -7523,6 +7523,55 @@ impl TestEnv {
     /// and, optionally, the editor mode: the reader first saves the item with
     /// these notes, as a person editing it in the vault would.
     fn read_item_with(&self, name: &str, stdin_text: &str, edit_notes: Option<&str>) -> Value {
+        self.read_item_editing(name, stdin_text, edit_notes, None)
+    }
+
+    /// Restart the Ferrowarden container and wait until it is healthy again
+    /// (it unlocks itself from the secret file; its keys are on a volume).
+    /// The HTTP client is replaced: its pooled keep-alive connections went to
+    /// the process that was stopped.
+    fn restart_ferrowarden(&mut self) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let run = |args: &[&str]| {
+            std::process::Command::new("docker")
+                .current_dir(root)
+                .args(["compose", "-f", "docker-compose.test.yml"])
+                .args(args)
+                .output()
+                .expect("could not run docker compose")
+        };
+        let out = run(&["restart", "ferrowarden"]);
+        assert!(out.status.success(), "could not restart Ferrowarden");
+        for _ in 0..120 {
+            let out = std::process::Command::new("docker")
+                .current_dir(root)
+                .args([
+                    "compose",
+                    "-f",
+                    "docker-compose.test.yml",
+                    "ps",
+                    "ferrowarden",
+                ])
+                .output()
+                .expect("could not run docker compose");
+            if String::from_utf8_lossy(&out.stdout).contains("(healthy)") {
+                self.client = Client::new();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        panic!("Ferrowarden did not become healthy after the restart");
+    }
+
+    /// The same, and the editor can also change the item's password, as a
+    /// person changing it in the vault would.
+    fn read_item_editing(
+        &self,
+        name: &str,
+        stdin_text: &str,
+        edit_notes: Option<&str>,
+        edit_password: Option<&str>,
+    ) -> Value {
         use std::io::Write;
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut args = vec![
@@ -7539,6 +7588,10 @@ impl TestEnv {
         if let Some(notes) = edit_notes {
             args.push("-e".to_string());
             args.push(format!("EDIT_NOTES={notes}"));
+        }
+        if let Some(password) = edit_password {
+            args.push("-e".to_string());
+            args.push(format!("EDIT_PASSWORD={password}"));
         }
         args.push("vault-reader".to_string());
         let expected = stdin_text;
@@ -8204,6 +8257,9 @@ async fn test_create_status_and_ui_approval() {
 // nothing else changed), and that a person's edit made in the meantime is never
 // overwritten.
 
+/// A rotation id of the right shape that names no rotation.
+const NO_SUCH_ROTATION: &str = "aaaaaaaaaaaaaaaaaaaaaa";
+
 /// The rotating service of the mock (tests/mock-api/server.py).
 const ROTATING_SETUP: &str = "/api/rotating/setup";
 const ROTATING_PASSWORD: &str = "/api/rotating/password";
@@ -8270,12 +8326,82 @@ impl TestEnv {
         req.send().await.expect("rotation request failed")
     }
 
-    /// A rotation call, checked against the spec.
+    /// A rotation call, checked against the spec. A commit or an abort names a
+    /// rotation that does not exist: for the calls that are refused before it
+    /// matters (the policy, the managed collection, nothing pending).
     async fn rotation_call(&self, token: &str, name: &str, tail: &str) -> (u16, Value) {
-        let resp = self.post_rotation(token, name, tail, None).await;
+        let body = (!tail.is_empty()).then(|| json!({ "rotation_id": NO_SUCH_ROTATION }));
+        let resp = self.post_rotation(token, name, tail, body.as_ref()).await;
         Spec::load()
             .check(&rotate_template(tail), "POST", resp)
             .await
+    }
+
+    /// A commit or an abort (`tail`) of the rotation `rotation_id`, checked
+    /// against the spec.
+    async fn rotation_finish(
+        &self,
+        token: &str,
+        name: &str,
+        tail: &str,
+        rotation_id: &str,
+    ) -> (u16, Value) {
+        let body = json!({ "rotation_id": rotation_id });
+        let resp = self.post_rotation(token, name, tail, Some(&body)).await;
+        Spec::load()
+            .check(&rotate_template(tail), "POST", resp)
+            .await
+    }
+
+    /// `{{vault:NAME:next}}` is refused by **Ferrowarden itself** (an unknown
+    /// placeholder, 422), before anything is sent: the mock records no new
+    /// request. This is separate from whatever status a target would give.
+    async fn assert_next_placeholder_refused(&self, token: &str, name: &str) {
+        let before = self.all_captured_requests().await.len();
+        let resp = self
+            .forward_payload_as(
+                token,
+                json!({ "request": {
+                    "method": "POST",
+                    "url": format!("{}{ROTATING_LOGIN}", self.mock_url_via_ferrowarden()),
+                    "body": { "password": format!("{{{{vault:{name}:next}}}}") },
+                }}),
+            )
+            .await;
+        assert_eq!(resp.status().as_u16(), 422, "Ferrowarden's own refusal");
+        let body: Value = resp.json().await.expect("an error body");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("unknown credential or field")),
+            "an unknown placeholder, not a target's answer: {body}"
+        );
+        assert!(body.get("status").is_none(), "no target answered");
+        assert_eq!(
+            self.all_captured_requests().await.len(),
+            before,
+            "nothing was sent to the target"
+        );
+    }
+
+    /// The pending value of a rotation, as the mock sees it when `{{vault:NAME:next}}`
+    /// is sent to its login service (a wrong password there: 401). For the
+    /// tests that need to compare the stored value with it.
+    async fn pending_value_via_the_mock(&self, token: &str, name: &str) -> String {
+        let (status, _) = self
+            .rotating(
+                token,
+                ROTATING_LOGIN,
+                json!({ "password": format!("{{{{vault:{name}:next}}}}") }),
+            )
+            .await;
+        assert_eq!(status, 401, "the service does not have it");
+        let captured = self.last_captured_request().await;
+        let body: Value = serde_json::from_str(captured["body"].as_str().unwrap())
+            .expect("the mock captured the login body");
+        let value = body["password"].as_str().expect("the substituted value");
+        record_secret_for_gate(value);
+        value.to_string()
     }
 
     /// Forward a call to the mock's rotating service as `token`: returns the
@@ -8311,9 +8437,18 @@ impl TestEnv {
         .0
     }
 
-    /// The newest password the mock's rotating service was given.
+    /// The newest password the mock's rotating service was given at its
+    /// setup.
     async fn latest_rotating_password(&self) -> String {
         let value = self.latest_issued("rotating_password").await;
+        record_secret_for_gate(&value);
+        value
+    }
+
+    /// The newest replacement password the mock's rotating service was given
+    /// (a rotation's `{{vault:NAME:next}}`).
+    async fn latest_rotated_password(&self) -> String {
+        let value = self.latest_issued("rotated_password").await;
         record_secret_for_gate(&value);
         value
     }
@@ -8377,6 +8512,14 @@ async fn rotation_started(env: &TestEnv, key_name: &str, token: &str, name: &str
     started
 }
 
+/// The rotation id of a start's answer.
+fn rotation_id_of(started: &Value) -> String {
+    started["rotation_id"]
+        .as_str()
+        .expect("the start names the rotation")
+        .to_string()
+}
+
 /// The whole loop: create, set the first password at the service, start a
 /// rotation (approved while the request is held), change the password at the
 /// service signing in with the current one and sending the new one, commit,
@@ -8419,16 +8562,20 @@ async fn test_rotate_the_whole_loop_and_the_value_is_nowhere() {
     env.approve_rotation(&approval_id, "rotate").await;
     let (status, started) = held.await.unwrap();
     assert_eq!(status, 202, "{started}");
+    let rotation_id = rotation_id_of(&started);
     assert_eq!(
         started,
         json!({
             "name": name,
             "current": format!("{{{{vault:{name}}}}}"),
             "next": format!("{{{{vault:{name}:next}}}}"),
+            "rotation_id": rotation_id,
         })
     );
 
-    // The listing shows the pending rotation with its placeholders.
+    // The listing shows the pending rotation with its placeholders and the id
+    // a lost start answer would be recovered with.
+
     let detail = env.agent_get_json("/v1/credentials?detail=true").await;
     let entry = detail
         .as_array()
@@ -8437,6 +8584,7 @@ async fn test_rotate_the_whole_loop_and_the_value_is_nowhere() {
         .find(|d| d["name"] == name.as_str())
         .expect("the credential is listed");
     assert_eq!(entry["rotation_pending"], true);
+    assert_eq!(entry["rotation_id"], rotation_id.as_str());
     assert_eq!(entry["next"], format!("{{{{vault:{name}:next}}}}"));
     assert!(entry["fields"].as_object().is_none_or(|f| f.is_empty()));
 
@@ -8469,7 +8617,7 @@ async fn test_rotate_the_whole_loop_and_the_value_is_nowhere() {
         )
         .await;
     assert_eq!(status, 200, "the service accepted the change: {changed}");
-    let new = env.latest_rotating_password().await;
+    let new = env.latest_rotated_password().await;
     assert_eq!(new.len(), 48);
     assert!(new.bytes().all(|b| b.is_ascii_hexdigit()));
     assert_ne!(new, old);
@@ -8512,8 +8660,20 @@ async fn test_rotate_the_whole_loop_and_the_value_is_nowhere() {
         "scrubbed from the answer"
     );
 
-    // Commit: no approval, and the new password is the password.
-    let (status, done) = env.rotation_call(&token, &name, "/commit").await;
+    // Commit: no approval, and the new password is the password. A commit that
+    // names another rotation is refused and writes nothing.
+    let (status, body) = env
+        .rotation_finish(&token, &name, "/commit", NO_SUCH_ROTATION)
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (409, Some("rotation_mismatch"))
+    );
+    let item = env.read_item_with(&name, &format!("{old}\n\n{new}"), None);
+    assert_eq!(item["passwordMatches"], true, "nothing was written");
+    let (status, done) = env
+        .rotation_finish(&token, &name, "/commit", &rotation_id)
+        .await;
     assert_eq!(status, 200, "{done}");
     assert_eq!(
         done,
@@ -8529,20 +8689,16 @@ async fn test_rotate_the_whole_loop_and_the_value_is_nowhere() {
         200,
         "the placeholder is now the new password"
     );
-    let (status, body) = env.rotation_call(&token, &name, "/commit").await;
+    let (status, body) = env
+        .rotation_finish(&token, &name, "/commit", &rotation_id)
+        .await;
     assert_eq!(
         (status, body["code"].as_str()),
         (409, Some("no_rotation_pending"))
     );
-    // The pending placeholder is gone.
-    let (status, _) = env
-        .rotating(
-            &token,
-            ROTATING_LOGIN,
-            json!({ "password": format!("{{{{vault:{name}:next}}}}") }),
-        )
-        .await;
-    assert_ne!(status, 200);
+    // The pending placeholder is gone: Ferrowarden refuses it itself, before
+    // anything is sent to the target.
+    env.assert_next_placeholder_refused(&token, &name).await;
 
     // The independent reader: the new password is stored, the old one is the
     // newest entry of the history, the pending field is gone, the password
@@ -8667,10 +8823,15 @@ async fn test_rotate_abort_leaves_the_password_and_removes_the_field() {
         (409, Some("no_rotation_pending"))
     );
 
-    rotation_started(&env, &key_name, &token, &name).await;
+    let started = rotation_started(&env, &key_name, &token, &name).await;
+    let rotation_id = rotation_id_of(&started);
     let item = env.read_item_with(&name, &format!("{old}\n\n"), None);
     assert_eq!(item["hasNextField"], true);
-    let (status, done) = env.rotation_call(&token, &name, "/abort").await;
+    // What the discarded value was, to compare with what the vault keeps.
+    let discarded = env.pending_value_via_the_mock(&token, &name).await;
+    let (status, done) = env
+        .rotation_finish(&token, &name, "/abort", &rotation_id)
+        .await;
     assert_eq!(status, 200, "{done}");
     assert_eq!(done["name"], name.as_str());
 
@@ -8680,7 +8841,12 @@ async fn test_rotate_abort_leaves_the_password_and_removes_the_field() {
         "the password is the one it was"
     );
     assert_eq!(item["hasNextField"], false);
-    assert_eq!(item["passwordHistoryCount"], 0);
+    // The discarded value is not lost: it is the newest entry of the item's
+    // password history, so a person can recover it if the service had
+    // switched to it.
+    assert_eq!(item["passwordHistoryCount"], 1);
+    let item = env.read_item_with(&name, &format!("{old}\n{discarded}\n"), None);
+    assert_eq!(item["historyFirstMatches"], true, "{item}");
     assert_eq!(item["fieldNames"], json!(["ferrowarden_created_by"]));
     assert_eq!(
         env.rotating_login(&token, &format!("{{{{vault:{name}}}}}"))
@@ -8688,14 +8854,9 @@ async fn test_rotate_abort_leaves_the_password_and_removes_the_field() {
         200,
         "the old password still works"
     );
-    let (status, _) = env
-        .rotating(
-            &token,
-            ROTATING_LOGIN,
-            json!({ "password": format!("{{{{vault:{name}:next}}}}") }),
-        )
-        .await;
-    assert_ne!(status, 200, "there is no pending value any more");
+    // There is no pending value any more: Ferrowarden refuses the placeholder
+    // itself, before anything is sent.
+    env.assert_next_placeholder_refused(&token, &name).await;
     let detail = env.agent_get_json("/v1/credentials?detail=true").await;
     let entry = detail
         .as_array()
@@ -8820,16 +8981,17 @@ async fn test_rotate_refusals_come_before_any_prompt() {
     env.revoke_key(&key_id).await;
 }
 
-/// A person edits the item while the rotation is pending: the commit is
-/// refused with `409 vault_conflict`, the edit is intact, the password is
-/// unchanged; a retry (after reading it again) goes through and keeps the edit.
+/// A person edits the item's **notes** while the rotation is pending: the
+/// commit goes through, and the edit is intact (every member Ferrowarden does
+/// not own is kept as the fresh read has it).
 #[tokio::test]
-async fn test_rotate_a_persons_edit_is_never_overwritten() {
+async fn test_rotate_a_persons_notes_edit_is_kept_and_the_commit_goes_through() {
     let Some(env) = TestEnv::load() else { return };
-    let (key_name, key_id, token) = env.rotator_key("rotate-conflict", json!(["agent_*"])).await;
-    let name = created_name("conflict");
+    let (key_name, key_id, token) = env.rotator_key("rotate-notes", json!(["agent_*"])).await;
+    let name = created_name("notes");
     let old = env.rotatable(&key_name, &token, &name).await;
-    rotation_started(&env, &key_name, &token, &name).await;
+    let started = rotation_started(&env, &key_name, &token, &name).await;
+    let rotation_id = rotation_id_of(&started);
     let (status, _) = env
         .rotating(
             &token,
@@ -8841,54 +9003,207 @@ async fn test_rotate_a_persons_edit_is_never_overwritten() {
         )
         .await;
     assert_eq!(status, 200);
-    let new = env.latest_rotating_password().await;
+    let new = env.latest_rotated_password().await;
 
     // A person changes the item's notes in the vault.
     let human = "a person was here, not Ferrowarden";
-    let edited = env.read_item_with(&name, &format!("{old}\n\n{new}"), Some(human));
+    let edited = env.read_item_with(
+        &name,
+        &format!(
+            "{old}
+
+{new}"
+        ),
+        Some(human),
+    );
     assert_eq!(edited["edited"], true, "{edited}");
-    assert_eq!(edited["notes"], human);
+    let item = env.read_item_with(
+        &name,
+        &format!(
+            "{old}
 
-    // The commit finds the item changed: refused, nothing overwritten.
-    let (status, body) = env.rotation_call(&token, &name, "/commit").await;
-    assert_eq!(
-        (status, body["code"].as_str()),
-        (409, Some("vault_conflict")),
-        "the commit is refused as a conflict"
+{new}"
+        ),
+        None,
     );
-    assert!(body["error"]
-        .as_str()
-        .unwrap()
-        .contains("Nothing was overwritten"));
-    let item = env.read_item_with(&name, &format!("{old}\n\n{new}"), None);
-    assert_eq!(item["notes"], human, "the person's edit is intact");
-    assert_eq!(item["passwordMatches"], true, "the password is unchanged");
-    assert_eq!(
-        item["hasNextField"], true,
-        "the pending value is still there"
-    );
-    assert_eq!(item["nextMatches"], true);
-    assert_eq!(item["passwordHistoryCount"], 0);
-    let events = env.events(500).await;
-    assert!(events.iter().any(|e| {
-        e["event"]["action"] == "credential_rotate_commit"
-            && e["event"]["reason"] == "vault_conflict"
-            && e["ferrowarden"]["credentials"] == json!([name])
-    }));
+    assert_eq!(item["hasNextField"], true);
+    assert_eq!(item["hasNextBaseField"], true);
 
-    // Having read the item again, the retry goes through and keeps the edit.
-    let (status, done) = env.rotation_call(&token, &name, "/commit").await;
+    let (status, done) = env
+        .rotation_finish(&token, &name, "/commit", &rotation_id)
+        .await;
     assert_eq!(status, 200, "{done}");
-    let item = env.read_item_with(&name, &format!("{new}\n{old}\n"), None);
+    let item = env.read_item_with(
+        &name,
+        &format!(
+            "{new}
+{old}
+"
+        ),
+        None,
+    );
     assert_eq!(item["notes"], human, "the edit survives the commit");
     assert_eq!(item["passwordMatches"], true);
     assert_eq!(item["historyFirstMatches"], true);
     assert_eq!(item["hasNextField"], false);
+    assert_eq!(item["hasNextBaseField"], false);
+    assert_eq!(item["fieldNames"], json!(["ferrowarden_created_by"]));
     assert_eq!(
         env.rotating_login(&token, &format!("{{{{vault:{name}}}}}"))
             .await,
         200
     );
+    env.revoke_key(&key_id).await;
+}
+
+/// A person changes the item's **password** while the rotation is pending: the
+/// commit is refused with `409 vault_conflict`, also after Ferrowarden has
+/// restarted (the base is on the item, not in memory); nothing is replaced;
+/// an abort is always possible and keeps the pending value in the history.
+#[tokio::test]
+async fn test_rotate_a_persons_password_change_is_never_replaced_by_a_commit() {
+    let Some(mut env) = TestEnv::load() else {
+        return;
+    };
+    let (key_name, key_id, token) = env.rotator_key("rotate-pw", json!(["agent_*"])).await;
+    let name = created_name("pwedit");
+    let old = env.rotatable(&key_name, &token, &name).await;
+    let started = rotation_started(&env, &key_name, &token, &name).await;
+    let rotation_id = rotation_id_of(&started);
+    let discarded = env.pending_value_via_the_mock(&token, &name).await;
+
+    // A person changes the password in the vault (a value made now).
+    let person = format!("person-{}-{}", unique_suffix(), unique_suffix());
+    record_secret_for_gate(&person);
+    let edited = env.read_item_editing(
+        &name,
+        &format!(
+            "{old}
+
+{discarded}"
+        ),
+        None,
+        Some(&person),
+    );
+    assert_eq!(edited["edited"], true, "{edited}");
+
+    let refused = |status: u16, body: &Value| {
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (409, Some("vault_conflict")),
+            "the commit is refused"
+        );
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("password was changed after the rotation started"));
+    };
+    let (status, body) = env
+        .rotation_finish(&token, &name, "/commit", &rotation_id)
+        .await;
+    refused(status, &body);
+    let item = env.read_item_with(
+        &name,
+        &format!(
+            "{person}
+
+{discarded}"
+        ),
+        None,
+    );
+    assert_eq!(item["passwordMatches"], true, "the person's password stays");
+    assert_eq!(item["passwordHistoryCount"], 0, "history untouched");
+    assert_eq!(item["hasNextField"], true);
+    assert_eq!(item["hasNextBaseField"], true);
+
+    // Ferrowarden restarts between the start and the commit: still refused.
+    env.restart_ferrowarden();
+    let (status, body) = env
+        .rotation_finish(&token, &name, "/commit", &rotation_id)
+        .await;
+    refused(status, &body);
+    let item = env.read_item_with(
+        &name,
+        &format!(
+            "{person}
+
+{discarded}"
+        ),
+        None,
+    );
+    assert_eq!(item["passwordMatches"], true);
+    assert_eq!(item["passwordHistoryCount"], 0);
+
+    // An abort works: both fields go, and the pending value is the newest
+    // history entry.
+    let (status, done) = env
+        .rotation_finish(&token, &name, "/abort", &rotation_id)
+        .await;
+    assert_eq!(status, 200, "{done}");
+    let item = env.read_item_with(
+        &name,
+        &format!(
+            "{person}
+{discarded}
+"
+        ),
+        None,
+    );
+    assert_eq!(item["passwordMatches"], true);
+    assert_eq!(item["hasNextField"], false);
+    assert_eq!(item["hasNextBaseField"], false);
+    assert_eq!(item["passwordHistoryCount"], 1);
+    assert_eq!(item["historyFirstMatches"], true, "{item}");
+    assert_eq!(item["fieldNames"], json!(["ferrowarden_created_by"]));
+    env.revoke_key(&key_id).await;
+}
+
+/// A commit or an abort names the rotation it means: the replay of a commit
+/// whose answer was lost cannot finish the next rotation, and the id of a
+/// pending value can be read from the listing.
+#[tokio::test]
+async fn test_rotate_a_finish_names_the_rotation_it_means() {
+    let Some(env) = TestEnv::load() else { return };
+    let (key_name, key_id, token) = env.rotator_key("rotate-names", json!(["agent_*"])).await;
+    let name = created_name("names");
+    let old = env.rotatable(&key_name, &token, &name).await;
+
+    // Rotation A: started and committed.
+    let first = rotation_id_of(&rotation_started(&env, &key_name, &token, &name).await);
+    let (status, done) = env.rotation_finish(&token, &name, "/commit", &first).await;
+    assert_eq!(status, 200, "{done}");
+
+    // Rotation B starts. The agent, which lost the answer of A's commit, sends
+    // it again: refused, and B is untouched.
+    let second = rotation_id_of(&rotation_started(&env, &key_name, &token, &name).await);
+    assert_ne!(first, second);
+    for tail in ["/commit", "/abort"] {
+        let (status, body) = env.rotation_finish(&token, &name, tail, &first).await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (409, Some("rotation_mismatch")),
+            "{tail}"
+        );
+    }
+    let listed = env.agent_get_json("/v1/credentials?detail=true").await;
+    let entry = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == name.as_str())
+        .unwrap();
+    assert_eq!(entry["rotation_pending"], true, "B is still pending");
+    assert_eq!(entry["rotation_id"], second.as_str());
+    let item = env.read_item_with(&name, "x\n\n", None);
+    assert_eq!(item["hasNextField"], true);
+    let _ = old;
+
+    // The id in the listing finishes it, as it would for a lost start answer.
+    let (status, done) = env.rotation_finish(&token, &name, "/abort", &second).await;
+    assert_eq!(status, 200, "{done}");
+    // A commit or an abort without a rotation_id is a bad request.
+    let resp = env.post_rotation(&token, &name, "/commit", None).await;
+    assert_eq!(resp.status(), 400);
     env.revoke_key(&key_id).await;
 }
 
@@ -8899,13 +9214,16 @@ async fn test_rotate_an_operator_can_abort_and_an_agent_key_cannot_use_the_admin
     let (key_name, key_id, token) = env.rotator_key("rotate-admin", json!(["agent_*"])).await;
     let name = created_name("admin");
     let old = env.rotatable(&key_name, &token, &name).await;
-    rotation_started(&env, &key_name, &token, &name).await;
+    let started = rotation_started(&env, &key_name, &token, &name).await;
+    let rotation_id = rotation_id_of(&started);
+    let named = |id: &str| Some(json!({ "rotation_id": id }));
 
     let admin_path = format!("/v1/admin/credentials/{}/rotate/abort", path_name(&name));
     let resp = env
         .client
         .post(format!("{}{admin_path}", env.fw_url))
         .header("X-Agent-Key", &token)
+        .json(&named(&rotation_id))
         .send()
         .await
         .unwrap();
@@ -8913,7 +9231,24 @@ async fn test_rotate_an_operator_can_abort_and_an_agent_key_cannot_use_the_admin
     let item = env.read_item_with(&name, &format!("{old}\n\n"), None);
     assert_eq!(item["hasNextField"], true, "untouched");
 
-    let resp = env.admin_call("POST", &admin_path, None).await;
+    // A stale form (another rotation's id) is refused and writes nothing.
+    let resp = env
+        .admin_call("POST", &admin_path, named(NO_SUCH_ROTATION))
+        .await;
+    let (status, body) = Spec::load()
+        .check("/v1/admin/credentials/{name}/rotate/abort", "POST", resp)
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (409, Some("rotation_mismatch"))
+    );
+    let item = env.read_item_with(&name, &format!("{old}\n\n"), None);
+    assert_eq!(item["hasNextField"], true, "untouched");
+
+    let resp = env
+        .admin_call("POST", &admin_path, named(&rotation_id))
+        .await;
+    let abort_request = request_id(&resp);
     let (status, body) = Spec::load()
         .check("/v1/admin/credentials/{name}/rotate/abort", "POST", resp)
         .await;
@@ -8922,20 +9257,23 @@ async fn test_rotate_an_operator_can_abort_and_an_agent_key_cannot_use_the_admin
     let item = env.read_item_with(&name, &format!("{old}\n\n"), None);
     assert_eq!(item["hasNextField"], false);
     assert_eq!(item["passwordMatches"], true);
-    let events = env.events(500).await;
-    let ev = events
-        .iter()
-        .find(|e| {
-            e["event"]["action"] == "credential_rotate_abort"
-                && e["ferrowarden"]["details"]["by"] == "admin"
-                && e["ferrowarden"]["credentials"] == json!([name])
-        })
-        .expect("the operator's abort was recorded");
+    assert_eq!(
+        item["passwordHistoryCount"], 1,
+        "the discarded value is kept"
+    );
+    // The audit event of this very request.
+    let ev = env
+        .event_for(&abort_request, "credential_rotate_abort")
+        .await;
     assert_eq!(ev["event"]["outcome"], "success");
+    assert_eq!(ev["ferrowarden"]["details"]["by"], "admin");
+    assert_eq!(ev["ferrowarden"]["credentials"], json!([name]));
     assert_eq!(ev["ferrowarden"]["details"]["approver"], "admin_api");
 
     // Nothing pending any more.
-    let resp = env.admin_call("POST", &admin_path, None).await;
+    let resp = env
+        .admin_call("POST", &admin_path, named(&rotation_id))
+        .await;
     let (status, body) = Spec::load()
         .check("/v1/admin/credentials/{name}/rotate/abort", "POST", resp)
         .await;
@@ -8948,7 +9286,7 @@ async fn test_rotate_an_operator_can_abort_and_an_agent_key_cannot_use_the_admin
         .admin_call(
             "POST",
             "/v1/admin/credentials/test_login_full/rotate/abort",
-            None,
+            Some(json!({ "rotation_id": NO_SUCH_ROTATION })),
         )
         .await;
     let (status, body) = Spec::load()

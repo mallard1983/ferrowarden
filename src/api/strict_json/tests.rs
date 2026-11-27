@@ -292,6 +292,11 @@ async fn an_optional_body_may_be_left_out_and_is_otherwise_strict() {
     use axum::Router;
     use tower::ServiceExt;
 
+    /// A body of nothing, or `{}`: any member is an unknown field.
+    #[derive(Debug, Default, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct NoBody {}
+
     async fn none(OptionalStrictJson(_b): OptionalStrictJson<NoBody>) -> &'static str {
         "ok"
     }

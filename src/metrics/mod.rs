@@ -141,7 +141,7 @@ const APPROVAL_OUTCOMES: [&str; 4] = ["granted", "denied", "expired", "limit_rea
 /// The values of `ferrowarden_credential_creates_total{outcome}`: `created`,
 /// or the reason a create request was refused or failed (`other`: any other
 /// reason).
-const CREATE_OUTCOMES: [&str; 10] = [
+const CREATE_OUTCOMES: [&str; 11] = [
     "created",
     "approval_denied",
     "approval_pending",
@@ -151,6 +151,7 @@ const CREATE_OUTCOMES: [&str; 10] = [
     "credential_create_disabled",
     "credential_create_out_of_scope",
     "vault_write_failed",
+    "vault_write_unknown",
     "other",
 ];
 /// The `stage` values of `ferrowarden_credential_rotations_total`.
@@ -158,7 +159,7 @@ const ROTATE_STAGES: [&str; 3] = ["start", "commit", "abort"];
 /// The `outcome` values of `ferrowarden_credential_rotations_total`:
 /// `success`, or the reason a rotation request was refused or failed (`other`:
 /// any other reason).
-const ROTATE_OUTCOMES: [&str; 14] = [
+const ROTATE_OUTCOMES: [&str; 16] = [
     "success",
     "approval_denied",
     "approval_pending",
@@ -169,7 +170,9 @@ const ROTATE_OUTCOMES: [&str; 14] = [
     "rotation_in_progress",
     "no_rotation_pending",
     "vault_conflict",
+    "rotation_mismatch",
     "vault_write_failed",
+    "vault_write_unknown",
     "managed_collection_unavailable",
     "credential_create_disabled",
     "other",
