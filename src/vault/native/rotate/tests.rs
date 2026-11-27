@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
-use super::super::enc::test_support::{encrypt2, key};
-use super::super::enc::{encrypt_str, EncString, SymKey};
+use super::super::enc::test_support::key;
+use super::super::enc::{encrypt, encrypt_str, EncString, SymKey};
 use super::*;
 
 const REVISION: &str = "2026-11-26T10:00:00.123456Z";
@@ -32,13 +32,13 @@ fn item(own_key: bool) -> (Value, SymKey) {
             .map(|i| i.wrapping_mul(5).wrapping_add(3))
             .collect();
         (
-            json!(encrypt2(&org, [3; 16], &bytes)),
+            json!(encrypt(&org, &bytes).unwrap()),
             SymKey::from_slice(&bytes).unwrap(),
         )
     } else {
         (Value::Null, key(40))
     };
-    let enc = |s: &str| json!(encrypt2(&k, [9; 16], s.as_bytes()));
+    let enc = |s: &str| json!(encrypt(&k, s.as_bytes()).unwrap());
     let v = json!({
         "object": "cipherDetails",
         "id": "11111111-2222-3333-4444-555555555555",
@@ -301,7 +301,7 @@ fn more_than_one_pending_field_is_a_conflict_for_a_person_to_fix() {
 #[test]
 fn an_unreadable_field_name_stops_everything_rather_than_guessing() {
     let (mut before, _) = item(true);
-    before["fields"][1]["name"] = json!(encrypt2(&key(99), [1; 16], b"x"));
+    before["fields"][1]["name"] = json!(encrypt(&key(99), b"x").unwrap());
     assert!(matches!(
         start(&before, &org_key(), REVISION, NEXT).unwrap_err(),
         RotateError::Crypto(_)
@@ -402,7 +402,7 @@ fn a_short_history_grows_by_one_at_the_front() {
 #[test]
 fn a_pending_value_under_another_key_fails_the_commit_closed() {
     let (mut after, _) = started(true);
-    after["fields"][2]["value"] = json!(encrypt2(&key(77), [4; 16], b"WRONG-KEY"));
+    after["fields"][2]["value"] = json!(encrypt(&key(77), b"WRONG-KEY").unwrap());
     assert_eq!(
         commit(&after, &org_key(), REVISION, NOW).unwrap_err(),
         RotateError::CorruptPending

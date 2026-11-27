@@ -16,7 +16,23 @@ use std::time::Duration;
 
 const COLLECTION_ID: &str = "6c0d7f0e-52d0-4b5b-8a39-0e8a7f6d5c4b";
 const NAME: &str = "agent_keycloak_svc";
-const OLD: &str = "the-current-password-0123456789";
+
+/// A test value made at run time (a fixed literal reads as a hard-coded
+/// password to static analysis), the same for the whole test process.
+fn random_value(cell: &'static std::sync::OnceLock<String>, tag: &str) -> &'static str {
+    cell.get_or_init(|| {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).expect("random bytes");
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        format!("{tag}-{hex}")
+    })
+}
+
+/// The item's password before a rotation.
+fn old() -> &'static str {
+    static CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    random_value(&CELL, "current")
+}
 
 fn fake(state: &AppState) -> &FakeVault {
     match &*state.vault {
@@ -49,7 +65,7 @@ async fn setup(tweak: impl FnOnce(&mut Config)) -> Setup {
     })
     .await;
     fake(&state).set_managed(usable());
-    let item = fake(&state).add_managed_item(NAME, &["http://127.0.0.1:9"], OLD);
+    let item = fake(&state).add_managed_item(NAME, &["http://127.0.0.1:9"], old());
     Setup { app, state, item }
 }
 
@@ -238,7 +254,7 @@ async fn a_rotation_is_held_approved_started_listed_committed_and_the_value_is_n
     let next = fake(&s.state).next_of(&s.item).unwrap();
     assert_eq!(next.len(), 40);
     assert!(next.bytes().all(|b| b.is_ascii_hexdigit()));
-    assert_eq!(fake(&s.state).password_of(&s.item).as_deref(), Some(OLD));
+    assert_eq!(fake(&s.state).password_of(&s.item).as_deref(), Some(old()));
 
     // The listing shows the pending rotation and the `next` placeholder.
     let (st, _, listing) = call(
@@ -291,7 +307,7 @@ async fn a_rotation_is_held_approved_started_listed_committed_and_the_value_is_n
     // Neither value is in a response, an event or the log-like text.
     let everything = format!("{started} {done} {listing} {}", all_events_text(&s.state));
     assert!(!everything.contains(&next), "the new value");
-    assert!(!everything.contains(OLD), "the old value");
+    assert!(!everything.contains(old()), "the old value");
 
     // The events: the prompt (kind rotate), the decision (no grant), the start
     // and the commit, by the agent.
@@ -353,7 +369,7 @@ async fn abort_removes_the_pending_value_and_needs_no_approval() {
     assert_eq!(st, StatusCode::OK, "{done}");
     assert_eq!(done["name"], NAME);
     assert_eq!(fake(&s.state).next_of(&s.item), None);
-    assert_eq!(fake(&s.state).password_of(&s.item).as_deref(), Some(OLD));
+    assert_eq!(fake(&s.state).password_of(&s.item).as_deref(), Some(old()));
     assert_eq!(fake(&s.state).history_len(&s.item), 0);
     let (st, resp) = s.post(&token, &path(NAME, "/abort"), Some(json!({}))).await;
     assert_eq!(
@@ -377,7 +393,7 @@ async fn abort_removes_the_pending_value_and_needs_no_approval() {
 async fn a_name_with_spaces_quotes_and_slashes_is_passed_percent_encoded() {
     let s = setup(|_| {}).await;
     let odd = "agent_Service (prod) 'x'/y";
-    let id = fake(&s.state).add_managed_item(odd, &["http://127.0.0.1:9"], OLD);
+    let id = fake(&s.state).add_managed_item(odd, &["http://127.0.0.1:9"], old());
     let token = s.key("agent-a").await;
     let held = s.spawn_start(&token, odd, None);
     let open = s.wait_for_pending(1).await;
@@ -399,7 +415,7 @@ async fn a_name_with_spaces_quotes_and_slashes_is_passed_percent_encoded() {
     assert_eq!(st, StatusCode::OK);
     // Non-ASCII names too.
     let accented = "agent_dépôt";
-    fake(&s.state).add_managed_item(accented, &["http://127.0.0.1:9"], OLD);
+    fake(&s.state).add_managed_item(accented, &["http://127.0.0.1:9"], old());
     let (st, resp) = s.post(&token, &path(accented, "/abort"), None).await;
     assert_eq!(
         (st, resp["code"].as_str()),
@@ -412,7 +428,7 @@ async fn a_name_with_spaces_quotes_and_slashes_is_passed_percent_encoded() {
 #[tokio::test]
 async fn a_name_outside_the_keys_rotate_list_is_refused_before_any_prompt() {
     let s = setup(|_| {}).await;
-    fake(&s.state).add_managed_item("grafana_svc", &["http://127.0.0.1:9"], OLD);
+    fake(&s.state).add_managed_item("grafana_svc", &["http://127.0.0.1:9"], old());
     let token = s.key("agent-a").await;
     let (st, resp) = s.start(&token, "grafana_svc").await;
     assert_eq!(
@@ -490,11 +506,12 @@ async fn a_name_outside_the_credentials_scope_is_answered_like_one_that_does_not
 async fn only_a_login_with_a_password_and_no_reprompt_that_is_unique_can_be_rotated() {
     let s = setup(|_| {}).await;
     let token = s.key("agent-a").await;
-    let reprompt = fake(&s.state).add_managed_item("agent_reprompt", &["http://127.0.0.1:9"], OLD);
+    let reprompt =
+        fake(&s.state).add_managed_item("agent_reprompt", &["http://127.0.0.1:9"], old());
     fake(&s.state).edit_item(&reprompt, |e| e.reprompt = true);
-    let nopass = fake(&s.state).add_managed_item("agent_nopass", &["http://127.0.0.1:9"], OLD);
+    let nopass = fake(&s.state).add_managed_item("agent_nopass", &["http://127.0.0.1:9"], old());
     fake(&s.state).edit_item(&nopass, |e| e.has_password = false);
-    let note = fake(&s.state).add_managed_item("agent_note", &["http://127.0.0.1:9"], OLD);
+    let note = fake(&s.state).add_managed_item("agent_note", &["http://127.0.0.1:9"], old());
     fake(&s.state).edit_item(&note, |e| {
         e.kind = crate::vault::model::ItemKind::SecureNote
     });
@@ -512,7 +529,7 @@ async fn only_a_login_with_a_password_and_no_reprompt_that_is_unique_can_be_rota
         }
     }
     // Two items with one name: ambiguous (the ordinary conflict, no code).
-    fake(&s.state).add_managed_item(NAME, &["http://127.0.0.1:9"], OLD);
+    fake(&s.state).add_managed_item(NAME, &["http://127.0.0.1:9"], old());
     let (st, resp) = s.start(&token, NAME).await;
     assert_eq!(st, StatusCode::CONFLICT, "{resp}");
     assert!(resp.get("code").is_none());
@@ -682,7 +699,7 @@ async fn an_undecided_start_is_pending_and_the_identical_retry_uses_the_approval
 async fn an_approval_covers_one_operation_only() {
     let s = setup(|c| c.approval.max_pending_per_key = 50).await;
     let token = s.key("agent-a").await;
-    let other_item = fake(&s.state).add_managed_item("agent_other", &["http://127.0.0.1:9"], OLD);
+    let other_item = fake(&s.state).add_managed_item("agent_other", &["http://127.0.0.1:9"], old());
     let (_, resp) = s.start(&token, NAME).await;
     let id = resp["approval_id"].as_str().unwrap().to_string();
     s.decide(&id, "approve", None).await;
@@ -772,7 +789,7 @@ async fn a_change_by_someone_else_is_a_conflict_and_is_recorded() {
         .unwrap()
         .contains("Nothing was overwritten"));
     // The password is the one it was; the pending value is still there.
-    assert_eq!(fake(&s.state).password_of(&s.item).as_deref(), Some(OLD));
+    assert_eq!(fake(&s.state).password_of(&s.item).as_deref(), Some(old()));
     assert!(fake(&s.state).next_of(&s.item).is_some());
     let ev = &events_of(&s.state, "credential_rotate_commit")[0];
     assert_eq!(ev["event"]["outcome"], "failure");
@@ -798,7 +815,7 @@ async fn a_failed_write_is_a_502_and_leaves_no_value_anywhere() {
         (StatusCode::BAD_GATEWAY, Some("vault_write_failed"))
     );
     assert_eq!(fake(&s.state).next_of(&s.item), None);
-    assert!(!all_events_text(&s.state).contains(OLD));
+    assert!(!all_events_text(&s.state).contains(old()));
 }
 
 // ── The operator ──────────────────────────────────────────────────────────────
@@ -829,7 +846,7 @@ async fn an_operator_can_clear_a_stuck_rotation_and_an_agent_key_cannot() {
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body, json!({"status": "aborted", "name": NAME}));
     assert_eq!(fake(&s.state).next_of(&s.item), None);
-    assert_eq!(fake(&s.state).password_of(&s.item).as_deref(), Some(OLD));
+    assert_eq!(fake(&s.state).password_of(&s.item).as_deref(), Some(old()));
     let ev = events_of(&s.state, "credential_rotate_abort");
     assert_eq!(ev.len(), 1);
     assert_eq!(ev[0]["ferrowarden"]["details"]["by"], "admin");

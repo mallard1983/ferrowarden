@@ -1302,8 +1302,8 @@ async fn pending_rotation(h: &Harness, name: &str) -> String {
             items: 0,
         },
     ));
-    let id = fake.add_managed_item(name, &["https://svc.example.com"], "OLD-PASSWORD-VALUE");
-    fake.set_next(&id, "NEXT-PASSWORD-VALUE");
+    let id = fake.add_managed_item(name, &["https://svc.example.com"], old_value());
+    fake.set_next(&id, next_value());
     fake.edit_item(&id, |e| e.has_next = true);
     crate::vault::refresh::refresh_credentials(&h.app)
         .await
@@ -1323,7 +1323,7 @@ async fn the_approvals_page_lists_pending_rotations_and_aborts_one_after_a_sign_
     assert!(r.body.contains("agent_stuck"));
     assert!(r.body.contains("Abort rotation"));
     assert!(r.body.contains("action=\"/ui/rotations/abort\""));
-    assert!(!r.body.contains("NEXT-PASSWORD-VALUE") && !r.body.contains("OLD-PASSWORD-VALUE"));
+    assert!(!r.body.contains(next_value()) && !r.body.contains(old_value()));
     let csrf = r.csrf();
 
     // No CSRF token: refused, nothing changed.
@@ -1349,7 +1349,7 @@ async fn the_approvals_page_lists_pending_rotations_and_aborts_one_after_a_sign_
     assert_eq!(fake_vault(&h.app).next_of(&item), None);
     assert_eq!(
         fake_vault(&h.app).password_of(&item).as_deref(),
-        Some("OLD-PASSWORD-VALUE")
+        Some(old_value())
     );
     let ev = h.events_of("credential_rotate_abort");
     assert_eq!(ev.len(), 1);
@@ -1516,4 +1516,25 @@ async fn widening_the_rotate_list_needs_confirmation_and_narrowing_does_not() {
         .policy()
         .rotate
         .is_empty());
+}
+
+/// A test value made at run time (a fixed literal reads as a hard-coded
+/// password to static analysis), the same for the whole test process.
+fn random_value(cell: &'static std::sync::OnceLock<String>, tag: &str) -> &'static str {
+    cell.get_or_init(|| {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).expect("random bytes");
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        format!("{tag}-{hex}")
+    })
+}
+
+fn old_value() -> &'static str {
+    static CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    random_value(&CELL, "old")
+}
+
+fn next_value() -> &'static str {
+    static CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    random_value(&CELL, "next")
 }
