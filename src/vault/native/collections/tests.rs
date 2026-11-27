@@ -1,4 +1,5 @@
-use super::super::enc::test_support::{encrypt2, key};
+use super::super::enc::encrypt;
+use super::super::enc::test_support::key;
 use super::*;
 
 const ORG: &str = "org-1";
@@ -13,7 +14,7 @@ fn coll(id: &str, name: &str, read_only: Option<bool>, hide: Option<bool>) -> Ra
     RawCollection {
         id: id.to_string(),
         organization_id: Some(ORG.to_string()),
-        name: Some(encrypt2(&key(40), [7; 16], name.as_bytes())),
+        name: Some(encrypt(&key(40), name.as_bytes()).unwrap()),
         read_only,
         hide_passwords: hide,
     }
@@ -171,7 +172,7 @@ fn a_collection_without_an_organisation_is_not_usable() {
 fn a_name_that_will_not_decrypt_never_matches() {
     let mut c = writable(ID_A, "Mine");
     // Encrypted under a different key: the MAC fails.
-    c.name = Some(encrypt2(&key(99), [7; 16], b"Mine"));
+    c.name = Some(encrypt(&key(99), b"Mine").unwrap());
     assert_eq!(
         problem(evaluate(Some("Mine"), &[c.clone()], &orgs())),
         ManagedProblem::NotFound

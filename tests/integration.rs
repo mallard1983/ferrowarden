@@ -7476,14 +7476,6 @@ fn create_body(name: &str) -> Value {
     })
 }
 
-fn sha256_hex(text: &str) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(text.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 impl TestEnv {
     /// A key that may create `create` (patterns) and use every credential.
     /// Returns (name, id, token).
@@ -7516,11 +7508,13 @@ impl TestEnv {
     }
 
     /// The (non-secret) metadata of the item as an independent reader sees it:
-    /// logs in as the test account with Node's crypto, in the setup image, and
-    /// prints the SHA-256 of the password and the rest (docker/bw-read-item.js).
-    fn read_item(&self, name: &str) -> Value {
+    /// logs in as the test account with Node's crypto, in the setup image
+    /// (docker/bw-read-item.js). `expected` goes to the reader on stdin; it
+    /// answers only whether the stored password equals it, never the value.
+    fn read_item(&self, name: &str, expected: &str) -> Value {
+        use std::io::Write;
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let out = std::process::Command::new("docker")
+        let mut child = std::process::Command::new("docker")
             .current_dir(root)
             .args([
                 "compose",
@@ -7534,8 +7528,20 @@ impl TestEnv {
                 &format!("ITEM_NAME={name}"),
                 "vault-reader",
             ])
-            .output()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .expect("could not run docker compose for the independent reader");
+        child
+            .stdin
+            .take()
+            .expect("the reader's stdin")
+            .write_all(expected.as_bytes())
+            .expect("could not give the reader the expected value");
+        let out = child
+            .wait_with_output()
+            .expect("the independent reader did not finish");
         assert!(
             out.status.success(),
             "the independent reader failed: {}",
@@ -7675,7 +7681,7 @@ async fn test_create_approved_value_reaches_only_the_target_and_vaultwarden() {
 
     // The target (the new service's setup API) receives the password.
     let (status, answer) = use_created_password(&env, &token, &name).await;
-    assert_eq!(status, 200, "{answer}");
+    assert_eq!(status, 200, "the target accepted the created password");
     let value = env.latest_created_password().await;
     record_secret_for_gate(&value);
     assert_eq!(value.chars().count(), 40);
@@ -7747,12 +7753,11 @@ async fn test_create_approved_value_reaches_only_the_target_and_vaultwarden() {
     );
 
     // The independent reader: Node's crypto decrypts what Rust wrote.
-    let item = env.read_item(&name);
+    let item = env.read_item(&name, &value);
     assert_eq!(item["found"], true, "{item}");
     assert_eq!(item["count"], 1);
     assert_eq!(
-        item["passwordSha256"],
-        sha256_hex(&value).as_str(),
+        item["passwordMatches"], true,
         "the stored password is the one the target received"
     );
     assert_eq!(item["passwordLength"], 40);
@@ -7797,7 +7802,7 @@ async fn test_create_denied_writes_nothing() {
     );
 
     assert!(!env.lists(&token, &name).await);
-    let item = env.read_item(&name);
+    let item = env.read_item(&name, "");
     assert_eq!(item["found"], false, "nothing was written: {item}");
 
     // The identical retry: refused at once, with no new prompt.
@@ -8041,19 +8046,19 @@ async fn test_create_approval_required_makes_every_use_need_approval() {
     );
     let r = env.approve_api(open["id"].as_str().unwrap(), 5).await;
     assert_eq!(r.status(), 200);
-    let (status, answer) = use_it.await.unwrap();
-    assert_eq!(status, 200, "{answer}");
+    let (status, _answer) = use_it.await.unwrap();
+    assert_eq!(status, 200, "the target accepted the created password");
     let value = env.latest_created_password().await;
     record_secret_for_gate(&value);
     assert_eq!(value.chars().count(), 40);
 
-    let item = env.read_item(&name);
+    let item = env.read_item(&name, &value);
     assert_eq!(item["approvalField"], "required");
     assert_eq!(
         item["fieldNames"],
         json!(["ferrowarden_created_by", "ferrowarden_approval"])
     );
-    assert_eq!(item["passwordSha256"], sha256_hex(&value).as_str());
+    assert_eq!(item["passwordMatches"], true);
     env.revoke_key(&key_id).await;
 }
 

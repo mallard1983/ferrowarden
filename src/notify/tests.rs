@@ -743,12 +743,8 @@ fn names_are_reduced_to_a_safe_character_set() {
     assert_eq!(f.key_id.as_deref(), Some("idwithne"));
     // At most three names are spelled out.
     let n = Notification::render(Category::Blocked, &Kind::Blocked, f, 0, None);
-    assert!(n.message.contains("ok_name, a?"), "{}", n.message);
-    assert!(
-        n.message.contains(" and 2 more to api.example.com"),
-        "{}",
-        n.message
-    );
+    assert!(n.message.contains("ok_name, a?"));
+    assert!(n.message.contains(" and 2 more to api.example.com"));
 }
 
 #[test]

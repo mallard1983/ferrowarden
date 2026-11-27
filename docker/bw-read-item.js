@@ -10,7 +10,7 @@
  *
  *   {
  *     "found": true, "count": 1,
- *     "passwordSha256": "<hex sha-256 of the password>",   // never the password
+ *     "passwordMatches": true,      // equals the value given on stdin; never printed
  *     "passwordLength": 32,
  *     "username": "admin",
  *     "uris": ["https://..."],
@@ -22,15 +22,17 @@
  *     "type": 1, "hasItemKey": true, "totp": null, "notes": null
  *   }
  *
- * The password itself is never printed: only its SHA-256 (the test compares it
- * with the hash of what the target received). Test fixtures only: this logs in
- * with the master password of the throwaway test account.
+ * The password itself is never printed. The test writes the value the target
+ * received to stdin, and the reader says only whether the stored password is
+ * the same (a constant-time comparison). Test fixtures only: this logs in with
+ * the master password of the throwaway test account.
  *
  * Environment:
  *   BW_SERVER_URL          Vaultwarden base URL
  *   SETUP_EMAIL            the test account
  *   SETUP_MASTER_PASSWORD  its master password (or SETUP_MASTER_PASSWORD_FILE: a file with it)
  *   ITEM_NAME              the item to read (exact name)
+ * stdin: the expected password (may be empty: passwordMatches is then false)
  */
 
 const crypto = require('crypto');
@@ -46,6 +48,16 @@ const password  = process.env.SETUP_MASTER_PASSWORD ||
     ? fs.readFileSync(process.env.SETUP_MASTER_PASSWORD_FILE, 'utf8').trim()
     : undefined);
 const itemName  = process.env.ITEM_NAME;
+// What the test expects the password to be, from stdin (never printed).
+let expected = '';
+try { expected = fs.readFileSync(0, 'utf8'); } catch (_) { expected = ''; }
+
+/** Constant-time equality of two strings, without printing or hashing them. */
+function sameText(a, b) {
+  const x = Buffer.from(a, 'utf8');
+  const y = Buffer.from(b, 'utf8');
+  return x.length === y.length && x.length > 0 && crypto.timingSafeEqual(x, y);
+}
 const CLIENT_HEADERS = { 'Bitwarden-Client-Name': 'cli', 'Bitwarden-Client-Version': '2024.12.0' };
 
 if (!serverUrl || !email || !password || !itemName) {
@@ -105,7 +117,7 @@ async function main() {
     const fields = (c.fields || []).map((f) => ({ name: dec(key, f.name), value: dec(key, f.value) }));
     const field = (n) => (fields.find((f) => f.name === n) || {}).value ?? null;
     found.push({
-      passwordSha256: password_ === null ? null : crypto.createHash('sha256').update(password_, 'utf8').digest('hex'),
+      passwordMatches: password_ !== null && sameText(password_, expected),
       passwordLength: password_ === null ? null : [...password_].length,
       username: dec(key, l.username),
       uris: uris.map((u) => u.uri),
