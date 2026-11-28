@@ -6,7 +6,12 @@
 use super::*;
 use crate::vault::model::{RotationRecord, NEXT_FIELD, ROTATION_FIELD};
 
-const NEXT: &str = "PENDING-VALUE-0123456789";
+/// The pending value the tests rotate to: made once at run time (see
+/// `crate::test_values`), the same for the whole test process.
+fn next_value() -> &'static str {
+    static NEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NEXT.get_or_init(crate::test_values::random_secret)
+}
 
 /// The harness with `orgitem` (c3, organisation key) in the managed
 /// collection and `orgwithkey` (c4, its own key) in the other one.
@@ -25,7 +30,7 @@ async fn fresh_vault_on(h: &Harness) -> NativeVault {
 }
 
 fn next() -> Zeroizing<String> {
-    Zeroizing::new(NEXT.to_string())
+    Zeroizing::new(next_value().to_string())
 }
 
 fn cipher(h: &Harness, id: &str) -> Value {
@@ -98,7 +103,7 @@ async fn start_writes_only_the_two_reserved_fields_and_the_password_stays() {
     assert_eq!(fields.len(), 3);
     assert_eq!(fields[0], before["fields"][0]);
     assert_eq!(open(&h.acct.org, &fields[1]["name"]), NEXT_FIELD);
-    assert_eq!(open(&h.acct.org, &fields[1]["value"]), NEXT);
+    assert_eq!(open(&h.acct.org, &fields[1]["value"]), next_value());
     assert_eq!(fields[1]["type"], 1);
     // The record, in a second hidden field: the random id and the two
     // ciphertexts as they are.
@@ -108,7 +113,7 @@ async fn start_writes_only_the_two_reserved_fields_and_the_password_stays() {
     assert_eq!(record.from, before["login"]["password"].as_str().unwrap());
     assert_eq!(record.next, fields[1]["value"].as_str().unwrap());
     assert!(!body.to_string().contains("PASS-orgitem"));
-    assert!(!body.to_string().contains(NEXT));
+    assert!(!body.to_string().contains(next_value()));
     // The rotation id is the record's random id.
     assert_eq!(rid, record.id);
 
@@ -127,7 +132,7 @@ async fn start_writes_only_the_two_reserved_fields_and_the_password_stays() {
         "the reserved field is not offered as a field"
     );
     assert_eq!(password_of(&h, "c3").await, "PASS-orgitem");
-    assert_eq!(next_of(&h, "c3").await.unwrap(), NEXT);
+    assert_eq!(next_of(&h, "c3").await.unwrap(), next_value());
 }
 
 #[tokio::test]
@@ -150,7 +155,7 @@ async fn commit_makes_the_pending_value_the_password_and_keeps_the_old_one() {
     assert_eq!(body["fields"].as_array().unwrap().len(), 1);
 
     h.vault.sync().await.unwrap();
-    assert_eq!(password_of(&h, "c3").await, NEXT);
+    assert_eq!(password_of(&h, "c3").await, next_value());
     assert!(matches!(
         next_of(&h, "c3").await,
         Err(FerroError::CredentialNotFound(_))
@@ -176,7 +181,7 @@ async fn abort_removes_the_field_leaves_the_password_and_keeps_the_discarded_val
     let history = after["passwordHistory"].as_array().unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0]["password"], pending);
-    assert_eq!(open(&h.acct.org, &history[0]["password"]), NEXT);
+    assert_eq!(open(&h.acct.org, &history[0]["password"]), next_value());
     assert!(history[0]["lastUsedDate"].as_str().unwrap().ends_with('Z'));
 }
 
@@ -229,7 +234,7 @@ async fn a_persons_edit_of_the_notes_in_between_is_kept_and_the_commit_goes_thro
     assert_eq!(body["lastKnownRevisionDate"], "2026-11-26T11:30:00.000000Z");
     assert_eq!(cipher(&h, "c3")["notes"], human_notes);
     h.vault.sync().await.unwrap();
-    assert_eq!(password_of(&h, "c3").await, NEXT);
+    assert_eq!(password_of(&h, "c3").await, next_value());
 }
 
 /// A person changes the item's password (to a new ciphertext, a new revision).
@@ -567,7 +572,7 @@ async fn nothing_secret_is_in_the_debug_output_of_the_errors() {
         .rotate_start("c3", "orgitem", next())
         .await
         .unwrap_err();
-    assert!(!format!("{e:?} {e}").contains(NEXT));
+    assert!(!format!("{e:?} {e}").contains(next_value()));
 }
 
 // ── What a finish names ───────────────────────────────────────────────────────
@@ -708,7 +713,7 @@ async fn a_success_whose_answer_cannot_be_read_was_applied_and_is_a_success() {
     assert_eq!(h.mock.lock().unwrap().put_calls, 1, "not sent again");
     assert_eq!(h.mock.lock().unwrap().gets.len(), 1, "no read after it");
     h.vault.sync().await.unwrap();
-    assert_eq!(next_of(&h, "c3").await.unwrap(), NEXT);
+    assert_eq!(next_of(&h, "c3").await.unwrap(), next_value());
     h.vault.rotate_commit("c3", "orgitem", &rid).await.unwrap();
 
     // The commit and the abort do not need the answer at all.

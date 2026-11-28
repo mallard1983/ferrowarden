@@ -413,8 +413,12 @@ async fn next_is_substituted_with_its_own_value_and_the_password_with_its() {
         e.has_next = true;
         e
     };
-    vault.set_password("id-1", "CURRENT");
-    vault.set_next("id-1", "PENDING");
+    let (current, pending) = (
+        crate::test_values::random_secret(),
+        crate::test_values::random_secret(),
+    );
+    vault.set_password("id-1", &current);
+    vault.set_next("id-1", &pending);
     let creds: CredentialMap = [("svc".to_string(), vec![e])].into();
     let set: BTreeSet<Placeholder> =
         [ph("svc", Selector::Password), ph("svc", Selector::Next)].into();
@@ -426,6 +430,6 @@ async fn next_is_substituted_with_its_own_value_and_the_password_with_its() {
         &values,
         &SessionValues::new(),
     );
-    assert_eq!(out.as_str(), "old=CURRENT new=PENDING");
+    assert_eq!(out.as_str(), format!("old={current} new={pending}"));
     assert!(values.values().all(|r| r.scrub));
 }

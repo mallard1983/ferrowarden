@@ -1,14 +1,6 @@
 use super::*;
+use crate::test_values::random_secret;
 use crate::vault::model::ManagedCollection;
-
-/// A stand-in value made at run time: a fixed literal reads as a hard-coded
-/// password to static analysis.
-fn random_value(tag: &str) -> String {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).expect("random bytes");
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{tag}-{hex}")
-}
 
 fn managed() -> ManagedState {
     ManagedState::Usable(ManagedCollection {
@@ -23,7 +15,7 @@ fn managed() -> ManagedState {
 fn items_with_the_same_name_get_distinct_ids_and_their_own_state() {
     let v = FakeVault::default();
     v.set_managed(managed());
-    let (value_a, value_b) = (random_value("a"), random_value("b"));
+    let (value_a, value_b) = (random_secret(), random_secret());
     let a = v.add_managed_item("dup", &[], &value_a);
     let b = v.add_managed_item("dup", &[], &value_b);
     v.add_item("dup", &[]);
@@ -46,12 +38,12 @@ fn items_with_the_same_name_get_distinct_ids_and_their_own_state() {
 async fn a_created_item_never_reuses_an_id_either() {
     let v = FakeVault::default();
     v.set_managed(managed());
-    let seeded = v.add_managed_item("one", &[], &random_value("seed"));
+    let seeded = v.add_managed_item("one", &[], &random_secret());
     let new = |name: &str| NewLogin {
         name: name.to_string(),
         username: None,
         uris: vec![],
-        password: Zeroizing::new(random_value("new")),
+        password: Zeroizing::new(random_secret()),
         created_by: "k".to_string(),
         approval_required: false,
     };

@@ -6,8 +6,18 @@ use super::*;
 
 const REVISION: &str = "2026-11-26T10:00:00.123456Z";
 const NOW: &str = "2026-11-26T12:30:00.000Z";
-const NEXT: &str = "NEXT-VALUE-0123456789-abcdef";
-const OLD: &str = "OLD-VALUE-0123456789-abcdef";
+/// The pending value the tests rotate to: made once at run time (see
+/// `crate::test_values`), the same for the whole test process.
+fn next() -> &'static str {
+    static NEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NEXT.get_or_init(crate::test_values::random_secret)
+}
+/// The item's password before a rotation: made once at run time (see
+/// `crate::test_values`), the same for the whole test process.
+fn old() -> &'static str {
+    static OLD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OLD.get_or_init(crate::test_values::random_secret)
+}
 
 fn org_key() -> SymKey {
     key(40)
@@ -63,7 +73,7 @@ fn item(own_key: bool) -> (Value, SymKey) {
         "notes": enc("a human wrote this"),
         "login": {
             "username": enc("svc"),
-            "password": enc(OLD),
+            "password": enc(old()),
             "totp": enc("JBSWY3DPEHPK3PXP"),
             "uris": [{"uri": enc("https://a.example"), "uriChecksum": enc("checksum"), "match": null}],
             "passwordRevisionDate": "2026-02-02T00:00:00.000Z",
@@ -86,7 +96,7 @@ fn item(own_key: bool) -> (Value, SymKey) {
 
 /// The body of a start of `item`.
 fn start_body(item: &Value) -> Value {
-    start(item, &org_key(), REVISION, NEXT).unwrap().0
+    start(item, &org_key(), REVISION, next()).unwrap().0
 }
 
 /// The key the item's fields are encrypted with.
@@ -282,8 +292,8 @@ fn start_appends_a_hidden_field_with_the_new_value_under_the_items_key() {
         assert_eq!(added["type"], 1, "hidden");
         assert_eq!(added["linkedId"], Value::Null);
         assert_eq!(open(&k, &added["name"]), "ferrowarden_next");
-        assert_eq!(open(&k, &added["value"]), NEXT);
-        assert!(!body.to_string().contains(NEXT));
+        assert_eq!(open(&k, &added["value"]), next());
+        assert!(!body.to_string().contains(next()));
         // And the record: exactly three members, the two ciphertexts as they
         // are, under the item's key only.
         let rec = &fields[3];
@@ -296,7 +306,7 @@ fn start_appends_a_hidden_field_with_the_new_value_under_the_items_key() {
         assert_eq!(parsed["from"], before["login"]["password"]);
         assert_eq!(parsed["next"], added["value"]);
         assert_eq!(parsed["id"].as_str().unwrap().len(), 22);
-        assert!(!body.to_string().contains(OLD));
+        assert!(!body.to_string().contains(old()));
         // Not readable with another key.
         let other = EncString::parse(rec["value"].as_str().unwrap()).unwrap();
         assert!(other.decrypt_string(&key(99)).is_err());
@@ -309,7 +319,7 @@ fn start_on_an_item_without_fields_makes_the_list() {
     before["fields"] = Value::Null;
     let body = start_body(&before);
     assert_eq!(body["fields"].as_array().unwrap().len(), 2);
-    assert_eq!(open(&k, &body["fields"][0]["value"]), NEXT);
+    assert_eq!(open(&k, &body["fields"][0]["value"]), next());
     // And aborting it again leaves no list, as it was (the discarded value is
     // in the history).
     let mut again = before.clone();
@@ -323,25 +333,25 @@ fn start_on_an_item_without_fields_makes_the_list() {
 fn start_refuses_when_one_is_pending_or_the_item_is_not_a_login() {
     let (after, _) = started(true);
     assert_eq!(
-        start(&after, &org_key(), REVISION, NEXT).unwrap_err(),
+        start(&after, &org_key(), REVISION, next()).unwrap_err(),
         RotateError::AlreadyPending
     );
     let (mut note, _) = item(true);
     note["type"] = json!(2);
     assert_eq!(
-        start(&note, &org_key(), REVISION, NEXT).unwrap_err(),
+        start(&note, &org_key(), REVISION, next()).unwrap_err(),
         RotateError::NotRotatable
     );
     let (mut nopass, _) = item(true);
     nopass["login"]["password"] = Value::Null;
     assert_eq!(
-        start(&nopass, &org_key(), REVISION, NEXT).unwrap_err(),
+        start(&nopass, &org_key(), REVISION, next()).unwrap_err(),
         RotateError::NotRotatable
     );
     let (mut nologin, _) = item(true);
     nologin["login"] = Value::Null;
     assert_eq!(
-        start(&nologin, &org_key(), REVISION, NEXT).unwrap_err(),
+        start(&nologin, &org_key(), REVISION, next()).unwrap_err(),
         RotateError::NotRotatable
     );
 }
@@ -351,11 +361,11 @@ fn the_field_name_is_matched_trimmed_and_in_any_case() {
     let (mut before, k) = item(true);
     before["fields"].as_array_mut().unwrap().push(json!({
         "name": encrypt_str(&k, "  Ferrowarden_NEXT ").unwrap(),
-        "value": encrypt_str(&k, NEXT).unwrap(),
+        "value": encrypt_str(&k, next()).unwrap(),
         "type": 1, "linkedId": null,
     }));
     assert_eq!(
-        start(&before, &org_key(), REVISION, NEXT).unwrap_err(),
+        start(&before, &org_key(), REVISION, next()).unwrap_err(),
         RotateError::AlreadyPending
     );
     let record = RotationRecord {
@@ -381,7 +391,7 @@ fn more_than_one_pending_field_is_a_conflict_for_a_person_to_fix() {
         "type": 1, "linkedId": null,
     }));
     assert_eq!(
-        start(&after, &org_key(), REVISION, NEXT).unwrap_err(),
+        start(&after, &org_key(), REVISION, next()).unwrap_err(),
         RotateError::DuplicatePending
     );
     assert_eq!(
@@ -399,7 +409,7 @@ fn an_unreadable_field_name_stops_everything_rather_than_guessing() {
     let (mut before, _) = item(true);
     before["fields"][1]["name"] = json!(encrypt(&key(99), b"x").unwrap());
     assert!(matches!(
-        start(&before, &org_key(), REVISION, NEXT).unwrap_err(),
+        start(&before, &org_key(), REVISION, next()).unwrap_err(),
         RotateError::Crypto(_)
     ));
 }
@@ -417,14 +427,14 @@ fn commit_moves_the_pending_ciphertext_as_it_is_and_nothing_else_changes() {
         // The password is the pending ciphertext, byte for byte, and it opens
         // with the item's key to the new value.
         assert_eq!(body["login"]["password"], pending);
-        assert_eq!(open(&k, &body["login"]["password"]), NEXT);
+        assert_eq!(open(&k, &body["login"]["password"]), next());
         assert_eq!(body["login"]["passwordRevisionDate"], NOW);
         // The old ciphertext is the newest history entry.
         assert_eq!(
             body["passwordHistory"],
             json!([{ "password": old_password, "lastUsedDate": NOW }])
         );
-        assert_eq!(open(&k, &body["passwordHistory"][0]["password"]), OLD);
+        assert_eq!(open(&k, &body["passwordHistory"][0]["password"]), old());
         // The pending field is gone and the others are as they were.
         assert_eq!(body["fields"].as_array().unwrap().len(), 2);
         assert_eq!(
@@ -475,7 +485,7 @@ fn password_history_is_newest_first_and_keeps_five() {
     assert_eq!(history.len(), MAX_PASSWORD_HISTORY);
     // Newest first: the password that was just replaced, then the others in
     // the order they were; the oldest one fell off the end.
-    assert_eq!(open(&k, &history[0]["password"]), OLD);
+    assert_eq!(open(&k, &history[0]["password"]), old());
     assert_eq!(history[0]["lastUsedDate"], NOW);
     for i in 0..4 {
         assert_eq!(open(&k, &history[i + 1]["password"]), format!("H{i}"));
@@ -491,7 +501,7 @@ fn a_short_history_grows_by_one_at_the_front() {
     let body = commit(&after, &org_key(), REVISION, NOW, &rid(&after)).unwrap();
     let history = body["passwordHistory"].as_array().unwrap();
     assert_eq!(history.len(), 2);
-    assert_eq!(open(&k, &history[0]["password"]), OLD);
+    assert_eq!(open(&k, &history[0]["password"]), old());
     assert_eq!(open(&k, &history[1]["password"]), "H0");
 }
 
@@ -577,7 +587,7 @@ fn abort_removes_the_field_and_keeps_its_value_in_the_history() {
             body["passwordHistory"],
             json!([{ "password": pending, "lastUsedDate": NOW }])
         );
-        assert_eq!(open(&k, &body["passwordHistory"][0]["password"]), NEXT);
+        assert_eq!(open(&k, &body["passwordHistory"][0]["password"]), next());
         assert_eq!(body["lastKnownRevisionDate"], "REV-3");
     }
 }
@@ -592,7 +602,7 @@ fn an_abort_keeps_five_history_entries_newest_first() {
     let body = abort(&after, &org_key(), REVISION, NOW, &rid(&after)).unwrap();
     let history = body["passwordHistory"].as_array().unwrap();
     assert_eq!(history.len(), MAX_PASSWORD_HISTORY);
-    assert_eq!(open(&k, &history[0]["password"]), NEXT);
+    assert_eq!(open(&k, &history[0]["password"]), next());
     assert_eq!(open(&k, &history[1]["password"]), "H0");
     assert_eq!(open(&k, &history[4]["password"]), "H3");
 }
@@ -610,8 +620,8 @@ fn a_finish_names_the_rotation_and_nothing_else_is_written() {
     let (second, _) = started(true);
     assert_ne!(rid(&second), right);
     let (item_a, _) = item(true);
-    let ida = start(&item_a, &org_key(), REVISION, NEXT).unwrap().1;
-    let idb = start(&item_a, &org_key(), REVISION, NEXT).unwrap().1;
+    let ida = start(&item_a, &org_key(), REVISION, next()).unwrap().1;
+    let idb = start(&item_a, &org_key(), REVISION, next()).unwrap().1;
     assert_ne!(ida, idb);
 
     // Another id or an empty one: refused, both ways.
@@ -649,8 +659,8 @@ fn nothing_in_a_body_is_readable_text() {
     let body = start_body(&before);
     let text = body.to_string();
     for plain in [
-        NEXT,
-        OLD,
+        next(),
+        old(),
         "agent_service",
         "ferrowarden_next",
         "a human wrote this",
@@ -664,10 +674,10 @@ fn errors_carry_nothing_from_the_item() {
     // The Debug text of an error is a variant name.
     let (before, _) = item(true);
     let wrong = key(1);
-    let e = start(&before, &wrong, REVISION, NEXT).unwrap_err();
+    let e = start(&before, &wrong, REVISION, next()).unwrap_err();
     let text = format!("{e:?}");
     assert!(text.starts_with("Crypto"), "{text}");
-    assert!(!text.contains(NEXT));
+    assert!(!text.contains(next()));
 }
 
 // ── The record: a person's change is never replaced ──────────────────────────
@@ -700,7 +710,7 @@ fn the_same_password_text_encrypted_again_is_a_change() {
     // The record holds the stored ciphertext: a person saving the same text
     // again (a new IV) is a change like any other, and fails closed.
     let (mut after, k) = started(true);
-    after["login"]["password"] = json!(encrypt_str(&k, OLD).unwrap());
+    after["login"]["password"] = json!(encrypt_str(&k, old()).unwrap());
     assert_eq!(
         commit(&after, &org_key(), REVISION, NOW, &rid(&after)).unwrap_err(),
         RotateError::PasswordChanged
@@ -815,7 +825,7 @@ fn a_pending_field_without_a_record_and_a_record_without_a_pending_field() {
         abort(&stray, &org_key(), REVISION, NOW, &id).unwrap_err(),
         RotateError::NoPending
     );
-    let (body, new_id) = start(&stray, &org_key(), REVISION, NEXT).unwrap();
+    let (body, new_id) = start(&stray, &org_key(), REVISION, next()).unwrap();
     assert_ne!(new_id, id);
     // The two original fields, then the pending value and one fresh record.
     assert_eq!(body["fields"].as_array().unwrap().len(), 4);
@@ -830,7 +840,7 @@ fn a_start_matches_the_record_name_loosely() {
         "value": encrypt_str(&k, "stale").unwrap(),
         "type": 1, "linkedId": null,
     }));
-    let (body, _) = start(&before, &org_key(), REVISION, NEXT).unwrap();
+    let (body, _) = start(&before, &org_key(), REVISION, next()).unwrap();
     assert_eq!(body["fields"].as_array().unwrap().len(), 4);
     assert_eq!(open(&k, &body["fields"][3]["name"]), "ferrowarden_rotation");
 }
@@ -840,7 +850,7 @@ fn an_item_that_has_master_password_reprompt_now_is_never_rotated() {
     let (mut before, _) = item(true);
     before["reprompt"] = json!(1);
     assert_eq!(
-        start(&before, &org_key(), REVISION, NEXT).unwrap_err(),
+        start(&before, &org_key(), REVISION, next()).unwrap_err(),
         RotateError::NotRotatable
     );
     let (mut after, _) = started(true);

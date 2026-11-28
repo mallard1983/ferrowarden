@@ -17,6 +17,8 @@ mod proxy;
 mod rotate;
 mod sessions;
 mod state;
+#[cfg(test)]
+mod test_values;
 mod ui;
 mod vault;
 

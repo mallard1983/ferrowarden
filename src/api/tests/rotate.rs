@@ -19,21 +19,16 @@ const NAME: &str = "agent_keycloak_svc";
 /// A rotation id of the right shape that names no rotation.
 const DUMMY_ID: &str = "aaaaaaaaaaaaaaaaaaaaaa";
 
-/// A test value made at run time (a fixed literal reads as a hard-coded
-/// password to static analysis), the same for the whole test process.
-fn random_value(cell: &'static std::sync::OnceLock<String>, tag: &str) -> &'static str {
-    cell.get_or_init(|| {
-        let mut bytes = [0u8; 16];
-        getrandom::fill(&mut bytes).expect("random bytes");
-        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        format!("{tag}-{hex}")
-    })
+/// A stand-in secret made once at run time and kept for the whole test
+/// process (see `crate::test_values`).
+fn cached_secret(cell: &'static std::sync::OnceLock<String>) -> &'static str {
+    cell.get_or_init(crate::test_values::random_secret)
 }
 
 /// The item's password before a rotation.
 fn old() -> &'static str {
     static CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    random_value(&CELL, "current")
+    cached_secret(&CELL)
 }
 
 fn fake(state: &AppState) -> &FakeVault {
@@ -1094,7 +1089,7 @@ async fn a_pending_value_a_person_replaced_is_not_finished_by_the_old_id() {
     let token = s.key("agent-a").await;
     let rid = s.started(&token).await;
     // A person replaces the pending value in the vault: a new rotation id.
-    let replaced = fake(&s.state).set_next(&s.item, "a-value-a-person-chose");
+    let replaced = fake(&s.state).set_next(&s.item, &crate::test_values::random_secret());
     assert_ne!(replaced, rid);
     crate::vault::refresh::refresh_credentials(&s.state)
         .await
@@ -1325,8 +1320,7 @@ async fn a_commit_after_a_persons_password_change_is_a_conflict_and_an_abort_sti
     let s = setup(|_| {}).await;
     let token = s.key("agent-a").await;
     let rid = s.started(&token).await;
-    let person = format!("person-{}", random_value(&PERSON, "pw"));
-    static PERSON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let person = crate::test_values::random_secret();
     fake(&s.state).person_changes_password(&s.item, &person);
     for _ in 0..2 {
         let (st, resp) = s.finish(&token, NAME, "/commit", &rid).await;

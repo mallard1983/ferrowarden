@@ -8283,7 +8283,7 @@ const NO_SUCH_ROTATION: &str = "aaaaaaaaaaaaaaaaaaaaaa";
 
 /// The rotating service of the mock (tests/mock-api/server.py).
 const ROTATING_SETUP: &str = "/api/rotating/setup";
-const ROTATING_PASSWORD: &str = "/api/rotating/password";
+const ROTATING_CHANGE_PATH: &str = "/api/rotating/password";
 const ROTATING_LOGIN: &str = "/api/rotating/login";
 
 /// Percent-encode a credential name for a path: everything but letters, digits
@@ -8630,7 +8630,7 @@ async fn test_rotate_the_whole_loop_and_the_value_is_nowhere() {
     let (status, changed) = env
         .rotating(
             &token,
-            ROTATING_PASSWORD,
+            ROTATING_CHANGE_PATH,
             json!({
                 "old": format!("{{{{vault:{name}}}}}"),
                 "new": format!("{{{{vault:{name}:next}}}}"),
@@ -9022,7 +9022,7 @@ async fn test_rotate_a_persons_notes_edit_is_kept_and_the_commit_goes_through() 
     let (status, _) = env
         .rotating(
             &token,
-            ROTATING_PASSWORD,
+            ROTATING_CHANGE_PATH,
             json!({
                 "old": format!("{{{{vault:{name}}}}}"),
                 "new": format!("{{{{vault:{name}:next}}}}"),

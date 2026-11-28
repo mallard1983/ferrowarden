@@ -1612,23 +1612,18 @@ async fn widening_the_rotate_list_needs_confirmation_and_narrowing_does_not() {
         .is_empty());
 }
 
-/// A test value made at run time (a fixed literal reads as a hard-coded
-/// password to static analysis), the same for the whole test process.
-fn random_value(cell: &'static std::sync::OnceLock<String>, tag: &str) -> &'static str {
-    cell.get_or_init(|| {
-        let mut bytes = [0u8; 16];
-        getrandom::fill(&mut bytes).expect("random bytes");
-        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        format!("{tag}-{hex}")
-    })
+/// A stand-in secret made once at run time and kept for the whole test
+/// process (see `crate::test_values`).
+fn cached_secret(cell: &'static std::sync::OnceLock<String>) -> &'static str {
+    cell.get_or_init(crate::test_values::random_secret)
 }
 
 fn old_value() -> &'static str {
     static CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    random_value(&CELL, "old")
+    cached_secret(&CELL)
 }
 
 fn next_value() -> &'static str {
     static CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    random_value(&CELL, "next")
+    cached_secret(&CELL)
 }
