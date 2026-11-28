@@ -41,8 +41,8 @@
 //!    cache is refreshed.
 //!
 //! **A finish names what it finishes.** A start answers with a `rotation_id`,
-//! an opaque identifier of exactly that pending value (a digest of its
-//! ciphertext). A commit or an abort must send it, and the write happens only
+//! an opaque identifier of exactly that rotation (random, kept on
+//! the item). A commit or an abort must send it, and the write happens only
 //! if the pending value found on the item now has that id: a replayed or
 //! stale request cannot finish a rotation it did not start
 //! (`rotation_mismatch`).
@@ -118,7 +118,7 @@ impl RotatePayload {
 #[derive(Serialize)]
 struct Canonical<'a> {
     kind: &'static str,
-    key: &'a str,
+    agent: &'a str,
     item: &'a str,
     name: &'a str,
     charset: &'a str,
@@ -131,10 +131,10 @@ impl RotateRequest {
     /// same request from the same key for the same item has the same
     /// fingerprint; change any of them, or ask from another key, or for
     /// another item that happens to have the name, and it differs.
-    pub fn fingerprint(&self, key_id: &str, item_id: &str, name: &str) -> String {
+    pub fn fingerprint(&self, agent_id: &str, item_id: &str, name: &str) -> String {
         let canonical = Canonical {
             kind: "rotate",
-            key: key_id,
+            agent: agent_id,
             item: item_id,
             name,
             charset: self.charset.as_str(),
@@ -226,8 +226,8 @@ pub struct Started {
     pub current: String,
     /// `{{vault:NAME:next}}`: the new password, until it is committed.
     pub next: String,
-    /// Identifies exactly this pending value (a digest of its ciphertext, not
-    /// of the password). A commit and an abort must send it back.
+    /// Identifies exactly this rotation (a random identifier). A commit and an
+    /// abort must send it back.
     pub rotation_id: String,
 }
 

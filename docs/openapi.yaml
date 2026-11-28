@@ -1813,7 +1813,7 @@ components:
           description: "`true` (present only then) when a rotation of this credential was started and is waiting to be committed or aborted."
         rotation_id:
           type: string
-          description: "The identifier of the pending value (a digest of its ciphertext, not of the password): what a commit or an abort must send. Present with `rotation_pending`, so that a start whose answer was lost can still be finished or aborted. Absent when the pending field cannot be named (a person has to fix the item)."
+          description: "The identifier of the rotation (random, not derived from anything): what a commit or an abort must send. Present with `rotation_pending`, so that a start whose answer was lost can still be finished or aborted. Absent when the pending field cannot be named (a person has to fix the item)."
         username:
           type: string
           description: Placeholder for the login username.
@@ -2124,7 +2124,7 @@ components:
           description: The placeholder for the new, pending password. It works only while the rotation is pending.
         rotation_id:
           type: string
-          description: "Identifies exactly this pending value (a digest of its ciphertext, not of the password). Send it back to commit or abort this rotation; a request that names another rotation is refused and writes nothing."
+          description: "Identifies exactly this rotation (a random identifier). Send it back to commit or abort this rotation; a request that names another rotation is refused and writes nothing."
     RotateFinished:
       type: object
       required: [name, placeholder]

@@ -46,47 +46,61 @@ pub fn is_next_field_name(name: &str) -> bool {
     name.trim().eq_ignore_ascii_case(NEXT_FIELD)
 }
 
-/// Name of the second reserved **hidden** custom field of a rotation: it holds
-/// [`password_base_of_ciphertext`] of the item's password as it was when the
-/// rotation started, so that a commit can tell that a person changed the
-/// password since (docs/managed-credentials.md). Written and removed with
-/// `ferrowarden_next`; never offered as a `field:` placeholder, never listed.
-pub const NEXT_BASE_FIELD: &str = "ferrowarden_next_base";
+/// Name of the second reserved **hidden** custom field of a rotation: the
+/// rotation record ([`RotationRecord`]), written in the same edit as
+/// `ferrowarden_next` and removed with it, so that a commit can tell that a
+/// person changed the password or replaced the pending value since
+/// (docs/managed-credentials.md). Never offered as a `field:` placeholder,
+/// never listed.
+pub const ROTATION_FIELD: &str = "ferrowarden_rotation";
 
-/// Is `name` the reserved base field? Trimmed and case-insensitive, like
-/// [`is_next_field_name`].
-pub fn is_next_base_field_name(name: &str) -> bool {
-    name.trim().eq_ignore_ascii_case(NEXT_BASE_FIELD)
+/// Is `name` the reserved rotation-record field? Trimmed and case-insensitive,
+/// like [`is_next_field_name`].
+pub fn is_rotation_field_name(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case(ROTATION_FIELD)
 }
 
-/// First 16 bytes of the SHA-256 of `ciphertext` (an EncString's text), as
-/// base64url without padding.
-fn ciphertext_digest(ciphertext: &str) -> String {
-    use base64::Engine;
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(ciphertext.as_bytes());
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..16])
+/// The content of the `ferrowarden_rotation` field (a JSON object, encrypted
+/// under the item's key like every field value). Nothing in it is derived from
+/// anything: the id is random, and the two texts are ciphertexts kept as they
+/// are, compared by plain equality.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RotationRecord {
+    /// The identifier of this rotation: random, shown in the detailed listing,
+    /// named by a commit or an abort.
+    pub id: String,
+    /// The ciphertext text of `login.password` when the rotation started.
+    pub from: String,
+    /// The ciphertext text of the `ferrowarden_next` field as it was written.
+    pub next: String,
 }
 
-/// The digest of the **ciphertext** of the item's `login.password` (the
-/// EncString text as the server holds it), kept in the base field. It is a
-/// digest of the encrypted text, never of the password: it changes when the
-/// stored password changes, and tells nothing about the password.
-pub fn password_base_of_ciphertext(password_ciphertext: &str) -> String {
-    ciphertext_digest(password_ciphertext)
-}
+impl RotationRecord {
+    /// A record with a fresh random id (16 bytes, base64url without padding).
+    /// `None` when the system has no randomness.
+    pub fn new(from: &str, next: &str) -> Option<Self> {
+        use base64::Engine;
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).ok()?;
+        Some(Self {
+            id: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),
+            from: from.to_string(),
+            next: next.to_string(),
+        })
+    }
 
-/// The identifier of one pending rotation value: the first 16 bytes of the
-/// SHA-256 of the **ciphertext** of the `ferrowarden_next` field (its
-/// EncString text, as the server holds it), as base64url without padding.
-///
-/// Nothing secret goes in: the input is the encrypted text, which is unique to
-/// each start (every encryption uses a fresh random IV), never the password.
-/// It is not a secret either, so it is shown in the detailed listing. A commit
-/// or an abort names it, so that it can only ever finish the one pending value
-/// the agent meant (docs/managed-credentials.md).
-pub fn rotation_id_of_ciphertext(pending_ciphertext: &str) -> String {
-    ciphertext_digest(pending_ciphertext)
+    /// The record's text, as stored (before encryption).
+    pub fn to_text(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// Read a record strictly: a JSON object with exactly these three
+    /// members, no duplicate or unknown member, and none empty.
+    pub fn parse(text: &str) -> Option<Self> {
+        let r: Self = crate::api::strict_json::parse_request(text.as_bytes()).ok()?;
+        (!r.id.is_empty() && !r.from.is_empty() && !r.next.is_empty()).then_some(r)
+    }
 }
 
 /// Kind of vault item.
@@ -207,7 +221,7 @@ pub struct CredentialEntry {
     /// A rotation has started and is waiting to be committed or aborted: the
     /// item has a `ferrowarden_next` field.
     pub has_next: bool,
-    /// The identifier of that pending value ([`rotation_id_of_ciphertext`]);
+    /// The identifier of that pending value ([`RotationRecord::id`]);
     /// `None` when none is pending, or when the item is not in a state that
     /// can be finished (two pending fields, or one without a value).
     pub rotation_id: Option<String>,

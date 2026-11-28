@@ -36,8 +36,8 @@ pub struct CredentialDetail {
     /// A rotation has been started on this credential and is pending.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rotation_pending: bool,
-    /// Identifies exactly the pending value (a digest of its ciphertext, not of
-    /// the password): what a commit or an abort must name. Shown so that an
+    /// Identifies exactly this rotation (a random identifier, not derived
+    /// from anything): what a commit or an abort must name. Shown so that an
     /// agent that lost the answer of a start can still finish the rotation it
     /// means. Omitted when the pending field cannot be named (a person has to
     /// fix the item).

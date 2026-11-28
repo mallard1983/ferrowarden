@@ -220,7 +220,7 @@ impl CreatePayload {
 /// What a fingerprint is made of, in a fixed order.
 #[derive(Serialize)]
 struct Canonical<'a> {
-    key: &'a str,
+    agent: &'a str,
     name: &'a str,
     username: Option<&'a str>,
     uris: Vec<&'a str>,
@@ -242,10 +242,10 @@ impl CreateRequest {
     /// options and the approval flag. The same request from the same key has
     /// the same fingerprint (the URIs in any order); change any field, or ask
     /// from another key, and it differs.
-    pub fn fingerprint(&self, key_id: &str) -> String {
+    pub fn fingerprint(&self, agent_id: &str) -> String {
         let uris = self.sorted_uris();
         let canonical = Canonical {
-            key: key_id,
+            agent: agent_id,
             name: &self.name,
             username: self.username.as_deref(),
             uris: uris.iter().map(String::as_str).collect(),

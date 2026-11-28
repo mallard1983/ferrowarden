@@ -4,9 +4,7 @@
 //! whose message says the client copy is out of date.
 
 use super::*;
-use crate::vault::model::{
-    password_base_of_ciphertext, rotation_id_of_ciphertext, NEXT_BASE_FIELD, NEXT_FIELD,
-};
+use crate::vault::model::{RotationRecord, NEXT_FIELD, ROTATION_FIELD};
 
 const NEXT: &str = "PENDING-VALUE-0123456789";
 
@@ -102,21 +100,17 @@ async fn start_writes_only_the_two_reserved_fields_and_the_password_stays() {
     assert_eq!(open(&h.acct.org, &fields[1]["name"]), NEXT_FIELD);
     assert_eq!(open(&h.acct.org, &fields[1]["value"]), NEXT);
     assert_eq!(fields[1]["type"], 1);
-    // The base: a digest of the ciphertext of the password the rotation starts
-    // from, in a second hidden field.
+    // The record, in a second hidden field: the random id and the two
+    // ciphertexts as they are.
     assert_eq!(fields[2]["type"], 1);
-    assert_eq!(open(&h.acct.org, &fields[2]["name"]), NEXT_BASE_FIELD);
-    assert_eq!(
-        open(&h.acct.org, &fields[2]["value"]),
-        password_base_of_ciphertext(before["login"]["password"].as_str().unwrap())
-    );
+    assert_eq!(open(&h.acct.org, &fields[2]["name"]), ROTATION_FIELD);
+    let record = RotationRecord::parse(&open(&h.acct.org, &fields[2]["value"])).unwrap();
+    assert_eq!(record.from, before["login"]["password"].as_str().unwrap());
+    assert_eq!(record.next, fields[1]["value"].as_str().unwrap());
     assert!(!body.to_string().contains("PASS-orgitem"));
     assert!(!body.to_string().contains(NEXT));
-    // The rotation id is the digest of the pending field's ciphertext.
-    assert_eq!(
-        rid,
-        rotation_id_of_ciphertext(fields[1]["value"].as_str().unwrap())
-    );
+    // The rotation id is the record's random id.
+    assert_eq!(rid, record.id);
 
     // After the next sync the item shows the pending rotation, the current
     // password is untouched and the pending one is reachable as `next`.
@@ -271,7 +265,7 @@ async fn a_persons_password_change_in_between_is_never_replaced_by_a_commit() {
     assert_eq!(cipher(&h, "c3")["login"]["password"], changed);
     assert_eq!(cipher(&h, "c3")["passwordHistory"], Value::Null);
 
-    // The same after a restart: the base is on the item, not in memory.
+    // The same after a restart: the record is on the item, not in memory.
     let h2 = fresh_vault_on(&h).await;
     let e = h2.rotate_commit("c3", "orgitem", &rid).await.unwrap_err();
     assert!(matches!(e, FerroError::VaultPasswordChanged), "{e}");
@@ -289,7 +283,7 @@ async fn a_persons_password_change_in_between_is_never_replaced_by_a_commit() {
 }
 
 #[tokio::test]
-async fn a_missing_repeated_or_unreadable_base_is_a_conflict_for_a_person_to_fix() {
+async fn a_missing_repeated_or_unreadable_record_is_a_conflict_for_a_person_to_fix() {
     for how in ["missing", "twice", "garbled", "empty"] {
         let h = unlocked_managed().await;
         let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
@@ -318,18 +312,20 @@ async fn a_missing_repeated_or_unreadable_base_is_a_conflict_for_a_person_to_fix
             .unwrap_err();
         assert!(matches!(e, FerroError::VaultConflict), "{how}: {e}");
         assert_eq!(puts(&h), writes, "{how}: nothing written");
-        // An abort still works, and removes every base field.
-        h.vault.rotate_abort("c3", "orgitem", &rid).await.unwrap();
-        assert_eq!(
-            cipher(&h, "c3")["fields"].as_array().unwrap().len(),
-            1,
-            "{how}"
-        );
+        // A person has to fix it: an abort cannot tell whose rotation it is
+        // either, and writes nothing.
+        let e = h
+            .vault
+            .rotate_abort("c3", "orgitem", &rid)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, FerroError::VaultConflict), "{how}: {e}");
+        assert_eq!(puts(&h), writes, "{how}: nothing written");
     }
 }
 
 #[tokio::test]
-async fn the_base_field_is_reserved_and_never_offered() {
+async fn the_record_field_is_reserved_and_never_offered() {
     let h = unlocked_managed().await;
     h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
     h.vault.sync().await.unwrap();
@@ -338,7 +334,7 @@ async fn the_base_field_is_reserved_and_never_offered() {
     assert!(entry
         .fields
         .iter()
-        .all(|f| f.name != NEXT_BASE_FIELD && f.name != NEXT_FIELD));
+        .all(|f| f.name != ROTATION_FIELD && f.name != NEXT_FIELD));
     // (A `field:` placeholder is planned from this listing, so it is unknown.)
 }
 
@@ -347,7 +343,7 @@ async fn a_stray_base_without_a_pending_value_is_dropped_by_the_next_start() {
     let h = unlocked_managed().await;
     let rid = h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
     {
-        // The pending field was removed by hand; the base stayed.
+        // The pending field was removed by hand; the record stayed.
         let mut m = h.mock.lock().unwrap();
         let c = m.ciphers.iter_mut().find(|c| c["id"] == "c3").unwrap();
         c["fields"].as_array_mut().unwrap().remove(1);
@@ -356,7 +352,7 @@ async fn a_stray_base_without_a_pending_value_is_dropped_by_the_next_start() {
     let _ = rid;
     h.vault.sync().await.unwrap();
     h.vault.rotate_start("c3", "orgitem", next()).await.unwrap();
-    // One pending field and one base field, not two.
+    // One pending field and one record field, not two.
     assert_eq!(cipher(&h, "c3")["fields"].as_array().unwrap().len(), 3);
 }
 
@@ -629,6 +625,12 @@ async fn a_person_replacing_the_pending_value_is_not_finished_by_the_old_id() {
         m.revision += 1;
     }
     h.vault.sync().await.unwrap();
+    // The listing still has the rotation's id (it is the record's).
+    let listed = h.vault.list_credentials().await.unwrap().map["orgitem"][0]
+        .rotation_id
+        .clone();
+    assert_eq!(listed.as_deref(), Some(rid.as_str()));
+    // The commit is refused, however often it is asked.
     for _ in 0..2 {
         let e = h
             .vault
@@ -636,23 +638,18 @@ async fn a_person_replacing_the_pending_value_is_not_finished_by_the_old_id() {
             .await
             .unwrap_err();
         assert!(matches!(e, FerroError::RotationMismatch(_)), "{e}");
-        let e = h
-            .vault
-            .rotate_abort("c3", "orgitem", &rid)
-            .await
-            .unwrap_err();
-        assert!(matches!(e, FerroError::RotationMismatch(_)), "{e}");
     }
     assert_eq!(puts(&h), 1, "only the start was ever written");
-    // The id of what is there now finishes it.
-    let now = h.vault.list_credentials().await.unwrap().map["orgitem"][0]
-        .rotation_id
-        .clone()
-        .unwrap();
-    assert_ne!(now, rid);
-    h.vault.rotate_commit("c3", "orgitem", &now).await.unwrap();
-    h.vault.sync().await.unwrap();
-    assert_eq!(password_of(&h, "c3").await, "PERSON-CHOSE-THIS");
+    assert_eq!(password_of(&h, "c3").await, "PASS-orgitem");
+    // The abort the id names still works: the replaced value goes to the
+    // password history, and the reserved fields are gone.
+    h.vault.rotate_abort("c3", "orgitem", &rid).await.unwrap();
+    let after = cipher(&h, "c3");
+    assert_eq!(after["fields"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        open(&h.acct.org, &after["passwordHistory"][0]["password"]),
+        "PERSON-CHOSE-THIS"
+    );
 }
 
 #[tokio::test]
@@ -663,7 +660,14 @@ async fn an_empty_or_blank_pending_value_is_refused_by_the_commit_and_the_placeh
         {
             let mut m = h.mock.lock().unwrap();
             let c = m.ciphers.iter_mut().find(|c| c["id"] == "c3").unwrap();
-            c["fields"][1]["value"] = enc(&h.acct.org, blank);
+            // The record names the value that is there, so that it is the
+            // value itself that is wrong.
+            let new_value = enc(&h.acct.org, blank);
+            let mut record =
+                RotationRecord::parse(&open(&h.acct.org, &c["fields"][2]["value"])).unwrap();
+            record.next = new_value.as_str().unwrap().to_string();
+            c["fields"][1]["value"] = new_value;
+            c["fields"][2]["value"] = enc(&h.acct.org, &record.to_text());
         }
         h.vault.sync().await.unwrap();
         // The placeholder: as if the item had no pending value.

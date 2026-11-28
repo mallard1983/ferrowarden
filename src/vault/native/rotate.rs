@@ -39,11 +39,12 @@
 //!
 //! * [`start`]: appends two hidden (type 1) custom fields, both encrypted
 //!   with the item's key: `ferrowarden_next`, whose value is the new
-//!   password, and `ferrowarden_next_base`, whose value is the digest
-//!   ([`password_base_of_ciphertext`]) of the **ciphertext** of the password
-//!   the rotation starts from. The base is what lets a commit notice, durably
-//!   (it lives on the item, so it survives a restart), that a person changed
-//!   the password since.
+//!   password, and `ferrowarden_rotation`, the rotation record
+//!   ([`RotationRecord`]): a random rotation id, the **ciphertext text** of
+//!   the password the rotation starts from, and the ciphertext text of the
+//!   pending field. Nothing is hashed. The record lets a commit notice,
+//!   durably (it lives on the item, so it survives a restart), that a person
+//!   changed the password or replaced the pending value since.
 //! * [`commit`]: `login.password` becomes the pending field's ciphertext **as
 //!   it is** (same key, nothing decrypted and re-encrypted for it; it is first
 //!   checked to decrypt under the item's key, and the commit fails closed if
@@ -51,22 +52,25 @@
 //!   `passwordHistory` as `{ password, lastUsedDate }` (newest first, at most
 //!   five entries kept, the way the Bitwarden clients keep it),
 //!   `login.passwordRevisionDate` is set to now, and both reserved fields are
-//!   removed. The commit first checks that the password is still the one the
-//!   base names ([`RotateError::PasswordChanged`] otherwise, nothing written;
-//!   a missing, repeated or unreadable base is [`RotateError::CorruptPending`]).
-//!   Every other member, a person's edit of the notes, URIs or other fields
-//!   included, is kept as read.
-//! * [`abort`]: both reserved fields are removed (the base is not checked: a
-//!   person can always abort), and the pending value's ciphertext **as it is**
-//!   goes to the front of `passwordHistory` (`{ password, lastUsedDate }`, at
-//!   most five entries): if the service had in fact already switched to the
-//!   pending password, a person can still recover it from the item's
-//!   password history. Nothing is ever lost from the vault.
+//!   removed. The commit first checks the record: its id is the one named and
+//!   the pending field is still the text the record holds
+//!   ([`RotateError::RotationMismatch`] otherwise: another rotation, or a
+//!   person replaced the pending value), and the password is still the one the
+//!   record names ([`RotateError::PasswordChanged`]). Nothing is written in any
+//!   of those cases; a missing, repeated or unreadable record is
+//!   [`RotateError::CorruptPending`]. Every other member, a person's edit of
+//!   the notes, URIs or other fields included, is kept as read.
+//! * [`abort`]: both reserved fields are removed (only the id is checked, not
+//!   the password or the pending value: a person can always abort), and the
+//!   pending value's ciphertext **as it is** goes to the front of
+//!   `passwordHistory` (`{ password, lastUsedDate }`, at most five entries): if
+//!   the service had in fact already switched to the pending password, a
+//!   person can still recover it from the item's password history. Nothing is
+//!   ever lost from the vault.
 //!
-//! [`commit`] and [`abort`] each name the **rotation id** the caller means
-//! ([`rotation_id_of_ciphertext`] of the pending field's ciphertext): if the
-//! pending value found on the item now is another one (it was finished and
-//! another started, or a person replaced it), nothing is written
+//! [`commit`] and [`abort`] each name the **rotation id** the caller means (the
+//! record's random `id`): if the record on the item now is another one (it was
+//! finished and another started), nothing is written
 //! ([`RotateError::RotationMismatch`]).
 //!
 //! The item's encryption key is its own key (`key`, unwrapped with the
@@ -80,8 +84,7 @@ use zeroize::Zeroizing;
 use super::enc::{encrypt_str, EncError, EncString, SymKey};
 use super::keys::unwrap_sym_key;
 use crate::vault::model::{
-    is_next_base_field_name, is_next_field_name, password_base_of_ciphertext,
-    rotation_id_of_ciphertext, NEXT_BASE_FIELD, NEXT_FIELD,
+    is_next_field_name, is_rotation_field_name, RotationRecord, NEXT_FIELD, ROTATION_FIELD,
 };
 
 /// The members of an item's JSON that are the server's own and are not sent
@@ -168,17 +171,17 @@ fn item_key<'a>(org_key: &'a SymKey, item: &Value) -> Result<ItemKey<'a>, Rotate
 struct Reserved {
     /// The `ferrowarden_next` field.
     next: Option<usize>,
-    /// Every `ferrowarden_next_base` field (one is right).
-    bases: Vec<usize>,
+    /// Every `ferrowarden_rotation` field (one is right).
+    records: Vec<usize>,
 }
 
-/// The indices of the item's `ferrowarden_next` and `ferrowarden_next_base`
+/// The indices of the item's `ferrowarden_next` and `ferrowarden_rotation`
 /// fields. An error when there is more than one `ferrowarden_next`, or when a
 /// field's name cannot be read (it could be ours).
 fn find_reserved(key: &SymKey, item: &Value) -> Result<Reserved, RotateError> {
     let mut found = Reserved {
         next: None,
-        bases: Vec::new(),
+        records: Vec::new(),
     };
     let Some(fields) = item.get("fields").and_then(Value::as_array) else {
         return Ok(found);
@@ -195,8 +198,8 @@ fn find_reserved(key: &SymKey, item: &Value) -> Result<Reserved, RotateError> {
         if is_next_field_name(&name) && found.next.replace(i).is_some() {
             return Err(RotateError::DuplicatePending);
         }
-        if is_next_base_field_name(&name) {
-            found.bases.push(i);
+        if is_rotation_field_name(&name) {
+            found.records.push(i);
         }
     }
     Ok(found)
@@ -257,13 +260,36 @@ fn without_fields(body: &Value, indices: &[usize]) -> Value {
     }
 }
 
+/// The item's rotation record: there must be exactly one `ferrowarden_rotation`
+/// field, readable under the item's key, a strict JSON object of the record's
+/// three members. Anything else is [`RotateError::CorruptPending`].
+fn read_record(
+    key: &SymKey,
+    item: &Value,
+    reserved: &Reserved,
+) -> Result<RotationRecord, RotateError> {
+    let [index] = reserved.records[..] else {
+        return Err(RotateError::CorruptPending);
+    };
+    let text: Zeroizing<String> = item["fields"][index]
+        .get("value")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .ok_or(RotateError::CorruptPending)
+        .and_then(|v| {
+            EncString::parse(v)
+                .and_then(|e| e.decrypt_string(key))
+                .map_err(|_| RotateError::CorruptPending)
+        })?;
+    RotationRecord::parse(&text).ok_or(RotateError::CorruptPending)
+}
+
 /// Start: add the hidden `ferrowarden_next` field holding `next`, encrypted
-/// with the item's key, and the hidden `ferrowarden_next_base` field holding
-/// the digest of the ciphertext of the password the rotation starts from (a
-/// stray base field of an earlier rotation is dropped). Nothing else changes.
-/// `revision` is the item's `revisionDate` as it was read. Returns the body
-/// and the rotation id of the pending value (a digest of its ciphertext,
-/// never of `next`).
+/// with the item's key, and the hidden `ferrowarden_rotation` field holding the
+/// rotation record (a random id, the ciphertext of the password the rotation
+/// starts from, the ciphertext of the pending field). A stray record of an
+/// earlier rotation is dropped. Nothing else changes. `revision` is the item's
+/// `revisionDate` as it was read. Returns the body and the rotation id.
 pub fn start(
     item: &Value,
     org_key: &SymKey,
@@ -280,14 +306,15 @@ pub fn start(
         .get("password")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let base_field = json!({
+    let pending_ciphertext = encrypt_str(key.key(), next)?;
+    let record = RotationRecord::new(current_password, &pending_ciphertext)
+        .ok_or(RotateError::Crypto(EncError::Random))?;
+    let record_field = json!({
         "type": 1,
-        "name": encrypt_str(key.key(), NEXT_BASE_FIELD)?,
-        "value": encrypt_str(key.key(), &password_base_of_ciphertext(current_password))?,
+        "name": encrypt_str(key.key(), ROTATION_FIELD)?,
+        "value": encrypt_str(key.key(), &record.to_text())?,
         "linkedId": null,
     });
-    let pending_ciphertext = encrypt_str(key.key(), next)?;
-    let rotation_id = rotation_id_of_ciphertext(&pending_ciphertext);
     let field = json!({
         "type": 1,
         "name": encrypt_str(key.key(), NEXT_FIELD)?,
@@ -295,36 +322,26 @@ pub fn start(
         "linkedId": null,
     });
     let mut body = put_body(item.clone(), revision)?;
-    if !reserved.bases.is_empty() {
-        body["fields"] = without_fields(&body, &reserved.bases);
+    if !reserved.records.is_empty() {
+        body["fields"] = without_fields(&body, &reserved.records);
     }
     match body.get_mut("fields") {
         Some(Value::Array(fields)) => {
             fields.push(field);
-            fields.push(base_field);
+            fields.push(record_field);
         }
-        _ => body["fields"] = json!([field, base_field]),
+        _ => body["fields"] = json!([field, record_field]),
     }
-    Ok((body, rotation_id))
+    Ok((body, record.id))
 }
 
-/// The pending field's ciphertext, once it is known to be the one `rotation_id`
-/// names: it must have a value, and the value's digest must be that id.
-fn pending_ciphertext<'a>(
-    item: &'a Value,
-    index: usize,
-    rotation_id: &str,
-) -> Result<&'a str, RotateError> {
-    let ciphertext = item["fields"][index]
+/// The pending field's ciphertext, which must have a value.
+fn pending_ciphertext(item: &Value, index: usize) -> Result<&str, RotateError> {
+    item["fields"][index]
         .get("value")
         .and_then(Value::as_str)
         .filter(|v| !v.is_empty())
-        .ok_or(RotateError::CorruptPending)?;
-    // Not a secret: plain equality is enough.
-    if rotation_id_of_ciphertext(ciphertext) != rotation_id {
-        return Err(RotateError::RotationMismatch);
-    }
-    Ok(ciphertext)
+        .ok_or(RotateError::CorruptPending)
 }
 
 /// `passwordHistory` with `ciphertext` in front (newest first, at most
@@ -351,32 +368,22 @@ pub fn commit(
     let key = item_key(org_key, item)?;
     let reserved = find_reserved(key.key(), item)?;
     let index = reserved.next.ok_or(RotateError::NoPending)?;
-    let pending = pending_ciphertext(item, index, rotation_id)?.to_string();
-    // The password must still be the one the rotation started from: the base
-    // field is there, once, readable, and is the digest of the ciphertext of
-    // the password now. Otherwise a person changed it and the commit would
-    // replace their change.
+    let pending = pending_ciphertext(item, index)?.to_string();
+    let record = read_record(key.key(), item, &reserved)?;
+    // Not secrets: plain equality of ciphertext texts is enough. Another
+    // rotation, or a person replaced the pending value.
+    if record.id != rotation_id || record.next != pending {
+        return Err(RotateError::RotationMismatch);
+    }
+    // The password must still be the one the rotation started from; otherwise
+    // a person changed it and the commit would replace their change.
     let old = login
         .get("password")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let [base_index] = reserved.bases[..] else {
-        return Err(RotateError::CorruptPending);
-    };
-    let base: Result<Zeroizing<String>, EncError> = item["fields"][base_index]
-        .get("value")
-        .and_then(Value::as_str)
-        .filter(|v| !v.is_empty())
-        .ok_or(EncError::Malformed)
-        .and_then(|v| EncString::parse(v).and_then(|e| e.decrypt_string(key.key())));
-    match base {
-        Ok(base) if !base.is_empty() => {
-            if base.as_str() != password_base_of_ciphertext(&old) {
-                return Err(RotateError::PasswordChanged);
-            }
-        }
-        _ => return Err(RotateError::CorruptPending),
+    if record.from != old {
+        return Err(RotateError::PasswordChanged);
     }
     // Fail closed: the pending value must be a readable password under this
     // item's key, or it never becomes the password. Empty or whitespace-only
@@ -391,15 +398,16 @@ pub fn commit(
     body["login"]["password"] = json!(pending);
     body["login"]["passwordRevisionDate"] = json!(now);
     with_history_entry(&mut body, &old, now);
-    let mut gone = reserved.bases.clone();
+    let mut gone = reserved.records.clone();
     gone.push(index);
     body["fields"] = without_fields(&body, &gone);
     Ok(body)
 }
 
-/// Abort: remove the pending field `rotation_id` names, and the base field,
-/// and keep the pending value in the front of the password history. The base is
-/// **not** checked: a person can always abort. Nothing else changes.
+/// Abort: remove the pending field and the record `rotation_id` names, and keep
+/// the pending value in the front of the password history. Only the id is
+/// checked, not the password or the pending value: a person can always abort.
+/// Nothing else changes.
 pub fn abort(
     item: &Value,
     org_key: &SymKey,
@@ -411,10 +419,14 @@ pub fn abort(
     let key = item_key(org_key, item)?;
     let reserved = find_reserved(key.key(), item)?;
     let index = reserved.next.ok_or(RotateError::NoPending)?;
-    let discarded = pending_ciphertext(item, index, rotation_id)?.to_string();
+    let discarded = pending_ciphertext(item, index)?.to_string();
+    let record = read_record(key.key(), item, &reserved)?;
+    if record.id != rotation_id {
+        return Err(RotateError::RotationMismatch);
+    }
     let mut body = put_body(item.clone(), revision)?;
     with_history_entry(&mut body, &discarded, now);
-    let mut gone = reserved.bases.clone();
+    let mut gone = reserved.records.clone();
     gone.push(index);
     body["fields"] = without_fields(&body, &gone);
     Ok(body)

@@ -88,8 +88,8 @@ pub trait Vault: Send + Sync {
     /// usable, the item is not in it, or a rotation is already pending
     /// (`RotationInProgress`). A change made to the item by someone else in
     /// the meantime is `VaultConflict`: it is never overwritten. Returns the
-    /// rotation id of the pending value (an opaque identifier of exactly this
-    /// value: a digest of its ciphertext). The caller syncs afterwards. `label`
+    /// rotation id of the rotation (an opaque, random identifier of exactly this
+    /// rotation). The caller syncs afterwards. `label`
     /// (the credential's name) is only used in error messages.
     async fn rotate_start(
         &self,

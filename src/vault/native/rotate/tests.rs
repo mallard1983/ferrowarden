@@ -89,16 +89,62 @@ fn start_body(item: &Value) -> Value {
     start(item, &org_key(), REVISION, NEXT).unwrap().0
 }
 
-/// The rotation id of the pending value, which these tests find in the
-/// second-to-last field of the item (the base field is the last).
+/// The key the item's fields are encrypted with.
+fn field_key(item: &Value) -> SymKey {
+    match item_key(&org_key(), item).unwrap() {
+        ItemKey::Org(_) => key(40),
+        ItemKey::Own(k) => k,
+    }
+}
+
+/// Where the rotation record is among the item's fields.
+fn record_index(item: &Value) -> usize {
+    let k = field_key(item);
+    item["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|f| open(&k, &f["name"]) == "ferrowarden_rotation")
+        .expect("a rotation record")
+}
+
+/// The rotation record of a started item.
+fn record_of(item: &Value) -> RotationRecord {
+    let k = field_key(item);
+    let text = open(&k, &item["fields"][record_index(item)]["value"]);
+    RotationRecord::parse(&text).expect("a readable record")
+}
+
+/// Put `record` in the item in place of its record.
+fn set_record(item: &mut Value, record: &RotationRecord) {
+    let k = field_key(item);
+    let i = record_index(item);
+    item["fields"][i]["value"] = json!(encrypt_str(&k, &record.to_text()).unwrap());
+}
+
+/// Put `text` (any text) in the item in place of its record's value.
+fn set_record_text(item: &mut Value, text: &str) {
+    let k = field_key(item);
+    let i = record_index(item);
+    item["fields"][i]["value"] = json!(encrypt_str(&k, text).unwrap());
+}
+
+/// Replace the pending field's value, and make the record agree with it, so
+/// that a test can look at what is wrong with the value itself.
+fn replace_pending(item: &mut Value, value: Value) {
+    let mut record = record_of(item);
+    item["fields"][2]["value"] = value.clone();
+    record.next = value
+        .as_str()
+        .filter(|v| !v.is_empty())
+        .unwrap_or("x")
+        .to_string();
+    set_record(item, &record);
+}
+
+/// The rotation id of the item's pending rotation (from its record).
 fn rid(item: &Value) -> String {
-    let fields = item["fields"].as_array().unwrap();
-    // A pending value that is missing or not text names nothing: any id.
-    rotation_id_of_ciphertext(
-        fields[fields.len() - 2]["value"]
-            .as_str()
-            .unwrap_or_default(),
-    )
+    record_of(item).id
 }
 
 fn started(own_key: bool) -> (Value, SymKey) {
@@ -238,16 +284,22 @@ fn start_appends_a_hidden_field_with_the_new_value_under_the_items_key() {
         assert_eq!(open(&k, &added["name"]), "ferrowarden_next");
         assert_eq!(open(&k, &added["value"]), NEXT);
         assert!(!body.to_string().contains(NEXT));
-        // And the base: the digest of the ciphertext of the password as it is.
-        let base = &fields[3];
-        assert_eq!(base["type"], 1, "hidden");
-        assert_eq!(base["linkedId"], Value::Null);
-        assert_eq!(open(&k, &base["name"]), "ferrowarden_next_base");
-        assert_eq!(
-            open(&k, &base["value"]),
-            password_base_of_ciphertext(before["login"]["password"].as_str().unwrap())
-        );
+        // And the record: exactly three members, the two ciphertexts as they
+        // are, under the item's key only.
+        let rec = &fields[3];
+        assert_eq!(rec["type"], 1, "hidden");
+        assert_eq!(rec["linkedId"], Value::Null);
+        assert_eq!(open(&k, &rec["name"]), "ferrowarden_rotation");
+        let text = open(&k, &rec["value"]);
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed.as_object().unwrap().len(), 3);
+        assert_eq!(parsed["from"], before["login"]["password"]);
+        assert_eq!(parsed["next"], added["value"]);
+        assert_eq!(parsed["id"].as_str().unwrap().len(), 22);
         assert!(!body.to_string().contains(OLD));
+        // Not readable with another key.
+        let other = EncString::parse(rec["value"].as_str().unwrap()).unwrap();
+        assert!(other.decrypt_string(&key(99)).is_err());
     }
 }
 
@@ -306,8 +358,17 @@ fn the_field_name_is_matched_trimmed_and_in_any_case() {
         start(&before, &org_key(), REVISION, NEXT).unwrap_err(),
         RotateError::AlreadyPending
     );
-    let pending_id = rotation_id_of_ciphertext(before["fields"][2]["value"].as_str().unwrap());
-    let aborted = abort(&before, &org_key(), REVISION, NOW, &pending_id).unwrap();
+    let record = RotationRecord {
+        id: "an-id".to_string(),
+        from: "f".to_string(),
+        next: before["fields"][2]["value"].as_str().unwrap().to_string(),
+    };
+    before["fields"].as_array_mut().unwrap().push(json!({
+        "name": encrypt_str(&k, " FERROWARDEN_Rotation").unwrap(),
+        "value": encrypt_str(&k, &record.to_text()).unwrap(),
+        "type": 1, "linkedId": null,
+    }));
+    let aborted = abort(&before, &org_key(), REVISION, NOW, "an-id").unwrap();
     assert_eq!(aborted["fields"].as_array().unwrap().len(), 2);
 }
 
@@ -437,7 +498,7 @@ fn a_short_history_grows_by_one_at_the_front() {
 #[test]
 fn a_pending_value_under_another_key_fails_the_commit_closed() {
     let (mut after, _) = started(true);
-    after["fields"][2]["value"] = json!(encrypt(&key(77), b"WRONG-KEY").unwrap());
+    replace_pending(&mut after, json!(encrypt(&key(77), b"WRONG-KEY").unwrap()));
     assert_eq!(
         commit(&after, &org_key(), REVISION, NOW, &rid(&after)).unwrap_err(),
         RotateError::CorruptPending
@@ -445,7 +506,7 @@ fn a_pending_value_under_another_key_fails_the_commit_closed() {
     // A pending value that is not an EncString, or is empty, the same.
     for bad in [json!("not an encstring"), json!(""), Value::Null] {
         let (mut again, _) = started(true);
-        again["fields"][2]["value"] = bad;
+        replace_pending(&mut again, bad);
         assert_eq!(
             commit(&again, &org_key(), REVISION, NOW, &rid(&again)).unwrap_err(),
             RotateError::CorruptPending
@@ -457,7 +518,7 @@ fn a_pending_value_under_another_key_fails_the_commit_closed() {
 ", "",
     ] {
         let (mut again, k) = started(true);
-        again["fields"][2]["value"] = json!(encrypt_str(&k, blank).unwrap());
+        replace_pending(&mut again, json!(encrypt_str(&k, blank).unwrap()));
         assert_eq!(
             commit(&again, &org_key(), REVISION, NOW, &rid(&again)).unwrap_err(),
             RotateError::CorruptPending,
@@ -477,11 +538,11 @@ fn a_pending_value_under_another_key_fails_the_commit_closed() {
 fn commit_without_a_pending_value_says_so() {
     let (before, _) = item(true);
     assert_eq!(
-        commit(&before, &org_key(), REVISION, NOW, &rid(&before)).unwrap_err(),
+        commit(&before, &org_key(), REVISION, NOW, "any-id").unwrap_err(),
         RotateError::NoPending
     );
     assert_eq!(
-        abort(&before, &org_key(), REVISION, NOW, &rid(&before)).unwrap_err(),
+        abort(&before, &org_key(), REVISION, NOW, "any-id").unwrap_err(),
         RotateError::NoPending
     );
 }
@@ -537,26 +598,23 @@ fn an_abort_keeps_five_history_entries_newest_first() {
 }
 
 #[test]
-fn a_finish_names_the_pending_value_and_nothing_else_is_written() {
+fn a_finish_names_the_rotation_and_nothing_else_is_written() {
     let (after, k) = started(true);
     let right = rid(&after);
-    // The id is a digest of the ciphertext (22 base64url characters), and it
-    // is not derived from the value: the same value, started twice, has two
-    // ids (a fresh random IV each time).
+    // The id is random (16 bytes, 22 base64url characters), not derived from
+    // anything: the same input, started twice, has two ids.
     assert_eq!(right.len(), 22);
     assert!(right
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
     let (second, _) = started(true);
     assert_ne!(rid(&second), right);
-    assert_eq!(
-        rotation_id_of_ciphertext(after["fields"][2]["value"].as_str().unwrap()),
-        right
-    );
+    let (item_a, _) = item(true);
+    let ida = start(&item_a, &org_key(), REVISION, NEXT).unwrap().1;
+    let idb = start(&item_a, &org_key(), REVISION, NEXT).unwrap().1;
+    assert_ne!(ida, idb);
 
-    // Another id, an empty one or one for a replaced value: refused, both ways.
-    let mut replaced = after.clone();
-    replaced["fields"][2]["value"] = json!(encrypt_str(&k, "SOMETHING-ELSE").unwrap());
+    // Another id or an empty one: refused, both ways.
     for wrong in [rid(&second), String::new(), "x".to_string()] {
         assert_eq!(
             commit(&after, &org_key(), REVISION, NOW, &wrong).unwrap_err(),
@@ -567,13 +625,19 @@ fn a_finish_names_the_pending_value_and_nothing_else_is_written() {
             RotateError::RotationMismatch
         );
     }
+    // A person replaced the pending value: the commit is refused, and the
+    // abort the id names still works (the replaced value goes to the history).
+    let mut replaced = after.clone();
+    replaced["fields"][2]["value"] = json!(encrypt_str(&k, "SOMETHING-ELSE").unwrap());
     assert_eq!(
         commit(&replaced, &org_key(), REVISION, NOW, &right).unwrap_err(),
         RotateError::RotationMismatch
     );
+    let body = abort(&replaced, &org_key(), REVISION, NOW, &right).unwrap();
+    assert_eq!(body["fields"].as_array().unwrap().len(), 2);
     assert_eq!(
-        abort(&replaced, &org_key(), REVISION, NOW, &right).unwrap_err(),
-        RotateError::RotationMismatch
+        body["passwordHistory"][0]["password"],
+        replaced["fields"][2]["value"]
     );
     // The right one works.
     assert!(commit(&after, &org_key(), REVISION, NOW, &right).is_ok());
@@ -606,7 +670,7 @@ fn errors_carry_nothing_from_the_item() {
     assert!(!text.contains(NEXT));
 }
 
-// ── The base: a person's password change is never replaced ────────────────────
+// ── The record: a person's change is never replaced ──────────────────────────
 
 #[test]
 fn a_commit_refuses_a_password_that_is_not_the_one_the_rotation_started_from() {
@@ -633,8 +697,8 @@ fn a_commit_refuses_a_password_that_is_not_the_one_the_rotation_started_from() {
 
 #[test]
 fn the_same_password_text_encrypted_again_is_a_change() {
-    // The base is a digest of the stored ciphertext: a person saving the same
-    // text again (a new IV) is a change like any other, and fails closed.
+    // The record holds the stored ciphertext: a person saving the same text
+    // again (a new IV) is a change like any other, and fails closed.
     let (mut after, k) = started(true);
     after["login"]["password"] = json!(encrypt_str(&k, OLD).unwrap());
     assert_eq!(
@@ -644,54 +708,131 @@ fn the_same_password_text_encrypted_again_is_a_change() {
 }
 
 #[test]
-fn a_missing_repeated_or_unreadable_base_fails_the_commit_closed() {
+fn a_replaced_pending_value_is_a_mismatch_for_a_commit() {
+    let (mut after, k) = started(true);
+    let right = rid(&after);
+    after["fields"][2]["value"] = json!(encrypt_str(&k, "A-PERSONS-OWN-VALUE").unwrap());
+    assert_eq!(
+        commit(&after, &org_key(), REVISION, NOW, &right).unwrap_err(),
+        RotateError::RotationMismatch
+    );
+}
+
+#[test]
+fn a_missing_repeated_or_unreadable_record_fails_closed() {
     let broken = |how: &str| {
-        let (mut after, k) = started(true);
-        let fields = after["fields"].as_array_mut().unwrap();
+        let (mut after, _) = started(true);
+        let good = record_of(&after);
         match how {
             "missing" => {
-                fields.pop();
+                after["fields"].as_array_mut().unwrap().pop();
             }
             "twice" => {
-                let again = fields[3].clone();
-                fields.push(again);
+                let again = after["fields"][3].clone();
+                after["fields"].as_array_mut().unwrap().push(again);
             }
-            "garbled" => fields[3]["value"] = json!("not an encstring"),
-            "empty" => fields[3]["value"] = json!(""),
-            "other key" => fields[3]["value"] = json!(encrypt(&key(77), b"x").unwrap()),
-            _ => fields[3]["value"] = json!(encrypt_str(&k, "").unwrap()),
+            "garbled" => after["fields"][3]["value"] = json!("not an encstring"),
+            "empty" => after["fields"][3]["value"] = json!(""),
+            "other key" => after["fields"][3]["value"] = json!(encrypt(&key(77), b"x").unwrap()),
+            "not json" => set_record_text(&mut after, "not json at all"),
+            "array" => set_record_text(&mut after, "[1, 2, 3]"),
+            "unknown member" => set_record_text(
+                &mut after,
+                &json!({"id": good.id, "from": good.from, "next": good.next, "extra": 1})
+                    .to_string(),
+            ),
+            "duplicate member" => set_record_text(
+                &mut after,
+                &format!(
+                    r#"{{"id":"{}","id":"{}","from":"{}","next":"{}"}}"#,
+                    good.id, good.id, good.from, good.next
+                ),
+            ),
+            "missing member" => set_record_text(
+                &mut after,
+                &json!({"id": good.id, "next": good.next}).to_string(),
+            ),
+            "empty member" => set_record_text(
+                &mut after,
+                &json!({"id": good.id, "from": "", "next": good.next}).to_string(),
+            ),
+            _ => set_record_text(&mut after, ""),
         }
-        after
+        (after, good.id)
     };
-    for how in ["missing", "twice", "garbled", "empty", "other key", "blank"] {
-        let after = broken(how);
-        let pending_id = rotation_id_of_ciphertext(after["fields"][2]["value"].as_str().unwrap());
+    for how in [
+        "missing",
+        "twice",
+        "garbled",
+        "empty",
+        "other key",
+        "not json",
+        "array",
+        "unknown member",
+        "duplicate member",
+        "missing member",
+        "empty member",
+        "blank",
+    ] {
+        let (after, id) = broken(how);
         assert_eq!(
-            commit(&after, &org_key(), REVISION, NOW, &pending_id).unwrap_err(),
+            commit(&after, &org_key(), REVISION, NOW, &id).unwrap_err(),
             RotateError::CorruptPending,
             "{how}"
         );
-        // An abort never needs the base, and removes every base field.
-        let body = abort(&after, &org_key(), REVISION, NOW, &pending_id).unwrap();
-        assert_eq!(body["fields"].as_array().unwrap().len(), 2, "{how}");
+        assert_eq!(
+            abort(&after, &org_key(), REVISION, NOW, &id).unwrap_err(),
+            RotateError::CorruptPending,
+            "{how}"
+        );
     }
 }
 
 #[test]
-fn a_start_drops_a_stray_base_and_matches_the_names_loosely() {
+fn a_pending_field_without_a_record_and_a_record_without_a_pending_field() {
+    // Pending without a record.
+    let (mut after, _) = started(true);
+    let id = rid(&after);
+    after["fields"].as_array_mut().unwrap().pop();
+    assert_eq!(
+        commit(&after, &org_key(), REVISION, NOW, &id).unwrap_err(),
+        RotateError::CorruptPending
+    );
+    assert_eq!(
+        abort(&after, &org_key(), REVISION, NOW, &id).unwrap_err(),
+        RotateError::CorruptPending
+    );
+    // A record without a pending field: nothing to finish, and a start clears
+    // the stray record and writes a fresh one.
+    let (mut stray, _) = started(true);
+    let id = rid(&stray);
+    stray["fields"].as_array_mut().unwrap().remove(2);
+    assert_eq!(
+        commit(&stray, &org_key(), REVISION, NOW, &id).unwrap_err(),
+        RotateError::NoPending
+    );
+    assert_eq!(
+        abort(&stray, &org_key(), REVISION, NOW, &id).unwrap_err(),
+        RotateError::NoPending
+    );
+    let (body, new_id) = start(&stray, &org_key(), REVISION, NEXT).unwrap();
+    assert_ne!(new_id, id);
+    // The two original fields, then the pending value and one fresh record.
+    assert_eq!(body["fields"].as_array().unwrap().len(), 4);
+    assert_eq!(record_of(&body).id, new_id);
+}
+
+#[test]
+fn a_start_matches_the_record_name_loosely() {
     let (mut before, k) = item(true);
     before["fields"].as_array_mut().unwrap().push(json!({
-        "name": encrypt_str(&k, " Ferrowarden_NEXT_Base").unwrap(),
+        "name": encrypt_str(&k, " Ferrowarden_ROTATION").unwrap(),
         "value": encrypt_str(&k, "stale").unwrap(),
         "type": 1, "linkedId": null,
     }));
     let (body, _) = start(&before, &org_key(), REVISION, NEXT).unwrap();
-    // The two original fields, then the pending value and one fresh base.
     assert_eq!(body["fields"].as_array().unwrap().len(), 4);
-    assert_eq!(
-        open(&k, &body["fields"][3]["value"]),
-        password_base_of_ciphertext(before["login"]["password"].as_str().unwrap())
-    );
+    assert_eq!(open(&k, &body["fields"][3]["name"]), "ferrowarden_rotation");
 }
 
 #[test]

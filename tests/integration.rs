@@ -7526,6 +7526,12 @@ impl TestEnv {
         self.read_item_editing(name, stdin_text, edit_notes, None)
     }
 
+    /// Like [`Self::read_item_with`], first replacing the value of the item's
+    /// pending `ferrowarden_next` field, as a person editing it would.
+    fn read_item_replacing_pending(&self, name: &str, stdin_text: &str, pending: &str) -> Value {
+        self.read_item_all(name, stdin_text, None, None, Some(pending))
+    }
+
     /// Restart the Ferrowarden container and wait until it is healthy again
     /// (it unlocks itself from the secret file; its keys are on a volume).
     /// The HTTP client is replaced: its pooled keep-alive connections went to
@@ -7572,6 +7578,17 @@ impl TestEnv {
         edit_notes: Option<&str>,
         edit_password: Option<&str>,
     ) -> Value {
+        self.read_item_all(name, stdin_text, edit_notes, edit_password, None)
+    }
+
+    fn read_item_all(
+        &self,
+        name: &str,
+        stdin_text: &str,
+        edit_notes: Option<&str>,
+        edit_password: Option<&str>,
+        edit_pending: Option<&str>,
+    ) -> Value {
         use std::io::Write;
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut args = vec![
@@ -7592,6 +7609,10 @@ impl TestEnv {
         if let Some(password) = edit_password {
             args.push("-e".to_string());
             args.push(format!("EDIT_PASSWORD={password}"));
+        }
+        if let Some(pending) = edit_pending {
+            args.push("-e".to_string());
+            args.push(format!("EDIT_PENDING={pending}"));
         }
         args.push("vault-reader".to_string());
         let expected = stdin_text;
@@ -7731,7 +7752,7 @@ async fn test_create_approved_value_reaches_only_the_target_and_vaultwarden() {
     assert_eq!(approved, json!({"status": "approved", "kind": "create"}));
 
     let (status, created) = held.await.unwrap();
-    assert_eq!(status, 201, "{created}");
+    assert_eq!(status, 201, "the item was created");
     assert_eq!(created["name"], name.as_str());
     assert_eq!(created["placeholder"], format!("{{{{vault:{name}}}}}"));
     assert_eq!(created["cache_refreshed"], true);
@@ -7824,7 +7845,7 @@ async fn test_create_approved_value_reaches_only_the_target_and_vaultwarden() {
 
     // The independent reader: Node's crypto decrypts what Rust wrote.
     let item = env.read_item(&name, &value);
-    assert_eq!(item["found"], true, "{item}");
+    assert_eq!(item["found"], true, "the item was found");
     assert_eq!(item["count"], 1);
     assert_eq!(
         item["passwordMatches"], true,
@@ -7920,8 +7941,8 @@ async fn test_create_undecided_is_pending_then_the_retry_creates_it_once() {
 
     // The identical retry goes through, and the approval is used up.
     let resp = env.post_create(&token, &create_body(&name)).await;
-    let (status, created) = spec.check("/v1/credentials", "POST", resp).await;
-    assert_eq!(status, 201, "{created}");
+    let (status, _) = spec.check("/v1/credentials", "POST", resp).await;
+    assert_eq!(status, 201, "the item was created");
     assert!(env.lists(&token, &name).await);
 
     let resp = env.post_create(&token, &create_body(&name)).await;
@@ -8508,7 +8529,7 @@ async fn rotation_started(env: &TestEnv, key_name: &str, token: &str, name: &str
     env.approve_rotation(open["id"].as_str().unwrap(), "rotate")
         .await;
     let (status, started) = held.await.unwrap();
-    assert_eq!(status, 202, "{started}");
+    assert_eq!(status, 202, "the start was accepted");
     started
 }
 
@@ -8561,7 +8582,7 @@ async fn test_rotate_the_whole_loop_and_the_value_is_nowhere() {
 
     env.approve_rotation(&approval_id, "rotate").await;
     let (status, started) = held.await.unwrap();
-    assert_eq!(status, 202, "{started}");
+    assert_eq!(status, 202, "the start was accepted");
     let rotation_id = rotation_id_of(&started);
     assert_eq!(
         started,
@@ -8674,7 +8695,7 @@ async fn test_rotate_the_whole_loop_and_the_value_is_nowhere() {
     let (status, done) = env
         .rotation_finish(&token, &name, "/commit", &rotation_id)
         .await;
-    assert_eq!(status, 200, "{done}");
+    assert_eq!(status, 200, "the finish worked");
     assert_eq!(
         done,
         json!({"name": name, "placeholder": format!("{{{{vault:{name}}}}}")})
@@ -8704,7 +8725,7 @@ async fn test_rotate_the_whole_loop_and_the_value_is_nowhere() {
     // newest entry of the history, the pending field is gone, the password
     // date is set, and nothing else about the item changed.
     let item = env.read_item_with(&name, &format!("{new}\n{old}\n"), None);
-    assert_eq!(item["found"], true, "{item}");
+    assert_eq!(item["found"], true, "the item was found");
     assert_eq!(
         item["passwordMatches"], true,
         "the stored password is the new one"
@@ -8716,7 +8737,10 @@ async fn test_rotate_the_whole_loop_and_the_value_is_nowhere() {
         "the old password is in the history"
     );
     assert_eq!(item["hasNextField"], false);
-    assert!(item["passwordRevisionDate"].is_string(), "{item}");
+    assert!(
+        item["passwordRevisionDate"].is_string(),
+        "the password date is set"
+    );
     assert_eq!(item["username"], "svc-admin");
     assert_eq!(item["uris"], json!(["http://mock-api:7777"]));
     assert_eq!(item["checksumsValid"], true);
@@ -8832,7 +8856,7 @@ async fn test_rotate_abort_leaves_the_password_and_removes_the_field() {
     let (status, done) = env
         .rotation_finish(&token, &name, "/abort", &rotation_id)
         .await;
-    assert_eq!(status, 200, "{done}");
+    assert_eq!(status, 200, "the finish worked");
     assert_eq!(done["name"], name.as_str());
 
     let item = env.read_item_with(&name, &format!("{old}\n\n"), None);
@@ -8846,7 +8870,10 @@ async fn test_rotate_abort_leaves_the_password_and_removes_the_field() {
     // switched to it.
     assert_eq!(item["passwordHistoryCount"], 1);
     let item = env.read_item_with(&name, &format!("{old}\n{discarded}\n"), None);
-    assert_eq!(item["historyFirstMatches"], true, "{item}");
+    assert_eq!(
+        item["historyFirstMatches"], true,
+        "the pending value is kept"
+    );
     assert_eq!(item["fieldNames"], json!(["ferrowarden_created_by"]));
     assert_eq!(
         env.rotating_login(&token, &format!("{{{{vault:{name}}}}}"))
@@ -9016,7 +9043,7 @@ async fn test_rotate_a_persons_notes_edit_is_kept_and_the_commit_goes_through() 
         ),
         Some(human),
     );
-    assert_eq!(edited["edited"], true, "{edited}");
+    assert_eq!(edited["edited"], true, "the edit was saved");
     let item = env.read_item_with(
         &name,
         &format!(
@@ -9027,12 +9054,12 @@ async fn test_rotate_a_persons_notes_edit_is_kept_and_the_commit_goes_through() 
         None,
     );
     assert_eq!(item["hasNextField"], true);
-    assert_eq!(item["hasNextBaseField"], true);
+    assert_eq!(item["hasRotationField"], true);
 
-    let (status, done) = env
+    let (status, _) = env
         .rotation_finish(&token, &name, "/commit", &rotation_id)
         .await;
-    assert_eq!(status, 200, "{done}");
+    assert_eq!(status, 200, "the finish worked");
     let item = env.read_item_with(
         &name,
         &format!(
@@ -9046,7 +9073,7 @@ async fn test_rotate_a_persons_notes_edit_is_kept_and_the_commit_goes_through() 
     assert_eq!(item["passwordMatches"], true);
     assert_eq!(item["historyFirstMatches"], true);
     assert_eq!(item["hasNextField"], false);
-    assert_eq!(item["hasNextBaseField"], false);
+    assert_eq!(item["hasRotationField"], false);
     assert_eq!(item["fieldNames"], json!(["ferrowarden_created_by"]));
     assert_eq!(
         env.rotating_login(&token, &format!("{{{{vault:{name}}}}}"))
@@ -9058,7 +9085,7 @@ async fn test_rotate_a_persons_notes_edit_is_kept_and_the_commit_goes_through() 
 
 /// A person changes the item's **password** while the rotation is pending: the
 /// commit is refused with `409 vault_conflict`, also after Ferrowarden has
-/// restarted (the base is on the item, not in memory); nothing is replaced;
+/// restarted (the record is on the item, not in memory); nothing is replaced;
 /// an abort is always possible and keeps the pending value in the history.
 #[tokio::test]
 async fn test_rotate_a_persons_password_change_is_never_replaced_by_a_commit() {
@@ -9085,7 +9112,7 @@ async fn test_rotate_a_persons_password_change_is_never_replaced_by_a_commit() {
         None,
         Some(&person),
     );
-    assert_eq!(edited["edited"], true, "{edited}");
+    assert_eq!(edited["edited"], true, "the edit was saved");
 
     let refused = |status: u16, body: &Value| {
         assert_eq!(
@@ -9114,7 +9141,7 @@ async fn test_rotate_a_persons_password_change_is_never_replaced_by_a_commit() {
     assert_eq!(item["passwordMatches"], true, "the person's password stays");
     assert_eq!(item["passwordHistoryCount"], 0, "history untouched");
     assert_eq!(item["hasNextField"], true);
-    assert_eq!(item["hasNextBaseField"], true);
+    assert_eq!(item["hasRotationField"], true);
 
     // Ferrowarden restarts between the start and the commit: still refused.
     env.restart_ferrowarden();
@@ -9136,10 +9163,10 @@ async fn test_rotate_a_persons_password_change_is_never_replaced_by_a_commit() {
 
     // An abort works: both fields go, and the pending value is the newest
     // history entry.
-    let (status, done) = env
+    let (status, _) = env
         .rotation_finish(&token, &name, "/abort", &rotation_id)
         .await;
-    assert_eq!(status, 200, "{done}");
+    assert_eq!(status, 200, "the finish worked");
     let item = env.read_item_with(
         &name,
         &format!(
@@ -9151,10 +9178,91 @@ async fn test_rotate_a_persons_password_change_is_never_replaced_by_a_commit() {
     );
     assert_eq!(item["passwordMatches"], true);
     assert_eq!(item["hasNextField"], false);
-    assert_eq!(item["hasNextBaseField"], false);
+    assert_eq!(item["hasRotationField"], false);
     assert_eq!(item["passwordHistoryCount"], 1);
-    assert_eq!(item["historyFirstMatches"], true, "{item}");
+    assert_eq!(
+        item["historyFirstMatches"], true,
+        "the pending value is kept"
+    );
     assert_eq!(item["fieldNames"], json!(["ferrowarden_created_by"]));
+    env.revoke_key(&key_id).await;
+}
+
+/// A person replaces the value of the **pending field** while the rotation is
+/// pending: the commit is refused with `409 rotation_mismatch` (the record on
+/// the item names the value that was written), nothing is replaced, and an
+/// abort with the rotation id still works.
+#[tokio::test]
+async fn test_rotate_a_persons_replacement_of_the_pending_value_is_never_committed() {
+    let Some(env) = TestEnv::load() else {
+        return;
+    };
+    let (key_name, key_id, token) = env.rotator_key("rotate-pend", json!(["agent_*"])).await;
+    let name = created_name("pendedit");
+    let old = env.rotatable(&key_name, &token, &name).await;
+    let started = rotation_started(&env, &key_name, &token, &name).await;
+    let rotation_id = rotation_id_of(&started);
+    let discarded = env.pending_value_via_the_mock(&token, &name).await;
+
+    // A person replaces the pending value in the vault (a value made now).
+    let person = format!("person-{}-{}", unique_suffix(), unique_suffix());
+    record_secret_for_gate(&person);
+    let edited = env.read_item_replacing_pending(
+        &name,
+        &format!(
+            "{old}
+
+{discarded}"
+        ),
+        &person,
+    );
+    assert_eq!(edited["edited"], true, "the edit was saved");
+
+    let (status, body) = env
+        .rotation_finish(&token, &name, "/commit", &rotation_id)
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (409, Some("rotation_mismatch")),
+        "the commit is refused"
+    );
+    let item = env.read_item_with(
+        &name,
+        &format!(
+            "{old}
+
+{person}"
+        ),
+        None,
+    );
+    assert_eq!(item["passwordMatches"], true, "the password stays");
+    assert_eq!(item["nextMatches"], true, "the person's value stays");
+    assert_eq!(item["passwordHistoryCount"], 0, "history untouched");
+    assert_eq!(item["hasRotationField"], true);
+
+    // The abort the id names works: both fields go, and the replaced value is
+    // the newest history entry.
+    let (status, _) = env
+        .rotation_finish(&token, &name, "/abort", &rotation_id)
+        .await;
+    assert_eq!(status, 200, "the abort works");
+    let item = env.read_item_with(
+        &name,
+        &format!(
+            "{old}
+{person}
+"
+        ),
+        None,
+    );
+    assert_eq!(item["passwordMatches"], true);
+    assert_eq!(item["hasNextField"], false);
+    assert_eq!(item["hasRotationField"], false);
+    assert_eq!(item["passwordHistoryCount"], 1);
+    assert_eq!(
+        item["historyFirstMatches"], true,
+        "the replaced value is kept"
+    );
     env.revoke_key(&key_id).await;
 }
 
@@ -9170,8 +9278,8 @@ async fn test_rotate_a_finish_names_the_rotation_it_means() {
 
     // Rotation A: started and committed.
     let first = rotation_id_of(&rotation_started(&env, &key_name, &token, &name).await);
-    let (status, done) = env.rotation_finish(&token, &name, "/commit", &first).await;
-    assert_eq!(status, 200, "{done}");
+    let (status, _) = env.rotation_finish(&token, &name, "/commit", &first).await;
+    assert_eq!(status, 200, "the finish worked");
 
     // Rotation B starts. The agent, which lost the answer of A's commit, sends
     // it again: refused, and B is untouched.
@@ -9199,8 +9307,8 @@ async fn test_rotate_a_finish_names_the_rotation_it_means() {
     let _ = old;
 
     // The id in the listing finishes it, as it would for a lost start answer.
-    let (status, done) = env.rotation_finish(&token, &name, "/abort", &second).await;
-    assert_eq!(status, 200, "{done}");
+    let (status, _) = env.rotation_finish(&token, &name, "/abort", &second).await;
+    assert_eq!(status, 200, "the finish worked");
     // A commit or an abort without a rotation_id is a bad request.
     let resp = env.post_rotation(&token, &name, "/commit", None).await;
     assert_eq!(resp.status(), 400);
