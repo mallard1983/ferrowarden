@@ -24,16 +24,13 @@ fn the_api_approver_is_a_fixed_name_that_cannot_be_a_ui_account() {
 
 #[test]
 fn the_approve_body_is_strict() {
-    use crate::api::strict_json::parse_strict;
-    assert_eq!(
-        parse_strict::<ApproveRequest>(br#"{"minutes":15}"#)
-            .unwrap()
-            .minutes,
-        15
-    );
+    use crate::api::strict_json::parse_request;
+    let minutes = |b: &[u8]| parse_request::<ApproveBody>(b).map(|a| a.minutes);
+    assert_eq!(minutes(br#"{"minutes":15}"#).unwrap(), Some(15));
+    // No `minutes` parses (the handler decides by kind whether one is needed).
+    assert_eq!(minutes(br#"{}"#).unwrap(), None);
     for bad in [
-        &br#"{}"#[..],
-        br#"{"minutes":-1}"#,
+        &br#"{"minutes":-1}"#[..],
         br#"{"minutes":1.5}"#,
         br#"{"minutes":"15"}"#,
         br#"{"minutes":null}"#,
@@ -43,10 +40,6 @@ fn the_approve_body_is_strict() {
         br#"15"#,
         br#"null"#,
     ] {
-        assert!(
-            parse_strict::<ApproveRequest>(bad).is_err(),
-            "{}",
-            String::from_utf8_lossy(bad)
-        );
+        assert!(minutes(bad).is_err(), "{}", String::from_utf8_lossy(bad));
     }
 }

@@ -1,7 +1,7 @@
 use super::super::api::{RawLogin, RawUri};
 use super::super::enc::test_support::{encrypt2, key};
 use super::*;
-use crate::vault::model::APPROVAL_FIELD;
+use crate::vault::model::{FieldLookup, APPROVAL_FIELD};
 
 // A synthetic vault: the user key, one organisation key, and items
 // encrypted the way a client does (with and without per-item keys).
@@ -546,4 +546,95 @@ fn an_unreadable_approval_field_leaves_the_item_out_rather_than_unguarded() {
     let last = c.fields.as_mut().unwrap().last_mut().unwrap();
     last.name = Some("2.AAAA|BBBB|CCCC".to_string());
     assert!(build_metadata(&v.ring.view(), &c).is_err());
+}
+
+// ── The reserved pending-rotation field ───────────────────────────────────────
+
+fn with_next_field(v: &Vault, names_and_values: &[(&str, &str)]) -> RawCipher {
+    let mut c = login(&v.user);
+    for (name, value) in names_and_values {
+        c.fields.as_mut().unwrap().push(RawField {
+            name: e(&v.user, name),
+            value: e(&v.user, value),
+            field_type: 1,
+            linked_id: None,
+        });
+    }
+    c
+}
+
+#[test]
+fn an_item_without_a_pending_rotation_has_none() {
+    let v = vault();
+    let (_, entry) = build_metadata(&v.ring.view(), &login(&v.user)).unwrap();
+    assert!(!entry.has_next);
+    assert!(entry.collection_ids.is_empty());
+}
+
+#[test]
+fn a_pending_rotation_is_flagged_and_its_field_is_never_listed() {
+    let v = vault();
+    let before = build_metadata(&v.ring.view(), &login(&v.user)).unwrap().1;
+    for name in [
+        "ferrowarden_next",
+        "Ferrowarden_Next",
+        "  ferrowarden_next  ",
+    ] {
+        let c = with_next_field(&v, &[(name, "PENDING")]);
+        let (_, entry) = build_metadata(&v.ring.view(), &c).unwrap();
+        assert!(entry.has_next, "{name:?}");
+        // The listing's fields are those of the item without it.
+        assert_eq!(entry.fields, before.fields, "{name:?}");
+        assert!(matches!(
+            entry.field("ferrowarden_next"),
+            FieldLookup::Missing
+        ));
+    }
+    // Two of them are still flagged (the vault refuses to guess later).
+    let c = with_next_field(&v, &[("ferrowarden_next", "A"), ("ferrowarden_next", "B")]);
+    assert!(build_metadata(&v.ring.view(), &c).unwrap().1.has_next);
+}
+
+#[test]
+fn the_entry_carries_the_collections_of_the_item() {
+    let v = vault();
+    let mut c = login(&v.user);
+    c.collection_ids = vec!["c-1".into(), "c-2".into()];
+    let (_, entry) = build_metadata(&v.ring.view(), &c).unwrap();
+    assert_eq!(entry.collection_ids, ["c-1", "c-2"]);
+}
+
+#[test]
+fn the_pending_value_is_read_through_next_and_only_through_it() {
+    let v = vault();
+    let c = with_next_field(&v, &[("ferrowarden_next", "PENDING-VALUE")]);
+    let value = builtin_value(&v.ring.view(), &c, Builtin::Next, 0, "x").unwrap();
+    assert_eq!(value.as_str(), "PENDING-VALUE");
+    // The password is still the password.
+    let value = builtin_value(&v.ring.view(), &c, Builtin::Password, 0, "x").unwrap();
+    assert_eq!(value.as_str(), "PASS");
+    // The credential map never lists the field (see the test above), so a
+    // `field:ferrowarden_next` placeholder is refused before it gets here.
+}
+
+#[test]
+fn next_without_a_pending_value_is_not_found_and_two_of_them_are_ambiguous() {
+    let v = vault();
+    let none = builtin_value(&v.ring.view(), &login(&v.user), Builtin::Next, 0, "x");
+    assert!(matches!(none, Err(FerroError::CredentialNotFound(_))));
+
+    let two = with_next_field(&v, &[("ferrowarden_next", "A"), ("Ferrowarden_Next", "B")]);
+    let err = builtin_value(&v.ring.view(), &two, Builtin::Next, 0, "x").unwrap_err();
+    assert!(
+        matches!(&err, FerroError::AmbiguousField { field, .. } if field == "ferrowarden_next"),
+        "{err}"
+    );
+
+    // An empty value, or a value that is not readable, is not handed out.
+    let mut empty = with_next_field(&v, &[("ferrowarden_next", "x")]);
+    empty.fields.as_mut().unwrap().last_mut().unwrap().value = None;
+    assert!(builtin_value(&v.ring.view(), &empty, Builtin::Next, 0, "x").is_err());
+    let mut wrong = with_next_field(&v, &[("ferrowarden_next", "x")]);
+    wrong.fields.as_mut().unwrap().last_mut().unwrap().value = e(&key(99), "WRONG");
+    assert!(builtin_value(&v.ring.view(), &wrong, Builtin::Next, 0, "x").is_err());
 }

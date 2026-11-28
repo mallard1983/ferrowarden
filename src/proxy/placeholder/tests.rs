@@ -261,3 +261,30 @@ fn session_names() {
     assert!(!is_session_name("a{{b"));
     assert!(!is_session_name("é"));
 }
+
+#[test]
+fn the_next_selector_parses_renders_and_round_trips() {
+    assert_eq!(
+        one("{{vault:svc:next}}"),
+        ph("svc", Selector::Next),
+        "plain name"
+    );
+    assert_eq!(
+        one("{{vault:'Service (prod)':next}}"),
+        ph("Service (prod)", Selector::Next)
+    );
+    for name in ["svc", "Service (prod) 'x'", "a/b"] {
+        let p = ph(name, Selector::Next);
+        assert_eq!(one(&p.render()), p, "{name}");
+    }
+    assert_eq!(ph("svc", Selector::Next).render(), "{{vault:svc:next}}");
+    // `next` is not a field name, and nothing after it is accepted.
+    assert!(scan("{{vault:svc:next:x}}").is_err());
+    assert!(
+        scan("{{vault:svc:Next}}").is_err(),
+        "selectors are lower case"
+    );
+    assert!(scan("{{vault:svc:nexts}}").is_err());
+    // It is a distinct placeholder from the password.
+    assert_ne!(ph("svc", Selector::Next), ph("svc", Selector::Password));
+}

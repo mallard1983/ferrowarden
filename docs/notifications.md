@@ -28,7 +28,7 @@ handler -> EventLog::emit -> ring buffer, event writer -> stdout / file / syslog
 | `blocked` | A forward refused with reason `credential_host_not_allowed`, `target_blocked`, `credential_out_of_scope`, `method_not_allowed` or `reprompt_required` | high |
 | `auth_failure` | **Repeated** failed `agent_auth`, `admin_auth` or admin UI sign-ins from one source IP: at least `auth_failure_threshold` (default 5) within `auth_failure_window_secs` (default 300). Also immediately when the admin UI locks sign-ins out (`login_locked_out`) | high |
 | `vault` | The vault locked; an unlock or a sync failed; and a recovery notice when the vault unlocks again after a lock was notified | high, recovery normal |
-| `admin` | A key was created, revoked or had its policy changed; a successful admin UI sign-in; an agent **created a credential** ([managed-credentials.md](managed-credentials.md): the name and the key, never the password) | normal |
+| `admin` | A key was created, revoked or had its policy changed; a successful admin UI sign-in; an agent **created a credential**, or a rotation was **committed or aborted** ([managed-credentials.md](managed-credentials.md): the name and the key, never a password) | normal |
 | `system` | Security events were dropped (`events_dropped`); notifications were dropped; notifications paused by the hourly cap | high |
 | `approval` | A request is waiting for a person to approve or deny it: **one** prompt per new approval ([approvals.md](approvals.md)). Decisions and expiry are events, not prompts | high |
 

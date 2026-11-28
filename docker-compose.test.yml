@@ -65,6 +65,12 @@ services:
       # as in production (docs/tls.md).
       ROCKET_TLS: '{certs="/pki/vaultwarden.crt",key="/pki/vaultwarden.key"}'
       ROCKET_PORT: "443"
+      # The independent reader of the credential tests signs in with the master
+      # password for every check (docker/bw-read-item.js), and the rotation
+      # tests read an item several times each: Vaultwarden's default of ten
+      # sign-ins a minute is far too low for that. Test stack only.
+      LOGIN_RATELIMIT_MAX_BURST: "1000"
+      LOGIN_RATELIMIT_SECONDS: "1"
     volumes:
       - vaultwarden-test-data:/data
       - internal-pki:/pki:ro

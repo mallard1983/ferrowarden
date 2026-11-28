@@ -54,6 +54,19 @@ management endpoint, for tests only) so a test can hand it to the secret gate.
                                     GET /__issued__ as "created_password", so a
                                     test can compare it with what Vaultwarden
                                     stores and the secret gate can search for it)
+  A service whose password can be changed (credential rotation,
+  docs/managed-credentials.md). One account, one current password:
+    POST /api/rotating/setup        JSON {"password": ...} -> 200; sets the password
+    POST /api/rotating/password     JSON {"old": ..., "new": ...} -> 200 and the
+                                    password is now "new", but only when "old" is
+                                    the current one (else 401)
+    POST /api/rotating/login        JSON {"password": ...} -> 200 when it is the
+                                    current password, else 401
+                                    Every password this service is given is listed
+                                    at GET /__issued__ so the secret gate can search
+                                    for it: the one it is set up with as
+                                    "rotating_password", each replacement ("new") as
+                                    "rotated_password". None is ever put in a response.
   Careless targets
     GET  /api/reflect               returns every token it was sent in the body
                                     (raw, base64, URL-encoded), a header and an
@@ -97,8 +110,11 @@ LOGIN_PASSWORD = "test-full-pass-88880000"
 # Tokens issued by the login services, newest last.
 _issued: dict[str, list[str]] = {
     "portainer_jwt": [], "pve_ticket": [], "pve_csrf": [], "php_token": [],
-    "created_password": [],
+    "created_password": [], "rotating_password": [], "rotated_password": [],
 }
+
+# The rotating service's one account: its current password (never answered).
+_rotating: dict[str, str] = {"password": ""}
 
 
 def _make_php_token() -> str:
@@ -370,6 +386,41 @@ class RequestHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json(422, {"ok": False, "message": "no password"})
             return True
+
+        if path.startswith("/api/rotating/") and method == "POST":
+            try:
+                data = json.loads(body)
+            except ValueError:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            if path == "/api/rotating/setup":
+                password = data.get("password")
+                if isinstance(password, str) and password:
+                    with _lock:
+                        _rotating["password"] = password
+                        _issued["rotating_password"].append(password)
+                    self._send_json(200, {"ok": True})
+                else:
+                    self._send_json(422, {"ok": False, "message": "no password"})
+                return True
+            if path == "/api/rotating/password":
+                old, new = data.get("old"), data.get("new")
+                with _lock:
+                    allowed = (isinstance(old, str) and isinstance(new, str) and new
+                               and _rotating["password"] != "" and old == _rotating["password"])
+                    if allowed:
+                        _rotating["password"] = new
+                        _issued["rotated_password"].append(new)
+                self._send_json(200 if allowed else 401, {"ok": bool(allowed)})
+                return True
+            if path == "/api/rotating/login":
+                password = data.get("password")
+                with _lock:
+                    ok = (isinstance(password, str) and _rotating["password"] != ""
+                          and password == _rotating["password"])
+                self._send_json(200 if ok else 401, {"ok": bool(ok)})
+                return True
 
         if path == "/api/php/login" and method == "POST":
             token = _make_php_token()

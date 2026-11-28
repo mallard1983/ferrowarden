@@ -85,6 +85,14 @@ pub struct StoredKey {
         deserialize_with = "policy::stored_create"
     )]
     pub create: Option<Vec<String>>,
+    /// Credential name patterns this key may rotate in the managed
+    /// collection. Absent in entries written before rotating existed: `[]`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "policy::stored_rotate"
+    )]
+    pub rotate: Option<Vec<String>>,
 }
 
 impl StoredKey {
@@ -105,6 +113,7 @@ impl StoredKey {
             methods: Some(policy.methods.clone()),
             approval: Some(policy.approval.clone()),
             create: Some(policy.create.clone()),
+            rotate: Some(policy.rotate.clone()),
         }
     }
 
@@ -122,6 +131,7 @@ impl StoredKey {
             methods: self.methods.clone().unwrap_or_default(),
             approval: self.approval.clone().unwrap_or_default(),
             create: self.create.clone().unwrap_or_default(),
+            rotate: self.rotate.clone().unwrap_or_default(),
         }
     }
 
@@ -131,6 +141,7 @@ impl StoredKey {
         self.methods = Some(policy.methods.clone());
         self.approval = Some(policy.approval.clone());
         self.create = Some(policy.create.clone());
+        self.rotate = Some(policy.rotate.clone());
     }
 }
 
@@ -184,6 +195,9 @@ pub fn load(path: &Path) -> io::Result<Vec<StoredKey>> {
         }
         if let Some(list) = key.create.take() {
             key.create = Some(policy::validate_create(list).map_err(bad)?);
+        }
+        if let Some(list) = key.rotate.take() {
+            key.rotate = Some(policy::validate_rotate(list).map_err(bad)?);
         }
     }
     Ok(keys)

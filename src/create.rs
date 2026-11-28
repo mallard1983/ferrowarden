@@ -220,7 +220,7 @@ impl CreatePayload {
 /// What a fingerprint is made of, in a fixed order.
 #[derive(Serialize)]
 struct Canonical<'a> {
-    key: &'a str,
+    agent: &'a str,
     name: &'a str,
     username: Option<&'a str>,
     uris: Vec<&'a str>,
@@ -242,10 +242,10 @@ impl CreateRequest {
     /// options and the approval flag. The same request from the same key has
     /// the same fingerprint (the URIs in any order); change any field, or ask
     /// from another key, and it differs.
-    pub fn fingerprint(&self, key_id: &str) -> String {
+    pub fn fingerprint(&self, agent_id: &str) -> String {
         let uris = self.sorted_uris();
         let canonical = Canonical {
-            key: key_id,
+            agent: agent_id,
             name: &self.name,
             username: self.username.as_deref(),
             uris: uris.iter().map(String::as_str).collect(),
@@ -301,7 +301,7 @@ pub struct Created {
 /// Sync with the vault, so that what is checked next is not stale. A sync that
 /// fails is an error here (unlike a background refresh, which falls back to
 /// its cached copy): a name must not be checked against a copy that may be old.
-async fn fresh(state: &AppState) -> FerroResult<()> {
+pub(crate) async fn fresh(state: &AppState) -> FerroResult<()> {
     match state.vault.sync().await {
         Ok(()) => {}
         Err(FerroError::VaultLocked) => return Err(FerroError::VaultLocked),
@@ -384,6 +384,16 @@ async fn run_inner(
     // 6. One create at a time from here: of two requests for one name that
     // were both approved, the second sees the first's item and gets 409.
     let _one_at_a_time = state.create_lock.lock().await;
+    // The key's permission as it is now: the request may have waited a long
+    // time for the human and for the lock, and the key may have been revoked
+    // or narrowed since (nothing is written then).
+    let live = state
+        .live_key(&agent.id)
+        .await
+        .ok_or(FerroError::Unauthorized)?;
+    if !live.policy.allows_create(&req.name) {
+        return Err(FerroError::CredentialCreateOutOfScope(req.name.clone()));
+    }
     fresh(state).await?;
     ensure_absent(state, &req.name).await?;
 
@@ -397,7 +407,16 @@ async fn run_inner(
         approval_required: req.approval_required,
     };
     // The value moves into the vault call and is wiped when it is dropped.
-    state.vault.create_login(new).await?;
+    if let Err(e) = state.vault.create_login(new).await {
+        if matches!(e, FerroError::VaultWriteUnknown) {
+            // It may have been applied: bring the cache up to date, so that the
+            // agent's listing (and a retry's 409) show what is really there.
+            if let Err(e) = refresh_credentials(state).await {
+                tracing::warn!(error = %e, "The cache could not be refreshed after a write of unknown outcome");
+            }
+        }
+        return Err(e);
+    }
 
     // The write is done. A cache that cannot be refreshed does not undo it.
     let cache_refreshed = match refresh_credentials(state).await {

@@ -26,7 +26,7 @@ use axum::{
 };
 use chrono::Utc;
 
-use crate::api::approval_service;
+use crate::api::{approval_service, rotate_credential};
 use crate::approvals::{self, ApprovalNeed, GrantView, PendingView};
 use crate::error::FerroError;
 use crate::middleware::request_context::RequestContext;
@@ -34,7 +34,7 @@ use crate::ui::admin_pages::{begin_post, caller, fmt_time, nav};
 use crate::ui::handlers::{page, Reply};
 use crate::ui::pages::{
     ApprovalDetail, ApprovalListRow, ApprovalPage, ApprovalRow, ApprovalsPage, CreateRow, GrantRow,
-    Preset,
+    Preset, RotateRow, RotationRow,
 };
 use crate::ui::session::SessionView;
 use crate::ui::web::{parse_form, Transport};
@@ -55,6 +55,12 @@ fn notice_text(code: &str) -> Option<&'static str> {
         ),
         "approved_create" => Some(
             "Approved. Ferrowarden generates the password and stores the credential now; the agent never sees it. This approval covers that one credential only.",
+        ),
+        "approved_rotate" => Some(
+            "Approved. Ferrowarden generates the new password and stores it on the item as a pending value now; the current password stays until the agent commits. The agent never sees either. This approval covers that one rotation only.",
+        ),
+        "rotation_aborted" => Some(
+            "Rotation aborted. The pending new password was removed and the item's password is unchanged. The discarded value is kept in the item's password history in the vault.",
         ),
         "denied" => Some("Denied. The agent is refused for these credentials for a while."),
         "revoked" => Some("Grant revoked. The next request asks again."),
@@ -106,16 +112,31 @@ fn create_row(v: &PendingView) -> CreateRow {
     }
 }
 
+/// `rotate` details of a pending approval, for the detail page.
+fn rotate_row(v: &PendingView) -> RotateRow {
+    match &v.rotate {
+        None => RotateRow::default(),
+        Some(r) => RotateRow {
+            name: r.name.clone(),
+            charset: r.charset.clone(),
+            length: r.length,
+            collection: r.collection.clone(),
+        },
+    }
+}
+
 fn pending_row(v: &PendingView) -> ApprovalListRow {
     ApprovalListRow {
         id: v.id.clone(),
         kind: v.kind.as_str(),
         is_create: v.create.is_some(),
+        is_rotate: v.rotate.is_some(),
         key_name: v.key_name.clone(),
         collection: v
             .create
             .as_ref()
             .map(|c| c.collection.clone())
+            .or_else(|| v.rotate.as_ref().map(|r| r.collection.clone()))
             .unwrap_or_default(),
         credentials: v.items.iter().map(row).collect(),
         method: v.method.clone(),
@@ -169,6 +190,66 @@ async fn failed(ui: &UiState, view: &SessionView, e: &FerroError) -> Reply {
     match e {
         FerroError::ApprovalNotPending => no_longer_pending(ui, view).await,
         FerroError::GrantNotFound => grant_gone(ui, view).await,
+        FerroError::NoRotationPending(_) => {
+            ui.message_in(
+                view,
+                StatusCode::CONFLICT,
+                "No rotation pending",
+                "That credential has no pending rotation any more. Nothing was changed.",
+                BACK,
+            )
+            .await
+        }
+        FerroError::RotationMismatch(_) => {
+            ui.message_in(
+                view,
+                StatusCode::CONFLICT,
+                "That rotation has changed",
+                "The pending value is not the one this page showed: the rotation was finished or replaced since. Nothing was written. Reload the Approvals page and check again.",
+                BACK,
+            )
+            .await
+        }
+        FerroError::VaultItemGone => {
+            ui.message_in(
+                view,
+                StatusCode::CONFLICT,
+                "The item no longer exists",
+                "The item is gone from the vault. Nothing was changed.",
+                BACK,
+            )
+            .await
+        }
+        FerroError::VaultWriteUnknown => {
+            ui.message_in(
+                view,
+                StatusCode::BAD_GATEWAY,
+                "The result is not known",
+                "The write may have been applied. Reload the Approvals page and check the item in the vault before trying again.",
+                BACK,
+            )
+            .await
+        }
+        FerroError::VaultConflict | FerroError::VaultItemReplaced => {
+            ui.message_in(
+                view,
+                StatusCode::CONFLICT,
+                "The item was changed",
+                "Someone changed the item in the vault, or it needs a person to fix it. Nothing was overwritten. Open the item in the vault, check it, and try again.",
+                BACK,
+            )
+            .await
+        }
+        FerroError::CredentialNotManaged(_) | FerroError::CredentialNotFound(_) => {
+            ui.message_in(
+                view,
+                StatusCode::NOT_FOUND,
+                "Not in the managed collection",
+                "There is no such credential in the managed collection. Nothing was changed.",
+                BACK,
+            )
+            .await
+        }
         _ => {
             ui.message_in(
                 view,
@@ -196,6 +277,7 @@ pub async fn approvals_list(
     };
     let (pending, grants) = ui.app.approvals.list(Utc::now());
     let email = ui.account_email().await.unwrap_or_default();
+    let rotations = pending_rotations(&ui).await;
     page(
         StatusCode::OK,
         ApprovalsPage {
@@ -206,9 +288,36 @@ pub async fn approvals_list(
             notice: notice_from_query(&uri),
             pending: pending.iter().map(pending_row).collect(),
             grants: grants.iter().map(grant_row).collect(),
+            rotations,
         }
         .render(),
     )
+}
+
+/// The credentials in the managed collection that have a rotation pending.
+async fn pending_rotations(ui: &UiState) -> Vec<RotationRow> {
+    use crate::vault::{model::ManagedState, Vault};
+    let Ok(ManagedState::Usable(collection)) = ui.app.vault.managed_collection().await else {
+        return Vec::new();
+    };
+    ui.app
+        .credentials
+        .read()
+        .await
+        .iter()
+        .filter(|(_, entries)| {
+            entries
+                .iter()
+                .any(|e| e.has_next && e.collection_ids.contains(&collection.id))
+        })
+        .map(|(name, entries)| RotationRow {
+            name: name.clone(),
+            // The same function the abort itself uses: a button only where
+            // the POST would be accepted.
+            rotation_id: crate::rotate::abortable_rotation(name, entries, &collection)
+                .map(str::to_string),
+        })
+        .collect()
 }
 
 // -- The detail page --------------------------------------------------------------
@@ -243,7 +352,9 @@ fn detail_page(
                 id: v.id.clone(),
                 kind: v.kind.as_str(),
                 is_create: v.create.is_some(),
+                is_rotate: v.rotate.is_some(),
                 create: create_row(v),
+                rotate: rotate_row(v),
                 key_id: v.key_id.clone(),
                 key_name: v.key_name.clone(),
                 credentials: v.items.iter().map(row).collect(),
@@ -346,7 +457,11 @@ pub async fn approve_post(
     }
     // An approval to create a credential has no duration: it allows exactly
     // one operation, once. Approve or deny, nothing else.
-    if ui.app.approvals.kind_of(&id, Utc::now()) == Some(approvals::ApprovalKind::Create) {
+    let one_shot = ui.app.approvals.kind_of(&id, Utc::now());
+    if matches!(
+        one_shot,
+        Some(approvals::ApprovalKind::Create | approvals::ApprovalKind::Rotate)
+    ) {
         if form.take("preset").is_some() || form.take("minutes").is_some() {
             let email = ui.account_email().await.unwrap_or_default();
             return match ui.app.approvals.get(&id, Utc::now()) {
@@ -367,6 +482,9 @@ pub async fn approve_post(
             &id,
             &approver(&ui).await,
         ) {
+            Ok(_) if one_shot == Some(approvals::ApprovalKind::Rotate) => {
+                Reply::redirect("/ui/approvals?m=approved_rotate")
+            }
             Ok(_) => Reply::redirect("/ui/approvals?m=approved_create"),
             Err(e) => failed(&ui, &view, &e).await,
         };
@@ -467,6 +585,54 @@ pub async fn grant_revoke_post(
     }
     match approval_service::revoke_grant(&ui.app, caller(&ctx), &id, &approver(&ui).await) {
         Ok(_) => Reply::redirect("/ui/approvals?m=revoked"),
+        Err(e) => failed(&ui, &view, &e).await,
+    }
+}
+
+/// `POST /ui/rotations/abort`: throw away the pending new password of the
+/// credential named in the form. Needs the same sign-in, CSRF token and
+/// same-origin proof as every decision.
+pub async fn rotation_abort_post(
+    State(ui): State<Arc<UiState>>,
+    ctx: RequestContext,
+    Extension(transport): Extension<Transport>,
+    request: Request,
+) -> Reply {
+    let (view, mut form) = match begin_post(
+        &ui,
+        &ctx,
+        &transport,
+        request,
+        "/ui/rotations/abort",
+        &["csrf", "name", "rotation_id"],
+    )
+    .await
+    {
+        Ok(ok) => ok,
+        Err(reply) => return reply,
+    };
+    if let Err(redirect) = ui.require_sudo(&view, "/ui/approvals") {
+        return redirect;
+    }
+    let Some(name) = form.take("name").map(|n| n.to_string()) else {
+        return failed(&ui, &view, &FerroError::NoRotationPending(String::new())).await;
+    };
+    // The rotation the page showed: a stale form (the rotation was finished or
+    // replaced since) is refused by name, not applied to what is there now.
+    let rotation_id = form
+        .take("rotation_id")
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+    match rotate_credential::admin_abort(
+        &ui.app,
+        caller(&ctx),
+        &name,
+        &rotation_id,
+        &approver(&ui).await,
+    )
+    .await
+    {
+        Ok(_) => Reply::redirect("/ui/approvals?m=rotation_aborted"),
         Err(e) => failed(&ui, &view, &e).await,
     }
 }

@@ -2,7 +2,7 @@
 {% block title %}Approval{% endblock %}
 {% block main_class %}wide{% endblock %}
 {% block content %}
-<h1>{% if d.is_create %}Create this credential?{% else %}Approve this request?{% endif %}</h1>
+<h1>{% if d.is_create %}Create this credential?{% else if d.is_rotate %}Rotate this password?{% else %}Approve this request?{% endif %}</h1>
 {% if let Some(message) = error %}<p class="alert error" role="alert">{{ message }}</p>{% endif %}
 {% include "ui/_sudo.html" %}
 {% if d.is_create %}
@@ -45,6 +45,46 @@
 <section aria-labelledby="deny-h">
 <h2 id="deny-h">Deny</h2>
 <p class="muted">Nothing is created. The agent is refused this same request for the next few minutes, and asked to tell its human.</p>
+<form method="post" action="/ui/approvals/{{ d.id }}/deny">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<p class="actions"><button type="submit" class="danger">Deny</button>
+<a class="button secondary" href="/ui/approvals">Back to approvals</a></p>
+</form>
+</section>
+{% else if d.is_rotate %}
+<p class="alert warn" role="note">An agent asks Ferrowarden to <strong>rotate the password</strong> of a credential in the managed collection. Nothing has been generated or written yet. If you approve, Ferrowarden generates a random new password and stores it on the item as a pending value; the current password stays in place. The agent then sets the new password at the service and tells Ferrowarden to commit it, which makes it the password and keeps the old one in the item's password history. The agent never sees either password. This approval covers <strong>this one rotation</strong>; committing or aborting it needs no second approval, and a change you make to the item in the meantime is never overwritten: edits of its notes or other fields are kept, and if you change its password, a commit is refused (an abort is always possible).</p>
+<dl class="facts">
+<dt>Kind</dt>
+<dd><code>{{ d.kind }}</code></dd>
+<dt>Agent key</dt>
+<dd>{{ d.key_name }} <span class="muted">(<code>{{ d.key_id }}</code>)</span></dd>
+<dt>Credential name</dt>
+<dd><code>{{ d.rotate.name }}</code></dd>
+<dt>New password</dt>
+<dd>{{ d.rotate.length }} characters, <code>{{ d.rotate.charset }}</code></dd>
+<dt>In collection</dt>
+<dd><code>{{ d.rotate.collection }}</code></dd>
+<dt>Request id</dt>
+<dd><code>{{ d.request_id }}</code></dd>
+<dt>Approval id</dt>
+<dd><code>{{ d.id }}</code></dd>
+<dt>Asked</dt>
+<dd>{{ d.created }}</dd>
+<dt>Open until</dt>
+<dd>{{ d.expires }}</dd>
+</dl>
+
+<section aria-labelledby="approve-h">
+<h2 id="approve-h">Approve</h2>
+<form method="post" action="/ui/approvals/{{ d.id }}/approve">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<p class="actions"><button type="submit">Approve and start the rotation</button></p>
+</form>
+</section>
+
+<section aria-labelledby="deny-h">
+<h2 id="deny-h">Deny</h2>
+<p class="muted">Nothing is generated or changed. The agent is refused this same request for the next few minutes, and asked to tell its human.</p>
 <form method="post" action="/ui/approvals/{{ d.id }}/deny">
 <input type="hidden" name="csrf" value="{{ csrf }}">
 <p class="actions"><button type="submit" class="danger">Deny</button>

@@ -99,6 +99,11 @@ fn plan(p: &Placeholder, entry: &CredentialEntry) -> FerroResult<(Fetch, bool)> 
         }
         Selector::Totp if login && entry.has_totp => Ok((Fetch::Builtin(Builtin::Totp), false)),
         Selector::Notes if entry.has_notes => Ok((Fetch::Builtin(Builtin::Notes), true)),
+        // Only while a rotation is pending, and for a login: the same value
+        // class as the password, so it is scrubbed like it. Host binding,
+        // credential scope and approval are those of the item, checked by the
+        // caller for every placeholder alike.
+        Selector::Next if login && entry.has_next => Ok((Fetch::Builtin(Builtin::Next), true)),
         Selector::Field(name) => match entry.field(name) {
             FieldLookup::Missing => Err(unknown()),
             FieldLookup::Duplicate => Err(FerroError::AmbiguousField {

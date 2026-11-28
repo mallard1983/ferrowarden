@@ -22,6 +22,9 @@ pub const MIN_LENGTH: u32 = 16;
 pub const MAX_LENGTH: u32 = 128;
 /// The length used when a request leaves it out.
 pub const DEFAULT_LENGTH: u32 = 32;
+/// Random bytes drawn per round: twice the longest value, so one round almost
+/// always suffices even for the alphabet with the most rejected bytes.
+const RANDOM_BATCH: usize = 2 * MAX_LENGTH as usize;
 
 const ALPHANUMERIC: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 /// Letters, digits and the symbols `-_.~!@#%^*+=:,`: none of the characters
@@ -113,13 +116,15 @@ pub fn generate_with(
     // Bytes at or above this limit would make the low characters likelier.
     let limit = 256 - (256 % size);
     let wanted = length as usize;
-    let mut out = Zeroizing::new(String::with_capacity(wanted));
-    let mut bytes = Zeroizing::new(vec![0u8; wanted * 2]);
+    // Every buffer has a fixed size, set by MAX_LENGTH and not by the request:
+    // the requested length only decides when to stop.
+    let mut out = Zeroizing::new(String::with_capacity(MAX_LENGTH as usize));
+    let mut bytes = Zeroizing::new([0u8; RANDOM_BATCH]);
     // A source that keeps producing rejected bytes cannot hold a request
     // forever: bounded, and then an error (the odds of reaching the bound
     // with a real generator are nil).
     for _ in 0..64 {
-        if !fill(&mut bytes) {
+        if !fill(&mut bytes[..]) {
             return Err(FerroError::Internal(
                 "the random generator failed".to_string(),
             ));

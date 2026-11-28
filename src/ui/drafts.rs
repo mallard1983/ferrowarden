@@ -54,6 +54,8 @@ pub struct SavedDraft {
     pub approval: Vec<String>,
     /// The create patterns.
     pub create: Vec<String>,
+    /// The rotate patterns.
+    pub rotate: Vec<String>,
     /// One flag per entry of `policy::METHODS`, in order.
     pub checked: Vec<bool>,
     pub all_methods: bool,

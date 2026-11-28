@@ -95,6 +95,32 @@ Ask Ferrowarden to create a credential with a generated password. You get the na
 
 ---
 
+### POST /v1/credentials/{name}/rotate, /rotate/commit and /rotate/abort
+
+Rotate the password of a credential in the managed collection, in two phases. You never get a password. Needs a `rotate` pattern on your key that matches the name. `{name}` is the credential's name URL-encoded (every character other than a letter, a digit, `-` `_` `.` `~` as `%XX`; a space is `%20`, a `/` is `%2F`).
+
+- **`/rotate`** (start; a human approves it): optional body `{ "generate": { "length": 16-128 (default 32), "charset": "alphanumeric" | "ascii" | "hex" | "base64url" } }`. **`202`**: `{ "name", "current": "{{vault:name}}", "next": "{{vault:name:next}}", "rotation_id" }`. Keep the `rotation_id` (the detailed listing shows it too). `{{vault:name:next}}` works only while the rotation is pending.
+- **`/rotate/commit`**: the new password becomes the password (the old one is kept in the item's history). Body `{ "rotation_id": "..." }` (required). **`200`**: `{ "name", "placeholder" }`. No approval.
+- **`/rotate/abort`**: throw the pending password away (the value is kept in the item's history). Same body. **`200`**. No approval. Abort only after the service confirmed that it rejected the change; if the outcome is unknown, check which password the service accepts first (commit or abort accordingly), or ask the user.
+
+| Status / `code` | Meaning | Action |
+|---|---|---|
+| 403 `credential_rotate_out_of_scope` | Your key may not rotate that name | Tell the user; do not try other names |
+| 403 `credential_not_managed` | Not an item in the managed collection (the same answer whether or not it exists) | Tell the user |
+| 403 `approval_pending` | Start only: not decided yet (`approval_id`) | Ask the user to approve it, then retry the **identical** request |
+| 403 `approval_denied` | A human refused | Stop; tell the user |
+| 409 `rotation_in_progress` | Start only: one is already pending | Commit or abort it first |
+| 409 `no_rotation_pending` | Commit or abort with none pending | Start one first |
+| 409 `rotation_mismatch` | The pending value is not the one your `rotation_id` names; nothing was written | Read the listing for the current `rotation_id` |
+| 409 `vault_conflict` | Someone changed or deleted the item; nothing was overwritten | Read the credential again and retry; tell the user if it persists |
+| 422 `credential_not_rotatable` | Not a login with a password, or re-prompt is on | Tell the user |
+| 429 `approval_limit_reached` | Too many open approvals | Do not retry now |
+| 502 `vault_write_failed` | The vault refused the write; nothing changed | Tell the user; a retry of a start needs a new approval |
+| 502 `vault_write_unknown` | The write may have been applied | Read `GET /v1/credentials?detail=true` before retrying |
+| 503 `managed_collection_unavailable` | The storage collection cannot be written to (`reason`) | Tell the user |
+
+---
+
 ### GET /health
 
 Returns `200 OK` with no body. No authentication required. Used by health checks.

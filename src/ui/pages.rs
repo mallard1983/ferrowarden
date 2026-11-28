@@ -194,6 +194,7 @@ pub struct KeyNewPage<'a> {
     pub patterns: &'a str,
     pub approval: &'a str,
     pub create: &'a str,
+    pub rotate: &'a str,
     pub methods: Vec<MethodBox>,
     pub all_methods: bool,
 }
@@ -218,6 +219,7 @@ pub struct KeyTokenPage<'a> {
     pub methods: &'a str,
     pub approval: &'a [String],
     pub create: &'a [String],
+    pub rotate: &'a [String],
 }
 
 /// A policy as text: the pattern list and the method label.
@@ -226,6 +228,7 @@ pub struct PolicyView {
     pub methods: String,
     pub approval: Vec<String>,
     pub create: Vec<String>,
+    pub rotate: Vec<String>,
 }
 
 /// One credential that needs approval, and why (`vault field`, `key policy`).
@@ -272,6 +275,7 @@ pub struct DraftForm {
     pub patterns: String,
     pub approval: String,
     pub create: String,
+    pub rotate: String,
     pub methods: Vec<MethodBox>,
     pub all_methods: bool,
     pub req_methods: Vec<Opt>,
@@ -289,6 +293,7 @@ pub struct KeyFacts {
     pub methods: String,
     pub approval: Vec<String>,
     pub create: Vec<String>,
+    pub rotate: Vec<String>,
 }
 
 #[derive(Template)]
@@ -324,12 +329,13 @@ pub struct KeyRevokePage<'a> {
 /// One approval in the list.
 pub struct ApprovalListRow {
     pub id: String,
-    /// `forward` or `create`.
+    /// `forward`, `create` or `rotate`.
     pub kind: &'static str,
     pub is_create: bool,
+    pub is_rotate: bool,
     pub key_name: String,
     pub credentials: Vec<ApprovalRow>,
-    /// For a create: the collection it would go to.
+    /// For a create or a rotation: the collection involved.
     pub collection: String,
     pub method: String,
     /// `scheme://host[:port]`.
@@ -337,6 +343,14 @@ pub struct ApprovalListRow {
     pub path: String,
     pub created: String,
     pub expires: String,
+}
+
+/// One credential with a rotation pending, on the Approvals page.
+pub struct RotationRow {
+    pub name: String,
+    /// The rotation the Abort button names. `None`: an abort would be refused
+    /// (the item needs a person to fix it in the vault), so there is no button.
+    pub rotation_id: Option<String>,
 }
 
 /// One live grant.
@@ -359,16 +373,22 @@ pub struct ApprovalsPage<'a> {
     pub notice: Option<&'a str>,
     pub pending: Vec<ApprovalListRow>,
     pub grants: Vec<GrantRow>,
+    /// Credentials in the managed collection with a rotation started and not
+    /// finished.
+    pub rotations: Vec<RotationRow>,
 }
 
 /// Everything the detail page shows about one approval.
 pub struct ApprovalDetail {
     pub id: String,
-    /// `forward` or `create`.
+    /// `forward`, `create` or `rotate`.
     pub kind: &'static str,
     pub is_create: bool,
-    /// What a create asks for (empty strings and lists for a forward).
+    pub is_rotate: bool,
+    /// What a create asks for (empty strings and lists otherwise).
     pub create: CreateRow,
+    /// What a rotation asks for (empty strings otherwise).
+    pub rotate: RotateRow,
     pub key_id: String,
     pub key_name: String,
     pub credentials: Vec<ApprovalRow>,
@@ -393,6 +413,16 @@ pub struct CreateRow {
     pub charset: String,
     pub length: u32,
     pub approval_required: bool,
+    pub collection: String,
+}
+
+/// What a rotate approval shows: everything the human decides on. There is no
+/// value to show, because none has been generated yet.
+#[derive(Default)]
+pub struct RotateRow {
+    pub name: String,
+    pub charset: String,
+    pub length: u32,
     pub collection: String,
 }
 

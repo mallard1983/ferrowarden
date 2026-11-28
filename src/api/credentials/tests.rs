@@ -106,3 +106,35 @@ fn detail_secure_note() {
     assert_eq!(d.notes.as_deref(), Some("{{vault:note:notes}}"));
     assert_eq!(d.fields["token"], "{{vault:note:field:token}}");
 }
+
+#[test]
+fn detail_shows_the_next_placeholder_and_the_flag_only_while_a_rotation_is_pending() {
+    let mut e = CredentialEntry::login("1", &["https://a.example"]);
+    let d = detail("svc", &[e.clone()]);
+    assert_eq!(d.next, None);
+    assert!(!d.rotation_pending);
+    let json = serde_json::to_value(&d).unwrap();
+    assert!(json.get("next").is_none() && json.get("rotation_pending").is_none());
+
+    e.has_next = true;
+    let d = detail("Service (prod)", &[e.clone()]);
+    assert_eq!(d.next.as_deref(), Some("{{vault:'Service (prod)':next}}"));
+    assert!(d.rotation_pending);
+    assert_eq!(d.placeholder.as_deref(), Some("{{vault:'Service (prod)'}}"));
+    let json = serde_json::to_value(&d).unwrap();
+    assert_eq!(json["rotation_pending"], true);
+    assert_eq!(json["next"], "{{vault:'Service (prod)':next}}");
+    // It parses back to the same item with the `next` selector.
+    let occ = scan(d.next.as_deref().unwrap()).unwrap();
+    assert!(matches!(
+        &occ[0].token,
+        crate::proxy::placeholder::Token::Vault(p)
+            if p.item == "Service (prod)" && p.selector == Selector::Next
+    ));
+    // Not for an item that cannot be used (re-prompt) or a note.
+    e.reprompt = true;
+    assert_eq!(detail("svc", &[e.clone()]).next, None);
+    e.reprompt = false;
+    e.kind = ItemKind::SecureNote;
+    assert_eq!(detail("svc", &[e]).next, None);
+}

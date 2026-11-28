@@ -47,6 +47,23 @@ pub struct FakeVault {
     /// The next writes fail.
     fail_writes: AtomicBool,
     create_calls: AtomicUsize,
+    /// What the rotation calls were asked to do: `start:<id>`, `commit:<id>`,
+    /// `abort:<id>`, in order (refused calls included).
+    rotate_calls: Mutex<Vec<String>>,
+    /// The next rotation write answers `VaultConflict` (a person edited the
+    /// item), once.
+    conflict_once: AtomicBool,
+    /// How many times a rotation moved a password to the item's history.
+    history: Mutex<HashMap<String, usize>>,
+    /// The rotation id of each pending value, by item id.
+    rotation_ids: Mutex<HashMap<String, String>>,
+    /// The next write fails with an unknown outcome (a timeout), once.
+    unknown_once: AtomicBool,
+    /// Items whose password a person changed after the rotation started.
+    password_changed: Mutex<std::collections::HashSet<String>>,
+    /// Where every id this fake issues comes from: one monotonic counter, so
+    /// two items never share an id, whatever their names.
+    next_id: AtomicUsize,
 }
 
 /// One item `create_login` wrote (the value is kept apart, in `values`, and
@@ -77,6 +94,135 @@ impl FakeVault {
             .insert((id.to_string(), "password"), value.to_string());
     }
 
+    /// Show a login in the managed collection (the one `set_managed` made
+    /// usable) with a password, and return its id. Change its entry with
+    /// [`FakeVault::edit_item`].
+    pub fn add_managed_item(&self, name: &str, uris: &[&str], password: &str) -> String {
+        let collection = match &*self.managed.lock().unwrap() {
+            ManagedState::Usable(c) => c.id.clone(),
+            _ => "unset".to_string(),
+        };
+        let id = format!("managed-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
+        let mut entry = CredentialEntry::login(&id, uris);
+        entry.collection_ids = vec![collection];
+        self.items
+            .lock()
+            .unwrap()
+            .entry(name.to_string())
+            .or_default()
+            .push(entry);
+        self.set_password(&id, password);
+        id
+    }
+
+    /// Change the entry of item `id` as shown in listings.
+    pub fn edit_item(&self, id: &str, change: impl FnOnce(&mut CredentialEntry)) {
+        let mut items = self.items.lock().unwrap();
+        let entry = items
+            .values_mut()
+            .flatten()
+            .find(|e| e.id == id)
+            .expect("no such item");
+        change(entry);
+    }
+
+    /// Arrange the pending value of item `id` (a test value), with a new
+    /// rotation id, as a person replacing the pending field in the vault
+    /// would. Returns the rotation id.
+    pub fn set_next(&self, id: &str, value: &str) -> String {
+        self.values
+            .lock()
+            .unwrap()
+            .insert((id.to_string(), "next"), value.to_string());
+        let rotation_id = format!("rotation-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
+        self.rotation_ids
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), rotation_id.clone());
+        let shown = rotation_id.clone();
+        // An item that is not listed (a test of the substitution alone) has no
+        // entry to mark.
+        if let Some(entry) = self
+            .items
+            .lock()
+            .unwrap()
+            .values_mut()
+            .flatten()
+            .find(|e| e.id == id)
+        {
+            entry.has_next = true;
+            entry.rotation_id = Some(shown);
+        }
+        rotation_id
+    }
+
+    /// The rotation id of the pending value of item `id`, if there is one.
+    pub fn rotation_id_of(&self, id: &str) -> Option<String> {
+        self.rotation_ids.lock().unwrap().get(id).cloned()
+    }
+
+    /// Replace the item called `name` by another one with the same name and
+    /// password, in the same collection and with a new id (a person deleted
+    /// it and made a new one). Returns the new id.
+    pub fn swap_item(&self, name: &str) -> String {
+        let (old, collection, password) = {
+            let items = self.items.lock().unwrap();
+            let entry = &items[name][0];
+            (
+                entry.id.clone(),
+                entry.collection_ids.clone(),
+                self.password_of(&entry.id).unwrap_or_default(),
+            )
+        };
+        let id = format!("managed-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
+        let mut entry = CredentialEntry::login(&id, &[]);
+        entry.collection_ids = collection;
+        self.items
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), vec![entry]);
+        self.values.lock().unwrap().remove(&(old, "password"));
+        self.set_password(&id, &password);
+        id
+    }
+
+    /// A person changes the password of item `id` (to `value`) while a rotation
+    /// is pending: a commit is then refused, an abort is not.
+    pub fn person_changes_password(&self, id: &str, value: &str) {
+        self.set_password(id, value);
+        self.password_changed.lock().unwrap().insert(id.to_string());
+    }
+
+    /// The next write fails with an unknown outcome (the write may have been
+    /// applied), once.
+    pub fn unknown_next_write(&self) {
+        self.unknown_once.store(true, Ordering::SeqCst);
+    }
+
+    /// The rotation calls so far (see the field).
+    pub fn rotate_calls(&self) -> Vec<String> {
+        self.rotate_calls.lock().unwrap().clone()
+    }
+
+    /// The pending value of item `id`, if a rotation is pending.
+    pub fn next_of(&self, id: &str) -> Option<String> {
+        self.values
+            .lock()
+            .unwrap()
+            .get(&(id.to_string(), "next"))
+            .cloned()
+    }
+
+    /// How many passwords the item's history holds.
+    pub fn history_len(&self, id: &str) -> usize {
+        self.history.lock().unwrap().get(id).copied().unwrap_or(0)
+    }
+
+    /// The next rotation write fails with a conflict, once.
+    pub fn conflict_next_write(&self) {
+        self.conflict_once.store(true, Ordering::SeqCst);
+    }
+
     /// Make `managed_collection` answer `state`.
     pub fn set_managed(&self, state: ManagedState) {
         *self.managed.lock().unwrap() = state;
@@ -89,7 +235,7 @@ impl FakeVault {
 
     /// Show an item with this name (and these URIs) in listings.
     pub fn add_item(&self, name: &str, uris: &[&str]) {
-        let id = format!("seed-{}", self.items.lock().unwrap().len());
+        let id = format!("seed-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
         self.items
             .lock()
             .unwrap()
@@ -184,6 +330,7 @@ impl Vault for FakeVault {
     async fn get_value(&self, which: Builtin, id: &str, _: &str) -> FerroResult<Zeroizing<String>> {
         self.value_reads.fetch_add(1, Ordering::SeqCst);
         let key = match which {
+            Builtin::Next => "next",
             Builtin::Password => "password",
             Builtin::Username => "username",
             Builtin::Totp => "totp",
@@ -209,7 +356,62 @@ impl Vault for FakeVault {
         Ok(self.managed.lock().unwrap().clone())
     }
 
-    async fn create_login(&self, new: NewLogin) -> FerroResult<String> {
+    async fn rotate_start(
+        &self,
+        id: &str,
+        label: &str,
+        next: Zeroizing<String>,
+    ) -> FerroResult<String> {
+        self.rotate_calls
+            .lock()
+            .unwrap()
+            .push(format!("start:{id}"));
+        self.rotate_checks(id, label)?;
+        if self
+            .values
+            .lock()
+            .unwrap()
+            .contains_key(&(id.to_string(), "next"))
+        {
+            return Err(FerroError::RotationInProgress(label.to_string()));
+        }
+        Ok(self.set_next(id, &next))
+    }
+
+    async fn rotate_commit(&self, id: &str, label: &str, rotation_id: &str) -> FerroResult<()> {
+        self.rotate_calls
+            .lock()
+            .unwrap()
+            .push(format!("commit:{id}"));
+        self.rotate_checks(id, label)?;
+        self.check_rotation_id(id, label, rotation_id)?;
+        if self.password_changed.lock().unwrap().contains(id) {
+            return Err(FerroError::VaultPasswordChanged);
+        }
+        let mut values = self.values.lock().unwrap();
+        let next = values.remove(&(id.to_string(), "next")).unwrap_or_default();
+        values.insert((id.to_string(), "password"), next);
+        drop(values);
+        self.finish_pending(id);
+        Ok(())
+    }
+
+    async fn rotate_abort(&self, id: &str, label: &str, rotation_id: &str) -> FerroResult<()> {
+        self.rotate_calls
+            .lock()
+            .unwrap()
+            .push(format!("abort:{id}"));
+        self.rotate_checks(id, label)?;
+        self.check_rotation_id(id, label, rotation_id)?;
+        self.values
+            .lock()
+            .unwrap()
+            .remove(&(id.to_string(), "next"));
+        self.finish_pending(id);
+        Ok(())
+    }
+
+    async fn create_login(&self, new: NewLogin) -> FerroResult<Option<String>> {
         self.create_calls.fetch_add(1, Ordering::SeqCst);
         if self.locked.load(Ordering::SeqCst) {
             return Err(FerroError::VaultLocked);
@@ -225,7 +427,10 @@ impl Vault for FakeVault {
         if self.fail_writes.load(Ordering::SeqCst) {
             return Err(FerroError::VaultWriteFailed);
         }
-        let id = format!("fake-{}", self.created.lock().unwrap().len());
+        if self.unknown_once.swap(false, Ordering::SeqCst) {
+            return Err(FerroError::VaultWriteUnknown);
+        }
+        let id = format!("fake-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
         self.values
             .lock()
             .unwrap()
@@ -234,6 +439,7 @@ impl Vault for FakeVault {
             &id,
             &new.uris.iter().map(String::as_str).collect::<Vec<_>>(),
         );
+        entry.collection_ids = vec![collection.id.clone()];
         entry.has_username = new.username.is_some();
         entry.approval_required = new.approval_required;
         self.items
@@ -251,6 +457,74 @@ impl Vault for FakeVault {
             approval_required: new.approval_required,
             collection_id: collection.id,
         });
-        Ok(id)
+        Ok(Some(id))
     }
 }
+
+impl FakeVault {
+    /// What a finish checks, like the real backend: a rotation is pending, and
+    /// it is the one `rotation_id` names.
+    fn check_rotation_id(&self, id: &str, label: &str, rotation_id: &str) -> FerroResult<()> {
+        match self.rotation_ids.lock().unwrap().get(id) {
+            None => Err(FerroError::NoRotationPending(label.to_string())),
+            Some(pending) if pending != rotation_id => {
+                Err(FerroError::RotationMismatch(label.to_string()))
+            }
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// A rotation ended (committed or aborted): the value went to the history.
+    fn finish_pending(&self, id: &str) {
+        self.password_changed.lock().unwrap().remove(id);
+        self.rotation_ids.lock().unwrap().remove(id);
+        *self
+            .history
+            .lock()
+            .unwrap()
+            .entry(id.to_string())
+            .or_default() += 1;
+        self.edit_item(id, |e| {
+            e.has_next = false;
+            e.rotation_id = None;
+        });
+    }
+
+    /// What every rotation write checks, like the real backend: unlocked, the
+    /// managed collection usable, the item in it, no conflict.
+    fn rotate_checks(&self, id: &str, label: &str) -> FerroResult<()> {
+        if self.locked.load(Ordering::SeqCst) {
+            return Err(FerroError::VaultLocked);
+        }
+        let collection = match self.managed.lock().unwrap().clone() {
+            ManagedState::Usable(c) => c,
+            ManagedState::Unavailable { problem, .. } => {
+                return Err(FerroError::ManagedCollectionUnavailable(problem))
+            }
+            ManagedState::Off => return Err(FerroError::CredentialCreateDisabled),
+        };
+        let in_collection = self
+            .items
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .any(|e| e.id == id && e.collection_ids.contains(&collection.id));
+        if !in_collection {
+            return Err(FerroError::CredentialNotManaged(label.to_string()));
+        }
+        if self.conflict_once.swap(false, Ordering::SeqCst) {
+            return Err(FerroError::VaultConflict);
+        }
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(FerroError::VaultWriteFailed);
+        }
+        if self.unknown_once.swap(false, Ordering::SeqCst) {
+            return Err(FerroError::VaultWriteUnknown);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests;

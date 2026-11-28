@@ -7,6 +7,7 @@ pub mod forward;
 pub mod health;
 pub mod key_service;
 pub mod openapi;
+pub mod rotate_credential;
 pub mod strict_json;
 pub mod unlock;
 
@@ -43,6 +44,9 @@ enum Op {
     OpenApi,
     ListCredentials,
     CreateCredential,
+    RotateStart,
+    RotateCommit,
+    RotateAbort,
     Forward,
     ListSessions,
     DeleteSession,
@@ -59,6 +63,7 @@ enum Op {
     ApproveApproval,
     DenyApproval,
     RevokeGrant,
+    AdminRotateAbort,
 }
 
 /// One route of the HTTP API.
@@ -77,11 +82,14 @@ pub struct Route {
 /// router from this table, and a unit test compares it with `docs/openapi.yaml`,
 /// so a route cannot be added without being described there.
 #[rustfmt::skip]
-pub const ROUTES: [Route; 20] = [
+pub const ROUTES: [Route; 24] = [
     Route { method: "GET", path: "/health", group: Group::Public, op: Op::Health },
     Route { method: "GET", path: "/v1/openapi.json", group: Group::Agent, op: Op::OpenApi },
     Route { method: "GET", path: "/v1/credentials", group: Group::Agent, op: Op::ListCredentials },
     Route { method: "POST", path: "/v1/credentials", group: Group::Agent, op: Op::CreateCredential },
+    Route { method: "POST", path: "/v1/credentials/{name}/rotate", group: Group::Agent, op: Op::RotateStart },
+    Route { method: "POST", path: "/v1/credentials/{name}/rotate/commit", group: Group::Agent, op: Op::RotateCommit },
+    Route { method: "POST", path: "/v1/credentials/{name}/rotate/abort", group: Group::Agent, op: Op::RotateAbort },
     Route { method: "POST", path: "/v1/forward", group: Group::Agent, op: Op::Forward },
     Route { method: "GET", path: "/v1/sessions", group: Group::Agent, op: Op::ListSessions },
     Route { method: "DELETE", path: "/v1/sessions/{name}", group: Group::Agent, op: Op::DeleteSession },
@@ -98,6 +106,7 @@ pub const ROUTES: [Route; 20] = [
     Route { method: "POST", path: "/v1/admin/approvals/{id}/approve", group: Group::Admin, op: Op::ApproveApproval },
     Route { method: "POST", path: "/v1/admin/approvals/{id}/deny", group: Group::Admin, op: Op::DenyApproval },
     Route { method: "DELETE", path: "/v1/admin/grants/{id}", group: Group::Admin, op: Op::RevokeGrant },
+    Route { method: "POST", path: "/v1/admin/credentials/{name}/rotate/abort", group: Group::Admin, op: Op::AdminRotateAbort },
 ];
 
 /// The axum method filter for a table entry's method.
@@ -119,6 +128,9 @@ fn handler(route: &Route) -> MethodRouter<Arc<AppState>> {
         Op::OpenApi => on(f, openapi::get_openapi),
         Op::ListCredentials => on(f, credentials::list_credentials),
         Op::CreateCredential => on(f, create_credential::create_credential),
+        Op::RotateStart => on(f, rotate_credential::rotate_start),
+        Op::RotateCommit => on(f, rotate_credential::rotate_commit),
+        Op::RotateAbort => on(f, rotate_credential::rotate_abort),
         Op::Forward => on(f, forward::forward),
         Op::ListSessions => on(f, captured_sessions::list_sessions),
         Op::DeleteSession => on(f, captured_sessions::delete_session),
@@ -135,6 +147,7 @@ fn handler(route: &Route) -> MethodRouter<Arc<AppState>> {
         Op::ApproveApproval => on(f, approval_service::approve_approval),
         Op::DenyApproval => on(f, approval_service::deny_approval),
         Op::RevokeGrant => on(f, approval_service::revoke_grant_route),
+        Op::AdminRotateAbort => on(f, rotate_credential::admin_abort_route),
     }
 }
 

@@ -72,10 +72,43 @@ pub trait Vault: Send + Sync {
     async fn managed_collection(&self) -> FerroResult<ManagedState>;
 
     /// Create one login item in the managed collection and return the id the
-    /// server gave it. Refuses (without writing) when the vault is locked or
-    /// the managed collection is not usable: it never falls back to another
-    /// collection or the personal vault. The caller syncs afterwards.
-    async fn create_login(&self, new: NewLogin) -> FerroResult<String>;
+    /// server gave it (`None` when the server created it but its answer could
+    /// not be read: the item exists all the same). Refuses (without writing)
+    /// when the vault is locked or the managed collection is not usable: it
+    /// never falls back to another collection or the personal vault. A write
+    /// the server refused is `VaultWriteFailed` (nothing was created); one
+    /// whose outcome is unknown (a timeout, a server error) is
+    /// `VaultWriteUnknown`. The caller syncs afterwards.
+    async fn create_login(&self, new: NewLogin) -> FerroResult<Option<String>>;
+
+    /// Start rotating the password of item `id` (in the managed collection):
+    /// store `next` on the item as its pending value, in the reserved hidden
+    /// field `ferrowarden_next`, and change nothing else. Refuses (without
+    /// writing) when the vault is locked, the managed collection is not
+    /// usable, the item is not in it, or a rotation is already pending
+    /// (`RotationInProgress`). A change made to the item by someone else in
+    /// the meantime is `VaultConflict`: it is never overwritten. Returns the
+    /// rotation id of the rotation (an opaque, random identifier of exactly this
+    /// rotation). The caller syncs afterwards. `label`
+    /// (the credential's name) is only used in error messages.
+    async fn rotate_start(
+        &self,
+        id: &str,
+        label: &str,
+        next: Zeroizing<String>,
+    ) -> FerroResult<String>;
+
+    /// Make the pending value the password: the old password goes to the
+    /// item's password history and the pending field is removed. Refuses like
+    /// [`rotate_start`](Self::rotate_start); `NoRotationPending` when there is
+    /// none, and `RotationMismatch` (nothing written) when the pending value
+    /// is not the one `rotation_id` names.
+    async fn rotate_commit(&self, id: &str, label: &str, rotation_id: &str) -> FerroResult<()>;
+
+    /// Throw the pending value away: the field is removed and its value goes
+    /// to the front of the item's password history, so that nothing is ever
+    /// lost. Refuses like [`rotate_commit`](Self::rotate_commit).
+    async fn rotate_abort(&self, id: &str, label: &str, rotation_id: &str) -> FerroResult<()>;
 }
 
 /// The backend chosen at startup by `vault.backend`.
@@ -167,7 +200,24 @@ impl Vault for ActiveVault {
         delegate!(self, v => Vault::managed_collection(v).await)
     }
 
-    async fn create_login(&self, new: NewLogin) -> FerroResult<String> {
+    async fn create_login(&self, new: NewLogin) -> FerroResult<Option<String>> {
         delegate!(self, v => Vault::create_login(v, new).await)
+    }
+
+    async fn rotate_start(
+        &self,
+        id: &str,
+        label: &str,
+        next: Zeroizing<String>,
+    ) -> FerroResult<String> {
+        delegate!(self, v => Vault::rotate_start(v, id, label, next).await)
+    }
+
+    async fn rotate_commit(&self, id: &str, label: &str, rotation_id: &str) -> FerroResult<()> {
+        delegate!(self, v => Vault::rotate_commit(v, id, label, rotation_id).await)
+    }
+
+    async fn rotate_abort(&self, id: &str, label: &str, rotation_id: &str) -> FerroResult<()> {
+        delegate!(self, v => Vault::rotate_abort(v, id, label, rotation_id).await)
     }
 }

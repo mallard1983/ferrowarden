@@ -6,7 +6,7 @@ This page is the narrative reference. The machine-readable description of the sa
 
 All requests require an authentication header. The header name depends on the endpoint:
 
-- **Agent endpoints** (`GET` and `POST /v1/credentials`, `/v1/forward`, `/v1/sessions`, `/v1/openapi.json`): `X-Agent-Key: <token>`
+- **Agent endpoints** (`GET` and `POST /v1/credentials`, `POST /v1/credentials/{name}/rotate` and its `/commit` and `/abort`, `/v1/forward`, `/v1/sessions`, `/v1/openapi.json`): `X-Agent-Key: <token>`
 - **Admin endpoints** (`/v1/admin/*`, `/v1/unlock`): `X-Admin-Key: <key>`
 
 `GET /health` needs no authentication.
@@ -130,11 +130,63 @@ Never the value. `cache_refreshed` is `false` when the item was written but the 
 | `403` | `approval_denied` | A human said no |
 | `409` | `credential_exists` | A vault item with that name exists (checked against a fresh sync, before any prompt) |
 | `429` | `approval_limit_reached` | The key has too many open or recent approval requests |
-| `502` | `vault_write_failed` | Vaultwarden did not accept the write; nothing was created |
+| `502` | `vault_write_failed` | Vaultwarden refused the credentials **before anything was written** (or the write was never sent); nothing was created |
+| `502` | `vault_write_unknown` | Any other failure of the write (a timeout, a lost connection, a server error, an unrecognised `4xx`): the item **may have been created**. Read the credentials again (`GET /v1/credentials?detail=true`) before retrying |
 | `503` | `managed_collection_unavailable` | The collection cannot be written to; `reason` is `not_found`, `read_only`, `hides_passwords`, `ambiguous_name` or `no_organization_key` |
 | `503` | | The vault is locked or unreachable |
 
 The request is held up to `approval.wait_secs` (60 s by default) while a person decides, like a forward ([Approvals](#approvals)). A client needs a read timeout above it. Emits a `credential_create` event.
+
+---
+
+### `POST /v1/credentials/{name}/rotate`, `.../commit` and `.../abort`
+
+**Rotate** the password of a credential that is in the operator's managed collection, in two phases, with a new password the agent never sees. The key needs a matching `rotate` pattern ([Key policy](#key-policy)), and a human has to approve the start. The full description, with the order of the checks and a walkthrough, is [managed-credentials.md](managed-credentials.md#rotating-a-credential).
+
+`{name}` is the credential's name, **URL-encoded**: every character that is not a letter, a digit or one of `-` `_` `.` `~` is written as `%XX` (a space is `%20`, a `/` is `%2F`, `Service (prod)` is `Service%20%28prod%29`). It is the plain name, not the placeholder.
+
+1. **`POST /v1/credentials/{name}/rotate`**: start. The body may be left out (or `{}`) for the defaults, or:
+
+   ```json
+   { "generate": { "length": 32, "charset": "alphanumeric" } }
+   ```
+
+   `length` 16 to 128 (default 32), `charset` `alphanumeric` (default), `ascii`, `hex` or `base64url`, exactly as for a create. The body is strict JSON; `null` is rejected. The request is held up to `approval.wait_secs` while a person decides, like a create. **`202 Accepted`**:
+
+   ```json
+   { "name": "agent_keycloak_svc",
+     "current": "{{vault:agent_keycloak_svc}}",
+     "next": "{{vault:agent_keycloak_svc:next}}",
+     "rotation_id": "6WnQ3xZk0m1YtV5pUa9bLw" }
+   ```
+
+   `rotation_id` identifies exactly this pending value; a commit and an abort must send it. It is also shown, with `rotation_pending: true`, in the detailed credential listing, so a lost answer can be recovered. `{{vault:NAME}}` is still the current password and `{{vault:NAME:next}}` is the new one ([Placeholder Syntax](#placeholder-syntax)). The answer never has a value.
+2. Change the password at the service with a normal [`/v1/forward`](#post-v1forward), signing in with the current password and sending the new one.
+3. **`POST /v1/credentials/{name}/rotate/commit`**: the new password becomes the password; the old one goes to the item's password history. **`200`**: `{ "name": "...", "placeholder": "{{vault:...}}" }`. No approval. The body is required and strict: `{ "rotation_id": "..." }`; `409 rotation_mismatch` (nothing written) if the pending value is not the one it names.
+4. **`POST /v1/credentials/{name}/rotate/abort`**: throw the pending password away; the password stays as it was and the discarded value goes to the item's password history. **Abort only after the service confirmed that it rejected the change**; if the outcome is unknown, first check which password the service accepts (for example with a harmless call using `{{vault:NAME:next}}`), then commit or abort, and if that cannot be established ask a human. **`200`**: the same shape. No approval; the same `{ "rotation_id": "..." }` body.
+
+Only a login with a password, no master password re-prompt and a unique name, **in the managed collection**, can be rotated. Every refusal below comes before any prompt:
+
+| Status | `code` | Meaning |
+|---|---|---|
+| `400` | | The body or the name is not acceptable |
+| `401` | | No valid agent key |
+| `403` | `credential_rotate_out_of_scope` | No `rotate` pattern of the key matches the name |
+| `403` | `credential_not_managed` | Not an item in the managed collection. The same answer whether the name exists elsewhere in the vault or not at all, and for a name outside the key's `credentials` scope |
+| `403` | `credential_create_disabled` | `vault.managed.collection` is not set |
+| `403` | `approval_pending` / `approval_denied` | Start only. Retry the **identical** request after your human approves / stop and tell them |
+| `409` | `rotation_in_progress` | Start only: a rotation is already pending on the item |
+| `409` | `no_rotation_pending` | Commit or abort with none pending |
+| `409` | `rotation_mismatch` | Commit or abort: the pending value is not the one `rotation_id` names (finished or replaced since). **Nothing was written**: read the credential again for its current `rotation_id` |
+| `409` | `vault_conflict` | Someone changed or deleted the item, replaced it while the approval was pending, or changed its **password** after the rotation started (commit only); or it needs a person to fix it. **Nothing was overwritten**: read the credential again and retry |
+| `409` | | The managed collection has the name and another vault item (in or out of the collection) shares it |
+| `422` | `credential_not_rotatable` | Not a login, no password, or master password re-prompt on |
+| `429` | `approval_limit_reached` | Too many open or recent approval requests |
+| `502` | `vault_write_failed` | Vaultwarden refused the credentials **before anything was written** (or the write was never sent); nothing was changed |
+| `502` | `vault_write_unknown` | Any other failure of the write (a timeout, a lost connection, a server error, an unrecognised `4xx`): the write **may have been applied**. Read the credential again; `rotation_pending` and `rotation_id` say which state it is in |
+| `503` | `managed_collection_unavailable` | The managed collection cannot be written to (with a `reason`); or the vault is locked |
+
+Emits `credential_rotate_start`, `credential_rotate_commit` or `credential_rotate_abort`.
 
 ---
 
@@ -262,7 +314,7 @@ The answers the agent can get, besides the target's own response:
   "code": "approval_pending", "approval_id": "2m3x8Qk0Zr1YtV5pUa9bLw" }
 ```
 
-The same holds for a request to [create a credential](#post-v1credentials): its approval is of the `create` kind and covers that one operation once, not a timed grant.
+The same holds for a request to [create a credential](#post-v1credentials) and for the start of a [rotation](#post-v1credentialsnamerotate-commit-and-abort): the approval is of the `create` or `rotate` kind and covers that one operation once, not a timed grant. (Committing or aborting a rotation needs no second approval.)
 
 `403 approval_pending` means nobody decided in time: the approval stays open, so after a person approves it **retrying the same request** passes. `403 approval_denied` means stop. `429 approval_limit_reached` means do not retry now. A client needs a read timeout above `approval.wait_secs` (up to 300 seconds) plus the forward time. See [approvals.md](approvals.md).
 
@@ -347,9 +399,10 @@ Every agent key carries a policy, set when the key is created and changed with `
 | `methods` | List of allowed HTTP methods: `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`. Case-insensitive on input, returned upper case. |
 
 | `approval` | Optional list of patterns, matched like `credentials`: a credential whose name matches needs a human's approval before this key can use it ([approvals.md](approvals.md)). `[]` (the default when left out) adds no requirement. A vault item that carries a `ferrowarden_approval` field needs approval whatever this list says. |
+| `rotate` | Optional list of patterns, matched like `credentials`: the names this key may ask Ferrowarden to **rotate** the password of, for items in the managed collection, with `POST /v1/credentials/{name}/rotate` ([managed-credentials.md](managed-credentials.md#rotating-a-credential)). `[]` (the default when left out) means the key cannot rotate anything. Its own permission, independent of `create`, `credentials` and `methods`: a rotation needs the name in **both** `rotate` and `credentials` (and the key needs `credentials` to use the placeholders anyway). Adding or broadening a pattern widens the key's access. |
 | `create` | Optional list of patterns, matched like `credentials`: the names this key may ask Ferrowarden to **create** in the managed collection with `POST /v1/credentials` ([managed-credentials.md](managed-credentials.md)). `[]` (the default when left out) means the key cannot create anything. It is its own permission, independent of `credentials` and `methods`. Adding or broadening a pattern widens the key's access. |
 
-**`credentials` and `methods` are required when creating a key. There is no default access.** `approval` and `create` are optional: `approval` only adds a requirement, `create` is off unless given, and a key without them (including every key from 0.2.0) has `[]` for both.
+**`credentials` and `methods` are required when creating a key. There is no default access.** `approval`, `create` and `rotate` are optional: `approval` only adds a requirement, `create` and `rotate` are off unless given, and a key without them (including every key from 0.2.0) has `[]` for both.
 
 | Value | Meaning |
 |---|---|
@@ -386,6 +439,7 @@ Create a new agent API key with an explicit policy.
 | `methods` | array of strings | yes | Allowed methods. `["*"]` = all, `[]` = none |
 | `approval` | array of strings | no | Names that need approval for this key (default `[]`) |
 | `create` | array of strings | no | Names this key may create in the managed collection (default `[]`) |
+| `rotate` | array of strings | no | Names this key may rotate the password of, in the managed collection (default `[]`) |
 
 **Response `201 Created`**
 ```json
@@ -435,7 +489,7 @@ List all active agent keys with their policies. Token values are never included.
 
 Change a key's policy. The new policy applies to the very next request made with that key's token. The token stays the same.
 
-**Request Body**: any of `credentials`, `methods`, `approval` and `create`.
+**Request Body**: any of `credentials`, `methods`, `approval`, `create` and `rotate`.
 ```json
 { "credentials": ["uptime_kuma_*", "lab_*"] }
 ```
@@ -458,6 +512,25 @@ The change is written to the key file (when persistence is configured) before it
 
 ---
 
+### `POST /v1/admin/credentials/{name}/rotate/abort`
+
+Clear a **stuck rotation**: remove the pending new password of a credential in the managed collection (see [a rotation that is stuck](managed-credentials.md#a-rotation-that-is-stuck)). `{name}` is URL-encoded as above. The body is required: `{ "rotation_id": "..." }` (from the detailed listing). The current password is unchanged and the discarded value is kept in the item's password history. **Check which password the service accepts before you abort.**
+
+**Response `200 OK`**: `{ "status": "aborted", "name": "agent_keycloak_svc" }`.
+
+**Errors**
+| Status | Condition |
+|---|---|
+| `401 Unauthorized` | No valid admin key (an agent key is not one) |
+| `403 Forbidden` | `credential_not_managed`: no such item in the managed collection |
+| `409 Conflict` | `no_rotation_pending`, `rotation_mismatch` (a stale `rotation_id`: nothing written), `vault_conflict` (someone changed the item: nothing was overwritten, try again), or two vault items share the name |
+| `422` | `credential_not_rotatable` |
+| `502` / `503` | `vault_write_failed`, `vault_write_unknown` (read the credential again), `managed_collection_unavailable`, or the vault is locked |
+
+Emits `credential_rotate_abort` with `by: "admin"`. The admin UI does the same from the **Approvals** page ("Rotations in progress").
+
+---
+
 ### `POST /v1/admin/keys/{id}/preview`
 
 Show what a draft policy would allow for an existing key, **without saving anything, reading any credential value or sending anything**. Use it to check a change before you `PATCH` it.
@@ -476,14 +549,14 @@ Show what a draft policy would allow for an existing key, **without saving anyth
 }
 ```
 
-`credentials`, `methods`, `approval` and `create` are the draft policy; a field left out means the key's saved value, and `null` is rejected. `request` has exactly the shape of `/v1/forward`'s `request` (same strictness) and asks "would this request be allowed under the draft?".
+`credentials`, `methods`, `approval`, `create` and `rotate` are the draft policy; a field left out means the key's saved value, and `null` is rejected. `request` has exactly the shape of `/v1/forward`'s `request` (same strictness) and asks "would this request be allowed under the draft?".
 
 **Response `200 OK`**
 ```json
 {
   "key": { "id": "550e8400-...", "name": "homelab-agent", "policy_set": true },
-  "saved_policy": { "credentials": ["*"], "methods": ["*"], "approval": [], "create": [] },
-  "draft_policy": { "credentials": ["uptime_kuma_*"], "methods": ["GET"], "approval": [], "create": [] },
+  "saved_policy": { "credentials": ["*"], "methods": ["*"], "approval": [], "create": [], "rotate": [] },
+  "draft_policy": { "credentials": ["uptime_kuma_*"], "methods": ["GET"], "approval": [], "create": [], "rotate": [] },
   "credentials": [ { "name": "uptime_kuma_api", "type": "login", "placeholder": "{{vault:uptime_kuma_api}}", "bound_to": ["https://uptime.lan"] } ],
   "gained": [],
   "lost": ["grafana_token", "proxmox_api_token"],
@@ -644,6 +717,7 @@ Placeholders select a value of a Vaultwarden **Login** or **Secure note** item:
 | `{{vault:NAME:totp}}` | the current TOTP code |
 | `{{vault:NAME:notes}}` | the item's notes |
 | `{{vault:NAME:field:FIELD}}` | a custom field (text, hidden, boolean, or linked to the username/password) |
+| `{{vault:NAME:next}}` | the **pending new password** of a [rotation](#post-v1credentialsnamerotate-commit-and-abort), only while one is pending (otherwise the ordinary unknown-placeholder error). Same host binding, scope, approval rules and scrubbing as the password |
 
 `NAME` and `FIELD` are either a plain word of letters, digits, `_`, `-` and `.` — or a **single-quoted string**, which allows any characters (spaces, colons, anything). Inside quotes, write `\'` for a quote and `\\` for a backslash:
 

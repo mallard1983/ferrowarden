@@ -431,15 +431,15 @@ Useful LogQL queries:
 {service="ferrowarden"} | json | line_format "{{.credential_names}}" |= "proxmox_api_token"
 ```
 
-### Creating credentials for agents
+### Creating and rotating credentials for agents
 
-Agents can ask Ferrowarden to create a credential, with a password they never see ([managed-credentials.md](managed-credentials.md)). To switch it on:
+Agents can ask Ferrowarden to create a credential, or to rotate the password of one in the managed collection, with a password they never see ([managed-credentials.md](managed-credentials.md)). To switch it on:
 
 1. In Vaultwarden, make a dedicated **organisation collection** (for example `Ferrowarden managed`) and give Ferrowarden's account **Can edit** on it, with "Hide passwords" off. An owner or admin of the organisation works.
 2. Set `vault.managed.collection` (`FERROWARDEN_VAULT__MANAGED__COLLECTION`) to its name or id, and restart. With file unlock, Ferrowarden refuses to start when the collection is not usable, and says why.
-3. Give a key a `create` list: `curl -s -X PATCH .../v1/admin/keys/<id> -H "X-Admin-Key: $ADMIN_KEY" -H "Content-Type: application/json" -d '{"create": ["agent_*"]}'`. It is the key's own permission; it does not follow from `credentials` or `methods`.
+3. Give a key a `create` list: `curl -s -X PATCH .../v1/admin/keys/<id> -H "X-Admin-Key: $ADMIN_KEY" -H "Content-Type: application/json" -d '{"create": ["agent_*"]}'`. It is the key's own permission; it does not follow from `credentials` or `methods`. To let it also **rotate** passwords of items in the collection, give it a `rotate` list the same way (`-d '{"rotate": ["agent_*"]}'`).
 
-Every create is held for approval (kind `create`): approve with `POST /v1/admin/approvals/<id>/approve` and **no body** (a create has no duration), or in the admin UI. The managed collection and whether it is usable are in `GET /v1/admin/status` (`managed_collection`) and on the UI's status page.
+Every create (kind `create`), and the start of every rotation (kind `rotate`), is held for approval: approve with `POST /v1/admin/approvals/<id>/approve` and **no body** (neither has a duration), or in the admin UI. A rotation that an agent started and never finished shows under "Rotations in progress" on the Approvals page, where you can abort it (or with `POST /v1/admin/credentials/<name>/rotate/abort`). The managed collection and whether it is usable are in `GET /v1/admin/status` (`managed_collection`) and on the UI's status page.
 
 If it stops working later (someone made the collection "View only", turned on "Hide passwords", renamed it, or deleted it), agents get `503 managed_collection_unavailable` with a `reason`, and the log and a `vault_sync` event say so once. Nothing is written elsewhere in the meantime. Items created by agents have a `ferrowarden_created_by` field naming the key.
 

@@ -63,6 +63,10 @@ pub enum Class {
     ApprovalRequested,
     /// An agent key created a credential.
     CredentialCreated,
+    /// A rotation was committed.
+    CredentialRotated,
+    /// A pending rotation was aborted.
+    RotationAborted,
 }
 
 impl Class {
@@ -78,7 +82,9 @@ impl Class {
             | Class::KeyRevoke
             | Class::KeyPolicyChange
             | Class::UiLoginOk
-            | Class::CredentialCreated => Category::Admin,
+            | Class::CredentialCreated
+            | Class::CredentialRotated
+            | Class::RotationAborted => Category::Admin,
             Class::EventsDropped => Category::System,
             Class::ApprovalRequested => Category::Approval,
         }
@@ -120,6 +126,12 @@ pub fn classify(event: &SecurityEvent) -> Option<Class> {
         Action::KeyRevoke if e.outcome == Outcome::Success => Some(Class::KeyRevoke),
         Action::KeyPolicyChange if e.outcome == Outcome::Success => Some(Class::KeyPolicyChange),
         Action::CredentialCreate if e.outcome == Outcome::Success => Some(Class::CredentialCreated),
+        Action::CredentialRotateCommit if e.outcome == Outcome::Success => {
+            Some(Class::CredentialRotated)
+        }
+        Action::CredentialRotateAbort if e.outcome == Outcome::Success => {
+            Some(Class::RotationAborted)
+        }
         Action::EventsDropped => Some(Class::EventsDropped),
         Action::ApprovalRequested if e.outcome == Outcome::Success => {
             Some(Class::ApprovalRequested)
@@ -270,6 +282,8 @@ impl Engine {
             Class::KeyPolicyChange => (key_subject, Kind::KeyPolicyChanged, 1, false),
             Class::UiLoginOk => ("ui_login".to_string(), Kind::UiSignIn, 1, false),
             Class::CredentialCreated => (key_subject, Kind::CredentialCreated, 1, false),
+            Class::CredentialRotated => (key_subject, Kind::RotationCommitted, 1, false),
+            Class::RotationAborted => (key_subject, Kind::RotationAborted, 1, false),
             Class::EventsDropped => (
                 "system".to_string(),
                 Kind::EventsDropped,

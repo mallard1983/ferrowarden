@@ -961,11 +961,11 @@ async fn patch_emits_key_policy_change_with_before_and_after() {
     assert_eq!(d["key_name"], "audited");
     assert_eq!(
         d["before"],
-        json!({"credentials": ["a"], "methods": ["GET"], "approval": [], "create": []})
+        json!({"credentials": ["a"], "methods": ["GET"], "approval": [], "create": [], "rotate": []})
     );
     assert_eq!(
         d["after"],
-        json!({"credentials": ["a"], "methods": ["POST"], "approval": [], "create": []})
+        json!({"credentials": ["a"], "methods": ["POST"], "approval": [], "create": [], "rotate": []})
     );
     assert_eq!(events[1]["event"]["reason"], "invalid_request");
     assert_eq!(events[0]["event"]["reason"], "key_not_found");
@@ -999,11 +999,11 @@ async fn preview_diffs_draft_against_saved_and_saves_nothing() {
     assert_eq!(j["key"]["name"], "pv");
     assert_eq!(
         j["saved_policy"],
-        json!({"credentials": ["lab_*"], "methods": ["*"], "approval": [], "create": []})
+        json!({"credentials": ["lab_*"], "methods": ["*"], "approval": [], "create": [], "rotate": []})
     );
     assert_eq!(
         j["draft_policy"],
-        json!({"credentials": ["lab_nas", "prod_*"], "methods": ["GET"], "approval": [], "create": []})
+        json!({"credentials": ["lab_nas", "prod_*"], "methods": ["GET"], "approval": [], "create": [], "rotate": []})
     );
     assert_eq!(j["gained"], json!(["prod_db"]));
     assert_eq!(j["lost"], json!(["lab_router"]));
@@ -2658,3 +2658,4 @@ async fn the_policy_preview_checks_session_syntax_but_not_the_store() {
 
 mod approvals;
 mod create;
+mod rotate;

@@ -39,6 +39,11 @@ pub struct CreateKeyRequest {
     /// cannot create credentials. `null` is rejected.
     #[serde(default, deserialize_with = "policy::required_create")]
     pub create: Vec<String>,
+    /// Credential name patterns this key may rotate in the managed collection
+    /// (docs/managed-credentials.md). Optional: left out it is `[]`. `null`
+    /// is rejected.
+    #[serde(default, deserialize_with = "policy::required_rotate")]
+    pub rotate: Vec<String>,
 }
 
 /// `PATCH /v1/admin/keys/{id}`: a field that is left out is unchanged, one that
@@ -54,6 +59,8 @@ pub struct PatchKeyRequest {
     pub approval: Patch<Vec<String>>,
     #[serde(default, deserialize_with = "policy::patch_create")]
     pub create: Patch<Vec<String>>,
+    #[serde(default, deserialize_with = "policy::patch_rotate")]
+    pub rotate: Patch<Vec<String>>,
 }
 
 /// `POST /v1/admin/keys/{id}/preview`
@@ -72,6 +79,9 @@ pub struct PreviewRequest {
     /// Draft create patterns; absent = the saved value.
     #[serde(default, deserialize_with = "policy::patch_create")]
     pub create: Patch<Vec<String>>,
+    /// Draft rotate patterns; absent = the saved value.
+    #[serde(default, deserialize_with = "policy::patch_rotate")]
+    pub rotate: Patch<Vec<String>>,
     /// A request to check against the draft policy (same shape as `/v1/forward`).
     #[serde(default, deserialize_with = "policy::some_not_null")]
     pub request: Option<ProxyRequest>,
@@ -111,6 +121,7 @@ pub async fn create_key(
         req.methods,
         req.approval,
         req.create,
+        req.rotate,
     )
     .await?;
     Ok((StatusCode::CREATED, Json(created)))
@@ -186,6 +197,7 @@ pub async fn patch_key(
         req.methods,
         req.approval,
         req.create,
+        req.rotate,
     )
     .await?;
     Ok(Json(change.summary))
@@ -226,6 +238,7 @@ pub async fn preview_key(
         req.methods,
         req.approval,
         req.create,
+        req.rotate,
         req.request.as_ref(),
     )
     .await?;

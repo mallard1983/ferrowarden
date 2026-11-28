@@ -32,6 +32,77 @@ pub fn approval_field_valid(value: &str) -> bool {
 /// Ferrowarden creates an item; shown like any other field.
 pub const CREATED_BY_FIELD: &str = "ferrowarden_created_by";
 
+/// Name of the reserved **hidden** custom field that holds the pending new
+/// password of a rotation that has started and not yet been committed or
+/// aborted (docs/managed-credentials.md). Written and removed only by
+/// Ferrowarden's rotation; never offered as a `field:` placeholder (the
+/// pending value is reached with `{{vault:NAME:next}}`) and never listed.
+pub const NEXT_FIELD: &str = "ferrowarden_next";
+
+/// Is `name` the reserved pending-rotation field? Compared trimmed and
+/// case-insensitively, like [`APPROVAL_FIELD`], so a hand-typed variant is
+/// still recognised (and not offered as an ordinary field).
+pub fn is_next_field_name(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case(NEXT_FIELD)
+}
+
+/// Name of the second reserved **hidden** custom field of a rotation: the
+/// rotation record ([`RotationRecord`]), written in the same edit as
+/// `ferrowarden_next` and removed with it, so that a commit can tell that a
+/// person changed the password or replaced the pending value since
+/// (docs/managed-credentials.md). Never offered as a `field:` placeholder,
+/// never listed.
+pub const ROTATION_FIELD: &str = "ferrowarden_rotation";
+
+/// Is `name` the reserved rotation-record field? Trimmed and case-insensitive,
+/// like [`is_next_field_name`].
+pub fn is_rotation_field_name(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case(ROTATION_FIELD)
+}
+
+/// The content of the `ferrowarden_rotation` field (a JSON object, encrypted
+/// under the item's key like every field value). Nothing in it is derived from
+/// anything: the id is random, and the two texts are ciphertexts kept as they
+/// are, compared by plain equality.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RotationRecord {
+    /// The identifier of this rotation: random, shown in the detailed listing,
+    /// named by a commit or an abort.
+    pub id: String,
+    /// The ciphertext text of `login.password` when the rotation started.
+    pub from: String,
+    /// The ciphertext text of the `ferrowarden_next` field as it was written.
+    pub next: String,
+}
+
+impl RotationRecord {
+    /// A record with a fresh random id (16 bytes, base64url without padding).
+    /// `None` when the system has no randomness.
+    pub fn new(from: &str, next: &str) -> Option<Self> {
+        use base64::Engine;
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).ok()?;
+        Some(Self {
+            id: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),
+            from: from.to_string(),
+            next: next.to_string(),
+        })
+    }
+
+    /// The record's text, as stored (before encryption).
+    pub fn to_text(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// Read a record strictly: a JSON object with exactly these three
+    /// members, no duplicate or unknown member, and none empty.
+    pub fn parse(text: &str) -> Option<Self> {
+        let r: Self = crate::api::strict_json::parse_request(text.as_bytes()).ok()?;
+        (!r.id.is_empty() && !r.from.is_empty() && !r.next.is_empty()).then_some(r)
+    }
+}
+
 /// Kind of vault item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
@@ -99,6 +170,9 @@ pub fn match_type_is_binding(match_type: Option<u8>) -> bool {
 /// A built-in value of an item that can be fetched on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
+    /// The pending new password of a rotation (`{{vault:NAME:next}}`): the
+    /// value of the reserved `ferrowarden_next` field.
+    Next,
     Password,
     Username,
     /// The current one-time code, not the stored secret.
@@ -144,6 +218,16 @@ pub struct CredentialEntry {
     /// The field's value is not `required`: it still means required, and the
     /// sync reports it as a warning so the operator can fix the spelling.
     pub approval_field_invalid: bool,
+    /// A rotation has started and is waiting to be committed or aborted: the
+    /// item has a `ferrowarden_next` field.
+    pub has_next: bool,
+    /// The identifier of that pending value ([`RotationRecord::id`]);
+    /// `None` when none is pending, or when the item is not in a state that
+    /// can be finished (two pending fields, or one without a value).
+    pub rotation_id: Option<String>,
+    /// The collections the item is in (organisation items), as the sync lists
+    /// them. A rotation is only ever done to an item in the managed one.
+    pub collection_ids: Vec<String>,
 }
 
 impl CredentialEntry {
@@ -162,6 +246,9 @@ impl CredentialEntry {
             reprompt: false,
             approval_required: false,
             approval_field_invalid: false,
+            has_next: false,
+            rotation_id: None,
+            collection_ids: Vec::new(),
         }
     }
 

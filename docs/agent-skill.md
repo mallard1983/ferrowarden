@@ -114,6 +114,23 @@ Rules:
 
 ---
 
+## Rotating a credential's password
+
+When the user wants the password of a credential changed (it must be one in the managed collection, and your key needs a `rotate` pattern for its name: otherwise `403` `credential_rotate_out_of_scope` or `credential_not_managed`: tell the user, do not try other names), rotate it in **two phases**, so that the service is never locked out. You never see either password.
+
+1. **Start**: `POST /v1/credentials/{name}/rotate` (the name URL-encoded: a space is `%20`, a `/` is `%2F`; the body may be left out, or `{ "generate": { "length": 32, "charset": "alphanumeric" } }`). A person approves it. The answer is `202` with `{ "name", "current": "{{vault:name}}", "next": "{{vault:name:next}}", "rotation_id" }`. Keep the `rotation_id`: a commit and an abort must send it (`{ "rotation_id": "..." }`), and `GET /v1/credentials?detail=true` shows it next to `rotation_pending` if you lose the answer. `current` is still the password; `next` is the new one.
+2. **Change it at the service**, with the service's own change-password call through `POST /v1/forward`, signing in with `{{vault:name}}` and sending `{{vault:name:next}}`.
+3. **Finish**: if the service accepted the new password, `POST /v1/credentials/{name}/rotate/commit` with `{ "rotation_id": "..." }` (it becomes the password; the old one is kept in the item's history). **Abort only after the service confirmed that it rejected the change**: `POST /v1/credentials/{name}/rotate/abort` (the password stays as it was; the discarded value is kept in the item's history). If the outcome is unknown (a timeout, a lost response), first check which password the service accepts, for example with a harmless authenticated call using `{{vault:name:next}}`: commit if it has the new one, abort if it does not; if you cannot establish it, ask the user. Neither needs another approval.
+
+- The start is held while the user decides, like a create. `403` `approval_pending` (with `approval_id`): ask the user to approve it in the Ferrowarden admin UI, quoting the id, then **retry the identical request**. `approval_denied`: stop, tell the user.
+- `409` `rotation_in_progress`: one is already pending: finish it (commit or abort) first. `409` `no_rotation_pending`: nothing to commit or abort. `409` `rotation_mismatch`: the pending value is not the one your `rotation_id` names (it was finished or replaced); nothing was written: read the listing for the current id. `502` `vault_write_unknown`: the write may have been applied: read `GET /v1/credentials?detail=true` (`rotation_pending`, `rotation_id`) before retrying anything.
+- `409` `vault_conflict`: someone changed the item in the vault meanwhile. **Nothing was overwritten.** Read the credential again (`GET /v1/credentials?detail=true`) and retry the commit or abort; if it keeps failing, tell the user (the item may need a person to fix it).
+- `422` `credential_not_rotatable`: only a login with a password and no master password re-prompt can be rotated.
+- `{{vault:name:next}}` exists only while a rotation is pending (`GET /v1/credentials?detail=true` shows a `rotation_pending` flag and the `next` placeholder). Do not commit before the service has the new password, and do not abort after it has taken it: tell the user instead.
+- Never ask a service to echo a password.
+
+---
+
 ## Creating a credential for a new service
 
 When you set up a service that needs a new account, you can ask Ferrowarden to **make the credential for you**. Ferrowarden generates the password, stores it, and gives you only a placeholder: you never see the password. Your key needs a `create` pattern that matches the name (otherwise `403`, `credential_create_out_of_scope`: tell the user), and a person has to approve **each** request.
@@ -269,6 +286,12 @@ All errors return `{"error": "message"}` with an appropriate HTTP status. The an
 | `429 Too Many Requests` (`"code": "approval_limit_reached"`) | Your key has too many open or recent approval requests | Do not retry now; tell the user and wait until they have decided or the requests expired |
 | `403 Forbidden` (`"code": "credential_create_out_of_scope"` or `"credential_create_disabled"`) | Your key may not create that name, or creating is not set up | Do not try other names to get around it. Tell the user |
 | `409 Conflict` (`"code": "credential_exists"`) | A credential with that name exists | Choose another name |
+| `403 Forbidden` (`"code": "credential_rotate_out_of_scope"` or `"credential_not_managed"`) | Your key may not rotate that name, or it is not a credential that can be rotated (this answer is the same whether or not it exists) | Do not try other names. Tell the user |
+| `409 Conflict` (`"code": "rotation_in_progress"` / `"no_rotation_pending"`) | A rotation is already pending / none is pending | Commit or abort the pending one / start one first |
+| `409 Conflict` (`"code": "vault_conflict"`) | Someone changed or deleted the item while it was being rotated. Nothing was overwritten | Read the credential again and retry; tell the user if it persists |
+| `409 Conflict` (`"code": "rotation_mismatch"`) | The pending value is not the one your `rotation_id` names. Nothing was written | Read `GET /v1/credentials?detail=true` for the current `rotation_id`; do not guess |
+| `502 Bad Gateway` (`"code": "vault_write_unknown"`) | The write may have been applied (a timeout or server error) | Read the credential again (`GET /v1/credentials?detail=true`) before retrying; for a create, a listed name means it was created |
+| `422 Unprocessable Entity` (`"code": "credential_not_rotatable"`) | The item is not a login with a password, or has master password re-prompt on | Tell the user |
 | `503 Service Unavailable` (`"code": "managed_collection_unavailable"`) | The place where new credentials are stored cannot be written to | Tell the user; the operator has to fix it |
 | `403 Forbidden` ("captured from another origin") | `Session <name> may not be sent to <host>`: that session was captured at a different scheme, host or port | Do not try to work around it. Log in to this host with its own `capture`, or tell the user |
 | `409 Conflict` | The credential name matches more than one vault item, or the field name appears twice on the item | Tell the user; the operator must rename one of them |
@@ -308,6 +331,7 @@ When you need to make an API call that requires credentials:
 4. Use the returned `status`, `headers`, and `body` as you would use any HTTP response.
 5. If the service needs a login first, add `capture` to the login request and use `{{session:name}}` afterwards.
 6. If you are setting up a new service that needs a new account, ask for the credential with `POST /v1/credentials` (a person approves it) and use the placeholder it returns: see "Creating a credential for a new service".
+7. If the user wants a credential's password changed, rotate it in two phases (start, change it at the service with `{{vault:name:next}}`, commit): see "Rotating a credential's password".
 
 A machine-readable description of this API is available too: `GET /v1/openapi.json` with your `X-Agent-Key` returns an OpenAPI 3.1 document listing the operations you can call.
 

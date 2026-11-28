@@ -11,7 +11,6 @@
 //! credential names, the host, the approver and the ids.
 
 use axum::{
-    body::Bytes,
     extract::{Path, State},
     http::HeaderMap,
     Json,
@@ -24,7 +23,7 @@ use std::time::Duration;
 
 use crate::api::admin::authenticate_admin;
 use crate::api::key_service::{Caller, Via};
-use crate::api::strict_json::parse_body;
+use crate::api::strict_json::OptionalStrictJson;
 use crate::approvals::{self, GrantView, PendingView};
 use crate::error::{FerroError, FerroResult};
 use crate::events::{emit_rejected, Action};
@@ -106,11 +105,11 @@ fn approve_inner(
         .map_err(|_| FerroError::ApprovalNotPending)
 }
 
-/// Approve the pending **create** approval `id`: exactly one operation, the
-/// one it was opened for, may proceed. There is no duration and no grant: the
+/// Approve the pending **create** or **rotate** approval `id`: exactly one
+/// operation, the one it was opened for, may proceed. There is no duration and no grant: the
 /// approval is used up by the first request that matches it (the held one, or
 /// a retry within `approval.pending_ttl_secs`). Wakes the held requests and
-/// emits `approval_granted` with `kind` `create`.
+/// emits `approval_granted` with `kind` `create` or `rotate`.
 pub fn approve_create(
     state: &AppState,
     caller: Caller<'_>,
@@ -230,40 +229,16 @@ pub fn revoke_grant(
 
 // ── The admin API ─────────────────────────────────────────────────────────────
 
-/// `POST /v1/admin/approvals/{id}/approve` for a **forward** approval:
-/// `minutes` is required, there is no default and no other field, and the body
-/// is a JSON object (serde would also read a struct from an array, which is
-/// not what an approval takes). A **create** approval takes no body at all
-/// (see [`approve_approval`]).
-#[derive(Debug)]
-pub struct ApproveRequest {
-    pub minutes: u64,
-}
-
-#[derive(Deserialize)]
+/// The body of `POST /v1/admin/approvals/{id}/approve`: a JSON object, or no
+/// body. `minutes` is required to approve a **forward** (it is the length of
+/// the grant) and refused for a **create** or **rotate**, which allow one
+/// operation once and have no duration. `null` is refused, like everywhere in
+/// the API.
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ApproveFields {
-    minutes: u64,
-}
-
-impl<'de> Deserialize<'de> for ApproveRequest {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Object;
-        impl<'de> serde::de::Visitor<'de> for Object {
-            type Value = ApproveFields;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a JSON object with `minutes`")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                map: A,
-            ) -> Result<ApproveFields, A::Error> {
-                ApproveFields::deserialize(serde::de::value::MapAccessDeserializer::new(map))
-            }
-        }
-        d.deserialize_map(Object)
-            .map(|f| ApproveRequest { minutes: f.minutes })
-    }
+pub struct ApproveBody {
+    #[serde(default, deserialize_with = "crate::policy::some_not_null")]
+    pub minutes: Option<u64>,
 }
 
 /// GET /v1/admin/approvals
@@ -289,9 +264,10 @@ pub async fn list_approvals(
 /// * `forward`: `{ "minutes": N }`. Creates a grant for `minutes`; held
 ///   requests proceed at once, and a request retried within the grant passes.
 ///   The answer is `{ "status": "approved", "kind": "forward", "grant": {...} }`.
-/// * `create`: **no body** (an empty body or `{}`). Allows exactly one
-///   operation, once; there is no duration, and a `minutes` is refused
-///   (`400`). The answer is `{ "status": "approved", "kind": "create" }`.
+/// * `create` and `rotate`: **no body** (an empty body or `{}`). Allows
+///   exactly one operation, once; there is no duration, and a `minutes` is
+///   refused (`400`). The answer is `{ "status": "approved", "kind": "create" }`
+///   (or `"rotate"`).
 ///
 /// Admin auth required.
 pub async fn approve_approval(
@@ -299,7 +275,7 @@ pub async fn approve_approval(
     ctx: RequestContext,
     headers: HeaderMap,
     Path(id): Path<String>,
-    body: Bytes,
+    body: Result<OptionalStrictJson<ApproveBody>, FerroError>,
 ) -> FerroResult<Json<Value>> {
     const ENDPOINT: &str = "/v1/admin/approvals/{id}/approve";
     authenticate_admin(&state, &ctx, &headers, ENDPOINT)?;
@@ -318,17 +294,28 @@ pub async fn approve_approval(
         emit_rejected(&state.events, &ctx, None, ENDPOINT, &e);
         e
     };
+    let OptionalStrictJson(body) = body.map_err(reject)?;
     match kind {
-        Some(approvals::ApprovalKind::Create) => {
-            check_create_body(&headers, &body).map_err(reject)?;
+        Some(one_shot @ (approvals::ApprovalKind::Create | approvals::ApprovalKind::Rotate)) => {
+            if body.minutes.is_some() {
+                return Err(reject(FerroError::InvalidRequest(format!(
+                    "an approval to {} a credential has no duration: send no body, or {{}}",
+                    one_shot.as_str()
+                ))));
+            }
             approve_create(&state, caller, &id, API_APPROVER)?;
-            Ok(Json(json!({ "status": "approved", "kind": "create" })))
+            Ok(Json(
+                json!({ "status": "approved", "kind": one_shot.as_str() }),
+            ))
         }
         Some(approvals::ApprovalKind::Forward) | None => {
             let minutes = if kind.is_some() {
-                let req: ApproveRequest = parse_body(&headers, &body).map_err(reject)?;
-                check_minutes(state.config.approval.max_grant_minutes, req.minutes)
-                    .map_err(reject)?
+                let minutes = body.minutes.ok_or_else(|| {
+                    reject(FerroError::InvalidRequest(
+                        "`minutes` is required to approve a forward".to_string(),
+                    ))
+                })?;
+                check_minutes(state.config.approval.max_grant_minutes, minutes).map_err(reject)?
             } else {
                 // Not open: the decision fails as not pending.
                 1
@@ -340,25 +327,6 @@ pub async fn approve_approval(
                 "grant": grant.to_json(),
             })))
         }
-    }
-}
-
-/// The body of an approval of a create: nothing, or an empty JSON object.
-/// Anything else (a `minutes` included) is refused: there is no duration to
-/// give.
-fn check_create_body(headers: &HeaderMap, body: &[u8]) -> FerroResult<()> {
-    if body.iter().all(u8::is_ascii_whitespace) {
-        return Ok(());
-    }
-    let fields: serde_json::Map<String, Value> = parse_body(headers, body)?;
-    if fields.is_empty() {
-        Ok(())
-    } else {
-        Err(FerroError::InvalidRequest(
-            "an approval to create a credential takes no body and has no duration \
-             (send no body, or {})"
-                .to_string(),
-        ))
     }
 }
 

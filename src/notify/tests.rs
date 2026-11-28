@@ -150,6 +150,8 @@ fn expected_class(action: Action, outcome: Outcome, reason: Option<Reason>) -> O
         KeyRevoke if ok => Some(Class::KeyRevoke),
         KeyPolicyChange if ok => Some(Class::KeyPolicyChange),
         CredentialCreate if ok => Some(Class::CredentialCreated),
+        CredentialRotateCommit if ok => Some(Class::CredentialRotated),
+        CredentialRotateAbort if ok => Some(Class::RotationAborted),
         EventsDropped => Some(Class::EventsDropped),
         ApprovalRequested if ok => Some(Class::ApprovalRequested),
         _ => None,
@@ -1727,6 +1729,7 @@ fn pending_view(url: &str) -> crate::approvals::PendingView {
         id: "Zm9vYmFyMTIzNDU2Nzg5MA".into(),
         kind: crate::approvals::ApprovalKind::Forward,
         create: None,
+        rotate: None,
         key_id: "11111111-1111-1111-1111-111111111111".into(),
         key_name: "monitoring-agent".into(),
         items: vec![
@@ -1992,6 +1995,7 @@ fn create_view() -> crate::approvals::PendingView {
             approval_required: true,
             collection: "Ferrowarden managed".into(),
         }),
+        rotate: None,
         method: String::new(),
         scheme: String::new(),
         host: String::new(),
@@ -2116,4 +2120,129 @@ fn a_created_credential_is_an_admin_notice_with_no_value() {
         .outcome(Outcome::Failure)
         .reason(Reason::CredentialExists);
     assert_eq!(classify(&failed), None);
+}
+
+// ── Rotate prompts and the rotation notices ───────────────────────────────────
+
+fn rotate_view() -> crate::approvals::PendingView {
+    use crate::approvals::{ApprovalKind, ApprovalNeed, Reasons, RotateDetail};
+    let mut v = create_view();
+    v.id = "cm90YXRlYXBwcm92YWwxMg".into();
+    v.kind = ApprovalKind::Rotate;
+    v.items = vec![ApprovalNeed {
+        item: "agent_keycloak_svc".into(),
+        reasons: Reasons::default(),
+    }];
+    v.create = None;
+    v.rotate = Some(RotateDetail {
+        name: "agent_keycloak_svc".into(),
+        collection: "Ferrowarden managed".into(),
+        charset: "alphanumeric".into(),
+        length: 40,
+    });
+    v
+}
+
+#[test]
+fn a_rotate_prompt_says_which_password_will_change_and_that_the_agent_never_sees_it() {
+    let link = "https://fw.example.com/approvals/cm90YXRlYXBwcm92YWwxMg";
+    let n = create_prompt(&rotate_view(), Some(link));
+    assert_eq!(n.category, Category::Approval);
+    assert_eq!(n.title, "Ferrowarden: approval needed");
+    assert_eq!(n.severity, Severity::High);
+    let m = &n.message;
+    assert!(m.contains("Key \"homelab-claude\" (id 11111111)"), "{m}");
+    assert!(
+        m.contains("rotate the password of the credential agent_keycloak_svc"),
+        "{m}"
+    );
+    assert!(m.contains("collection Ferrowarden managed"), "{m}");
+    assert!(m.contains("40-character alphanumeric password"), "{m}");
+    assert!(m.contains("the agent never sees"), "{m}");
+    assert!(m.contains("current password stays until"), "{m}");
+    assert!(m.contains(&format!("Approve or deny: {link}")), "{m}");
+    assert!(m.contains("Approval cm90YXRlYXBwcm92YWwxMg"), "{m}");
+    assert!(m.contains("open until 12:10 UTC"), "{m}");
+
+    let a = &n.webhook_body()["event"]["approval"];
+    assert_eq!(a["kind"], "rotate");
+    assert_eq!(a["rotate"]["name"], "agent_keycloak_svc");
+    assert_eq!(a["rotate"]["collection"], "Ferrowarden managed");
+    assert_eq!(a["rotate"]["length"], 40);
+    assert_eq!(a["rotate"]["charset"], "alphanumeric");
+    assert!(a.get("create").is_none());
+    assert!(a.get("link").is_some());
+}
+
+#[test]
+fn a_rotate_prompt_cleans_what_an_agent_chose() {
+    let mut v = rotate_view();
+    v.rotate.as_mut().unwrap().name = "evil\n{{vault:x}}<b>".into();
+    let n = create_prompt(&v, None);
+    let wire = serde_json::to_string(&n.webhook_body()).unwrap();
+    for bad in ["\n", "{{", "<b>"] {
+        assert!(!n.message.contains(bad), "{bad:?} in {}", n.message);
+        assert!(!wire.contains(bad), "{bad:?} in {wire}");
+    }
+}
+
+#[test]
+fn a_committed_or_aborted_rotation_is_an_opt_in_admin_notice_with_no_value() {
+    let base = |action| {
+        SecurityEvent::new(action)
+            .request(&ctx_from("172.20.0.5"))
+            .key_named("11111111-1111-1111-1111-111111111111", "homelab-claude")
+            .credentials(["agent_keycloak_svc"])
+            .detail("by", "agent")
+    };
+    let commit = base(Action::CredentialRotateCommit);
+    let abort = base(Action::CredentialRotateAbort);
+    assert_eq!(classify(&commit), Some(Class::CredentialRotated));
+    assert_eq!(classify(&abort), Some(Class::RotationAborted));
+    assert_eq!(Class::CredentialRotated.category(), Category::Admin);
+    assert_eq!(Class::RotationAborted.category(), Category::Admin);
+    assert!(!Category::DEFAULT.contains(&Category::Admin));
+    // The start is announced by its approval prompt, not again.
+    assert_eq!(classify(&base(Action::CredentialRotateStart)), None);
+    // A failure is not announced.
+    for e in [&commit, &abort] {
+        let failed = e
+            .clone()
+            .outcome(Outcome::Failure)
+            .reason(Reason::VaultConflict);
+        assert_eq!(classify(&failed), None);
+    }
+
+    let (mut e, _) = engine_with(settings(&[Category::Admin]));
+    let out = e.process(Instant::now(), &commit);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].title, "Ferrowarden: credential rotated");
+    assert!(
+        out[0].message.contains("agent_keycloak_svc was rotated by"),
+        "{}",
+        out[0].message
+    );
+    assert!(
+        out[0].message.contains("No one has seen either"),
+        "{}",
+        out[0].message
+    );
+    // (A new engine: the per-subject limit would hold a second notice back.)
+    let (mut e, _) = engine_with(settings(&[Category::Admin]));
+    let out = e.process(Instant::now(), &abort);
+    assert_eq!(out[0].title, "Ferrowarden: rotation aborted");
+    assert!(
+        out[0].message.contains("password is unchanged"),
+        "{}",
+        out[0].message
+    );
+
+    // An operator's abort has no key: it says so.
+    let by_admin = SecurityEvent::new(Action::CredentialRotateAbort)
+        .request(&ctx_from("172.20.0.5"))
+        .credentials(["agent_keycloak_svc"])
+        .detail("by", "admin");
+    let (mut e, _) = engine_with(settings(&[Category::Admin]));
+    let out = e.process(Instant::now(), &by_admin);
+    assert!(out[0].message.contains("an operator"), "{}", out[0].message);
 }

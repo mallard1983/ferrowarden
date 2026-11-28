@@ -286,6 +286,10 @@ pub fn router(ui: Arc<UiState>) -> Router {
             "/ui/grants/{id}/revoke",
             post(approval_pages::grant_revoke_post),
         )
+        .route(
+            "/ui/rotations/abort",
+            post(approval_pages::rotation_abort_post),
+        )
         // The link in an approval prompt is `<ui.public_url>/approvals/<id>`.
         .route("/approvals", get(approval_pages::alias_list))
         .route("/approvals/{id}", get(approval_pages::alias_detail))

@@ -29,10 +29,13 @@ The store, the prompt, the limits and the decision routes serve two kinds of app
 |---|---|---|
 | `forward` | to use a credential that needs approval (`POST /v1/forward`) | gives a **grant** to the key, for those credentials and that origin, for the minutes the approver chose |
 | `create` | to **create** a credential (`POST /v1/credentials`, [managed-credentials.md](managed-credentials.md)) | allows **exactly one operation**, once: no duration and no grant |
+| `rotate` | to **start rotating** a credential's password (`POST /v1/credentials/{name}/rotate`, [managed-credentials.md](managed-credentials.md#rotating-a-credential)) | allows **exactly one operation**, once: no duration and no grant. Committing or aborting that rotation needs no second approval |
 
-A `create` approval is identified by a fingerprint of the agent key, the credential `name`, the `username`, the sorted `uris`, `generate` (length and character set) and `approval_required`. It is held, approved or denied like a forward (the same `approval.wait_secs`, `pending_ttl_secs`, denial window, reuse of an open approval, and per-key limits, which count both kinds together). An approved create is **consumed** by the first request that matches it: the one that was waiting, or the agent's identical retry within `approval.pending_ttl_secs`. The rest of this page is about forwards unless it says otherwise; the create specifics are on [managed-credentials.md](managed-credentials.md#approval).
+A `create` approval is identified by a fingerprint of the agent key, the credential `name`, the `username`, the sorted `uris`, `generate` (length and character set) and `approval_required`. It is held, approved or denied like a forward (the same `approval.wait_secs`, `pending_ttl_secs`, denial window, reuse of an open approval, and per-key limits, which count both kinds together). An approved create is **consumed** by the first request that matches it: the one that was waiting, or the agent's identical retry within `approval.pending_ttl_secs`. A `rotate` approval is the same machinery: its fingerprint is made of the agent key, the id and name of the vault item, and the generation options, so an approval for one item, key or set of options cannot be used for another. The rest of this page is about forwards unless it says otherwise; the create and rotate specifics are on [managed-credentials.md](managed-credentials.md#approval).
 
 What a create prompt shows: the key, the credential name, the username, the URIs, the character set and length, whether the new item will need approval too, and the managed collection it goes to. There is no value to show (none has been generated yet) and no method, target or URL. In the admin API the approval has `kind: "create"` and a `create` object instead of `method`, `origin` and `url`. The UI approval page has Approve and Deny only.
+
+A rotate prompt shows the key, the credential name, the managed collection it is in, and the length and character set of the new password. The admin API has `kind: "rotate"` and a `rotate` object (`name`, `collection`, `generate`) instead of `method`, `origin` and `url`; approving it takes no body, like a create, and answers `{"status": "approved", "kind": "rotate"}`. In the admin UI the Approvals page also lists the **rotations in progress** (started, not yet committed or aborted) with an **Abort rotation** button, for a rotation whose agent has gone away.
 
 ## Which credentials need approval
 
@@ -99,7 +102,7 @@ Approve, Deny and Revoke are **sensitive actions**, like creating a key: they ne
 | Route | |
 |---|---|
 | `GET /v1/admin/approvals` | the pending approvals and the live grants |
-| `POST /v1/admin/approvals/{id}/approve` | a `forward` approval: body `{ "minutes": N }`, required, 1 to `approval.max_grant_minutes`, strict JSON, no default. A `create` approval: **no body** (or `{}`); a `minutes` there is a `400`. The answer says the `kind` |
+| `POST /v1/admin/approvals/{id}/approve` | a `forward` approval: body `{ "minutes": N }`, required, 1 to `approval.max_grant_minutes`, strict JSON, no default. A `create` or `rotate` approval: **no body** (or `{}`); a `minutes` there is a `400`. The answer says the `kind` |
 | `POST /v1/admin/approvals/{id}/deny` | no body |
 | `DELETE /v1/admin/grants/{id}` | end a grant early |
 
@@ -160,7 +163,7 @@ When Ferrowarden stops, held requests are answered `approval_pending` at once in
 
 ## Events and metrics
 
-Events (never a value): every approval event carries `kind` (`forward` or `create`). `approval_requested` (key, credentials, reasons, method, host, path without query, approval id, expiry, link; for a create, the `create` object instead of the request), `approval_granted` (approver, minutes, grant expiry), `approval_denied` (approver), `approval_expired` (with `cause`: `timeout`, `key_revoke`, `key_policy_change` or `vault_lock`), `grant_revoked` (approver, grant id) and `grant_expired`. The `forward` event has an `approval` detail when the gate ran: `granted_by_grant`, `approved_while_waiting`, `pending`, `denied` or `limit_reached`. See [events.md](events.md).
+Events (never a value): every approval event carries `kind` (`forward`, `create` or `rotate`). `approval_requested` (key, credentials, reasons, method, host, path without query, approval id, expiry, link; for a create, the `create` object instead of the request; for a rotation, the `rotate` object), `approval_granted` (approver, minutes, grant expiry), `approval_denied` (approver), `approval_expired` (with `cause`: `timeout`, `key_revoke`, `key_policy_change` or `vault_lock`), `grant_revoked` (approver, grant id) and `grant_expired`. The `forward` event has an `approval` detail when the gate ran: `granted_by_grant`, `approved_while_waiting`, `pending`, `denied` or `limit_reached`. See [events.md](events.md).
 
 Metrics: `ferrowarden_approval_requests_total{outcome}` (`granted`, `denied`, `expired`, `limit_reached`), `ferrowarden_approvals_pending`, `ferrowarden_approval_grants_active` and `ferrowarden_forward_approval_total{result}`. See [metrics.md](metrics.md).
 
@@ -170,7 +173,7 @@ Metrics: `ferrowarden_approval_requests_total{outcome}` (`granted`, `denied`, `e
 - Revoking the key, or changing its policy (any change): its open approvals and grants are cleared, with the cause.
 - The vault locking: every approval and grant is cleared.
 - A restart: nothing is written to disk.
-- For a `create`: its single use, or `approval.pending_ttl_secs` after it was approved without being used.
+- For a `create` or a `rotate`: its single use, or `approval.pending_ttl_secs` after it was approved without being used.
 - A person revoking a grant (UI or `DELETE /v1/admin/grants/{id}`).
 
 ## What this does not protect against
